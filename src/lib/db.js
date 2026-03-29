@@ -1,0 +1,226 @@
+import { invoke } from '@tauri-apps/api/core';
+import { readDir, readTextFile, writeTextFile, exists, mkdir, remove, BaseDirectory } from '@tauri-apps/plugin-fs';
+import { appDataDir } from '@tauri-apps/api/path';
+
+const SETTINGS_FILE = 'settings.json';
+
+// --- Settings (stored in app data dir as JSON) ---
+
+async function ensureAppDataDir() {
+  const dir = await appDataDir();
+  if (!(await exists(dir))) {
+    await mkdir(dir, { recursive: true });
+  }
+}
+
+export async function getSettings() {
+  await ensureAppDataDir();
+  try {
+    const text = await readTextFile(SETTINGS_FILE, { baseDir: BaseDirectory.AppData });
+    return JSON.parse(text);
+  } catch {
+    return {};
+  }
+}
+
+export async function saveSettings(settings) {
+  await ensureAppDataDir();
+  await writeTextFile(SETTINGS_FILE, JSON.stringify(settings, null, 2), { baseDir: BaseDirectory.AppData });
+}
+
+export async function getProjectsDir() {
+  const settings = await getSettings();
+  return settings.projectsDir || null;
+}
+
+export async function setProjectsDir(dir) {
+  const settings = await getSettings();
+  settings.projectsDir = dir;
+  await saveSettings(settings);
+}
+
+// --- Project listing (scan folder for .iwe files) ---
+
+export async function listProjects() {
+  const dir = await getProjectsDir();
+  if (!dir) return [];
+
+  try {
+    const entries = await readDir(dir);
+    const projects = [];
+
+    for (const entry of entries) {
+      if (entry.name && entry.name.endsWith('.iwe')) {
+        projects.push({
+          filename: entry.name,
+          filepath: `${dir}/${entry.name}`,
+          title: entry.name.replace('.iwe', '')
+        });
+      }
+    }
+
+    return projects.sort((a, b) => a.title.localeCompare(b.title));
+  } catch {
+    return [];
+  }
+}
+
+// --- Project creation ---
+
+export async function createProject(title) {
+  const dir = await getProjectsDir();
+  if (!dir) throw new Error('No projects directory set');
+
+  const filename = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') + '.iwe';
+  const filepath = `${dir}/${filename}`;
+
+  // Open project initializes schema
+  await invoke('open_project', { filepath });
+
+  // Create first chapter
+  await invoke('add_chapter', { title: 'Chapter 1' });
+
+  return filename;
+}
+
+export async function deleteProject(filepath) {
+  await remove(filepath);
+}
+
+// --- Project operations (all via Rust commands) ---
+
+export async function openProject(filepath) {
+  await invoke('open_project', { filepath });
+}
+
+export async function getChapters() {
+  return invoke('get_chapters');
+}
+
+export async function getChapter(id) {
+  return invoke('get_chapter', { id });
+}
+
+export async function addChapter(title) {
+  return invoke('add_chapter', { title });
+}
+
+export async function updateChapterContent(id, content) {
+  return invoke('update_chapter_content', { id, content });
+}
+
+export async function renameChapter(id, title) {
+  return invoke('rename_chapter', { id, title });
+}
+
+export async function deleteChapter(id) {
+  return invoke('delete_chapter', { id });
+}
+
+// --- Entity operations ---
+
+export async function getEntities() {
+  return invoke('get_entities');
+}
+
+export async function createEntity(name, entityType, description = '', color = '') {
+  return invoke('create_entity', { name, entityType, description, color: color || null });
+}
+
+export async function updateEntity(id, name, entityType, description, color) {
+  return invoke('update_entity', { id, name, entityType, description, color });
+}
+
+export async function setEntityVisible(id, visible) {
+  return invoke('set_entity_visible', { id, visible });
+}
+
+export async function deleteEntity(id) {
+  return invoke('delete_entity', { id });
+}
+
+export async function addAlias(entityId, alias) {
+  return invoke('add_alias', { entityId, alias });
+}
+
+export async function removeAlias(entityId, alias) {
+  return invoke('remove_alias', { entityId, alias });
+}
+
+// --- Scanner ---
+
+export async function scanText(html) {
+  return invoke('scan_text', { html });
+}
+
+export async function scanAllChapters() {
+  return invoke('scan_all_chapters');
+}
+
+export async function detectEntities(minCount = 3) {
+  return invoke('detect_entities', { minCount });
+}
+
+export async function addIgnoredWord(word) {
+  return invoke('add_ignored_word', { word });
+}
+
+export async function removeIgnoredWord(word) {
+  return invoke('remove_ignored_word', { word });
+}
+
+// --- Entity notes ---
+
+export async function getEntityNotes(entityId) {
+  return invoke('get_entity_notes', { entityId });
+}
+
+export async function addEntityNote(entityId, chapterId, text) {
+  return invoke('add_entity_note', { entityId, chapterId: chapterId || null, text });
+}
+
+export async function deleteEntityNote(id) {
+  return invoke('delete_entity_note', { id });
+}
+
+export async function textSearch(query, caseSensitive = false, wholeWord = false, useRegex = false, fuzzy = false) {
+  return invoke('text_search', { query, caseSensitive, wholeWord, useRegex, fuzzy });
+}
+
+export async function wordFrequency(minLength = 4, minCount = 2, windowSize = null) {
+  return invoke('word_frequency', { minLength, minCount, windowSize });
+}
+
+export async function findSimilarPhrases(minWords = 5, minSimilarity = 0.6) {
+  return invoke('find_similar_phrases', { minWords, minSimilarity });
+}
+
+export async function dialogueSearch(query, caseSensitive = false, wholeWord = false, useRegex = false, fuzzy = false) {
+  return invoke('dialogue_search', { query, caseSensitive, wholeWord, useRegex, fuzzy });
+}
+
+export async function relationshipSearch(entityAId, entityBId, searchType, maxDistance) {
+  return invoke('relationship_search', { entityAId, entityBId, searchType, maxDistance });
+}
+
+export async function checkWord(word) {
+  return invoke('check_word', { word });
+}
+
+// --- Navigation history ---
+
+export async function getNavHistory() {
+  return invoke('get_nav_history');
+}
+
+export async function pushNavEntry(chapterId, scrollTop, cursorPos) {
+  return invoke('push_nav_entry', { chapterId, scrollTop: scrollTop || 0, cursorPos: cursorPos || 0 });
+}
+
+export async function truncateNavAfter(id) {
+  return invoke('truncate_nav_after', { id });
+}
+
+export async function findReferences(entityId) {
+  return invoke('find_references', { entityId });
+}
