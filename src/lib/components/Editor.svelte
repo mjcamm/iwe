@@ -150,9 +150,14 @@
     if (!editorRaw) return;
     const { text, posMap } = buildTextMap(editorRaw.state.doc);
     scanText(text).then(matches => {
+      console.log(`[scan] found ${matches.length} matches, text length: ${text.length}, posMap length: ${posMap.length}`);
+      if (matches.length > 0) {
+        const sample = matches.slice(0, 5).map(m => `"${m.matched_text}" at ${m.start}-${m.end}`);
+        console.log('[scan] samples:', sample);
+      }
       scanMatches = matches;
       scanPosMap = posMap;
-    }).catch(() => {});
+    }).catch(e => { console.warn('[scan] error:', e); });
   }
 
   // Exported so parent can trigger rescans after entity CRUD

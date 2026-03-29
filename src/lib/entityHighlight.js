@@ -17,9 +17,6 @@ export function buildTextMap(doc) {
         posMap.push(pos + i);
         text += node.text[i];
       }
-    } else if (node.isBlock && text.length > 0 && text[text.length - 1] !== '\n') {
-      text += '\n';
-      posMap.push(-1);
     }
   });
 

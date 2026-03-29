@@ -88,6 +88,44 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
 
         CREATE INDEX IF NOT EXISTS idx_entity_notes_entity ON entity_notes(entity_id);
 
+        CREATE TABLE IF NOT EXISTS entity_free_notes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entity_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+            text TEXT NOT NULL DEFAULT '',
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_entity_free_notes_entity ON entity_free_notes(entity_id);
+
+        CREATE TABLE IF NOT EXISTS writing_activity (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now', 'localtime')),
+            chapter_id INTEGER,
+            chapter_words INTEGER NOT NULL DEFAULT 0,
+            manuscript_words INTEGER NOT NULL DEFAULT 0,
+            words_delta INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_writing_activity_ts ON writing_activity(timestamp);
+
+        CREATE TABLE IF NOT EXISTS daily_stats (
+            date TEXT PRIMARY KEY,
+            words_added INTEGER NOT NULL DEFAULT 0,
+            words_deleted INTEGER NOT NULL DEFAULT 0,
+            net_words INTEGER NOT NULL DEFAULT 0,
+            active_minutes INTEGER NOT NULL DEFAULT 0,
+            chapters_touched TEXT NOT NULL DEFAULT '[]'
+        );
+
+        CREATE TABLE IF NOT EXISTS writing_settings (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            daily_goal INTEGER NOT NULL DEFAULT 1000,
+            session_gap_minutes INTEGER NOT NULL DEFAULT 30
+        );
+
+        INSERT OR IGNORE INTO writing_settings (id) VALUES (1);
+
         CREATE TABLE IF NOT EXISTS nav_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             chapter_id INTEGER NOT NULL,
@@ -115,6 +153,14 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         .is_ok();
     if !has_visible {
         conn.execute_batch("ALTER TABLE entities ADD COLUMN visible INTEGER NOT NULL DEFAULT 1;")?;
+    }
+
+    // Migration: add sort_order to entity_notes if missing
+    let has_note_sort: bool = conn
+        .prepare("SELECT sort_order FROM entity_notes LIMIT 0")
+        .is_ok();
+    if !has_note_sort {
+        conn.execute_batch("ALTER TABLE entity_notes ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0;")?;
     }
 
     Ok(())
@@ -266,9 +312,11 @@ pub fn set_entity_visible(conn: &Connection, id: i64, visible: bool) -> rusqlite
 }
 
 pub fn add_alias(conn: &Connection, entity_id: i64, alias: &str) -> rusqlite::Result<()> {
+    let trimmed = alias.trim();
+    if trimmed.is_empty() { return Ok(()); }
     conn.execute(
         "INSERT INTO aliases (entity_id, alias) VALUES (?1, ?2)",
-        params![entity_id, alias],
+        params![entity_id, trimmed],
     )?;
     Ok(())
 }
@@ -310,12 +358,22 @@ pub struct EntityNote {
     pub entity_id: i64,
     pub chapter_id: Option<i64>,
     pub text: String,
+    pub sort_order: i64,
+    pub created_at: String,
+}
+
+#[derive(Serialize, Clone)]
+pub struct EntityFreeNote {
+    pub id: i64,
+    pub entity_id: i64,
+    pub text: String,
+    pub sort_order: i64,
     pub created_at: String,
 }
 
 pub fn get_entity_notes(conn: &Connection, entity_id: i64) -> rusqlite::Result<Vec<EntityNote>> {
     let mut stmt = conn.prepare(
-        "SELECT n.id, n.entity_id, n.chapter_id, n.text, n.created_at FROM entity_notes n WHERE n.entity_id = ?1 ORDER BY n.created_at DESC"
+        "SELECT n.id, n.entity_id, n.chapter_id, n.text, COALESCE(n.sort_order, 0), n.created_at FROM entity_notes n WHERE n.entity_id = ?1 ORDER BY n.sort_order ASC, n.created_at DESC"
     )?;
     let rows = stmt.query_map(params![entity_id], |row| {
         Ok(EntityNote {
@@ -323,7 +381,8 @@ pub fn get_entity_notes(conn: &Connection, entity_id: i64) -> rusqlite::Result<V
             entity_id: row.get(1)?,
             chapter_id: row.get(2)?,
             text: row.get(3)?,
-            created_at: row.get(4)?,
+            sort_order: row.get(4)?,
+            created_at: row.get(5)?,
         })
     })?;
     rows.collect()
@@ -340,6 +399,294 @@ pub fn add_entity_note(conn: &Connection, entity_id: i64, chapter_id: Option<i64
 pub fn delete_entity_note(conn: &Connection, id: i64) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM entity_notes WHERE id = ?1", params![id])?;
     Ok(())
+}
+
+pub fn reorder_entity_notes(conn: &Connection, ids: &[i64]) -> rusqlite::Result<()> {
+    for (i, id) in ids.iter().enumerate() {
+        conn.execute(
+            "UPDATE entity_notes SET sort_order = ?1 WHERE id = ?2",
+            params![i as i64, id],
+        )?;
+    }
+    Ok(())
+}
+
+// ---- Entity free notes (user-written cards) ----
+
+pub fn get_entity_free_notes(conn: &Connection, entity_id: i64) -> rusqlite::Result<Vec<EntityFreeNote>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, entity_id, text, sort_order, created_at FROM entity_free_notes WHERE entity_id = ?1 ORDER BY sort_order ASC, created_at ASC"
+    )?;
+    let rows = stmt.query_map(params![entity_id], |row| {
+        Ok(EntityFreeNote {
+            id: row.get(0)?,
+            entity_id: row.get(1)?,
+            text: row.get(2)?,
+            sort_order: row.get(3)?,
+            created_at: row.get(4)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn add_entity_free_note(conn: &Connection, entity_id: i64, text: &str) -> rusqlite::Result<i64> {
+    let max_order: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(sort_order), -1) FROM entity_free_notes WHERE entity_id = ?1",
+        params![entity_id], |row| row.get(0),
+    )?;
+    conn.execute(
+        "INSERT INTO entity_free_notes (entity_id, text, sort_order) VALUES (?1, ?2, ?3)",
+        params![entity_id, text, max_order + 1],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn update_entity_free_note(conn: &Connection, id: i64, text: &str) -> rusqlite::Result<()> {
+    conn.execute("UPDATE entity_free_notes SET text = ?1 WHERE id = ?2", params![text, id])?;
+    Ok(())
+}
+
+pub fn delete_entity_free_note(conn: &Connection, id: i64) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM entity_free_notes WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+pub fn reorder_entity_free_notes(conn: &Connection, ids: &[i64]) -> rusqlite::Result<()> {
+    for (i, id) in ids.iter().enumerate() {
+        conn.execute(
+            "UPDATE entity_free_notes SET sort_order = ?1 WHERE id = ?2",
+            params![i as i64, id],
+        )?;
+    }
+    Ok(())
+}
+
+// ---- Writing stats ----
+
+#[derive(Serialize, Clone)]
+pub struct WritingActivity {
+    pub id: i64,
+    pub timestamp: String,
+    pub chapter_id: Option<i64>,
+    pub chapter_words: i64,
+    pub manuscript_words: i64,
+    pub words_delta: i64,
+}
+
+#[derive(Serialize, Clone)]
+pub struct DailyStats {
+    pub date: String,
+    pub words_added: i64,
+    pub words_deleted: i64,
+    pub net_words: i64,
+    pub active_minutes: i64,
+    pub chapters_touched: String,
+}
+
+#[derive(Serialize, Clone)]
+pub struct WritingSettings {
+    pub daily_goal: i64,
+    pub session_gap_minutes: i64,
+}
+
+pub fn log_writing_activity(conn: &Connection, chapter_id: Option<i64>, chapter_words: i64, manuscript_words: i64, words_delta: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO writing_activity (chapter_id, chapter_words, manuscript_words, words_delta) VALUES (?1, ?2, ?3, ?4)",
+        params![chapter_id, chapter_words, manuscript_words, words_delta],
+    )?;
+
+    // Update daily stats
+    let today: String = conn.query_row(
+        "SELECT strftime('%Y-%m-%d', 'now', 'localtime')", [], |row| row.get(0)
+    )?;
+
+    let added = if words_delta > 0 { words_delta } else { 0 };
+    let deleted = if words_delta < 0 { -words_delta } else { 0 };
+
+    conn.execute(
+        "INSERT INTO daily_stats (date, words_added, words_deleted, net_words, active_minutes, chapters_touched)
+         VALUES (?1, ?2, ?3, ?4, 0, '[]')
+         ON CONFLICT(date) DO UPDATE SET
+           words_added = words_added + ?2,
+           words_deleted = words_deleted + ?3,
+           net_words = net_words + ?4",
+        params![today, added, deleted, words_delta],
+    )?;
+
+    // Update active minutes: check time since last activity
+    let last_ts: Option<String> = conn.query_row(
+        "SELECT timestamp FROM writing_activity WHERE id != last_insert_rowid() ORDER BY id DESC LIMIT 1",
+        [], |row| row.get(0)
+    ).ok();
+
+    if let Some(last) = last_ts {
+        // Parse timestamps and compute gap
+        let gap_secs: Option<i64> = conn.query_row(
+            "SELECT CAST((julianday('now', 'localtime') - julianday(?1)) * 86400 AS INTEGER)",
+            params![last], |row| row.get(0)
+        ).ok();
+
+        if let Some(gap) = gap_secs {
+            let settings = get_writing_settings(conn)?;
+            let max_gap = settings.session_gap_minutes * 60;
+            if gap > 0 && gap < max_gap {
+                let minutes = (gap + 30) / 60; // round to nearest minute
+                conn.execute(
+                    "UPDATE daily_stats SET active_minutes = active_minutes + ?1 WHERE date = ?2",
+                    params![minutes.max(1), today],
+                )?;
+            }
+        }
+    }
+
+    // Update chapters touched
+    if let Some(ch_id) = chapter_id {
+        let current: String = conn.query_row(
+            "SELECT chapters_touched FROM daily_stats WHERE date = ?1",
+            params![today], |row| row.get(0)
+        ).unwrap_or_else(|_| "[]".to_string());
+
+        let ch_str = ch_id.to_string();
+        if !current.contains(&ch_str) {
+            let updated = if current == "[]" {
+                format!("[{}]", ch_id)
+            } else {
+                format!("{}, {}]", &current[..current.len()-1], ch_id)
+            };
+            conn.execute(
+                "UPDATE daily_stats SET chapters_touched = ?1 WHERE date = ?2",
+                params![updated, today],
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+pub fn get_daily_stats(conn: &Connection, days: i64) -> rusqlite::Result<Vec<DailyStats>> {
+    let mut stmt = conn.prepare(
+        "SELECT date, words_added, words_deleted, net_words, active_minutes, chapters_touched
+         FROM daily_stats
+         WHERE date >= date('now', 'localtime', ?1)
+         ORDER BY date ASC"
+    )?;
+    let offset = format!("-{} days", days);
+    let rows = stmt.query_map(params![offset], |row| {
+        Ok(DailyStats {
+            date: row.get(0)?,
+            words_added: row.get(1)?,
+            words_deleted: row.get(2)?,
+            net_words: row.get(3)?,
+            active_minutes: row.get(4)?,
+            chapters_touched: row.get(5)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn get_all_daily_stats(conn: &Connection) -> rusqlite::Result<Vec<DailyStats>> {
+    let mut stmt = conn.prepare(
+        "SELECT date, words_added, words_deleted, net_words, active_minutes, chapters_touched
+         FROM daily_stats ORDER BY date ASC"
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(DailyStats {
+            date: row.get(0)?,
+            words_added: row.get(1)?,
+            words_deleted: row.get(2)?,
+            net_words: row.get(3)?,
+            active_minutes: row.get(4)?,
+            chapters_touched: row.get(5)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn get_writing_settings(conn: &Connection) -> rusqlite::Result<WritingSettings> {
+    conn.query_row(
+        "SELECT daily_goal, session_gap_minutes FROM writing_settings WHERE id = 1",
+        [], |row| Ok(WritingSettings {
+            daily_goal: row.get(0)?,
+            session_gap_minutes: row.get(1)?,
+        })
+    )
+}
+
+pub fn update_writing_settings(conn: &Connection, daily_goal: i64, session_gap_minutes: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE writing_settings SET daily_goal = ?1, session_gap_minutes = ?2 WHERE id = 1",
+        params![daily_goal, session_gap_minutes],
+    )?;
+    Ok(())
+}
+
+pub fn get_writing_activity(conn: &Connection, date: &str) -> rusqlite::Result<Vec<WritingActivity>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, timestamp, chapter_id, chapter_words, manuscript_words, words_delta
+         FROM writing_activity
+         WHERE timestamp LIKE ?1
+         ORDER BY timestamp ASC"
+    )?;
+    let pattern = format!("{}%", date);
+    let rows = stmt.query_map(params![pattern], |row| {
+        Ok(WritingActivity {
+            id: row.get(0)?,
+            timestamp: row.get(1)?,
+            chapter_id: row.get(2)?,
+            chapter_words: row.get(3)?,
+            manuscript_words: row.get(4)?,
+            words_delta: row.get(5)?,
+        })
+    })?;
+    rows.collect()
+}
+
+#[derive(Serialize, Clone)]
+pub struct HourlyStats {
+    pub hour: i64,
+    pub words_added: i64,
+    pub words_deleted: i64,
+    pub net_words: i64,
+    pub events: i64,
+}
+
+pub fn get_hourly_breakdown(conn: &Connection, date: &str) -> rusqlite::Result<Vec<HourlyStats>> {
+    let mut stmt = conn.prepare(
+        "SELECT CAST(strftime('%H', timestamp) AS INTEGER) as hour,
+                SUM(CASE WHEN words_delta > 0 THEN words_delta ELSE 0 END) as added,
+                SUM(CASE WHEN words_delta < 0 THEN -words_delta ELSE 0 END) as deleted,
+                SUM(words_delta) as net,
+                COUNT(*) as events
+         FROM writing_activity
+         WHERE timestamp LIKE ?1
+         GROUP BY hour
+         ORDER BY hour ASC"
+    )?;
+    let pattern = format!("{}%", date);
+    let rows = stmt.query_map(params![pattern], |row| {
+        Ok(HourlyStats {
+            hour: row.get(0)?,
+            words_added: row.get(1)?,
+            words_deleted: row.get(2)?,
+            net_words: row.get(3)?,
+            events: row.get(4)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn get_manuscript_word_history(conn: &Connection) -> rusqlite::Result<Vec<(String, i64)>> {
+    // Get the last activity per day to track manuscript growth
+    let mut stmt = conn.prepare(
+        "SELECT date(timestamp) as d, manuscript_words
+         FROM writing_activity
+         WHERE id IN (SELECT MAX(id) FROM writing_activity GROUP BY date(timestamp))
+         ORDER BY d ASC"
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    rows.collect()
 }
 
 // ---- Navigation history ----

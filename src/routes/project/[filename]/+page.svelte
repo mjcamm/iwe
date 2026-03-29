@@ -1,11 +1,14 @@
 <script>
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
-  import { getProjectsDir, getSettings, saveSettings, openProject, getChapters, getChapter, addChapter, updateChapterContent, renameChapter, deleteChapter, getEntities, createEntity, updateEntity, deleteEntity, setEntityVisible, addAlias, removeAlias, scanAllChapters, getNavHistory, pushNavEntry, truncateNavAfter, addEntityNote } from '$lib/db.js';
+  import { getProjectsDir, getSettings, saveSettings, openProject, getChapters, getChapter, addChapter, updateChapterContent, renameChapter, deleteChapter, getEntities, createEntity, updateEntity, deleteEntity, setEntityVisible, addAlias, removeAlias, scanAllChapters, getNavHistory, pushNavEntry, truncateNavAfter, addEntityNote, logWritingActivity } from '$lib/db.js';
   import ChapterNav from '$lib/components/ChapterNav.svelte';
   import Editor from '$lib/components/Editor.svelte';
   import EntityPanel from '$lib/components/EntityPanel.svelte';
   import Toasts from '$lib/components/Toasts.svelte';
+  import { buildTextMap } from '$lib/entityHighlight.js';
+  import { exportDocx, exportTxt, exportHtml, exportPdf } from '$lib/export.js';
+  import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
   import SearchPanel from '$lib/components/SearchPanel.svelte';
   import AnalysisPanel from '$lib/components/AnalysisPanel.svelte';
   import { addToast } from '$lib/toast.js';
@@ -18,6 +21,7 @@
   let activeTabId = $state(null);
   let activeChapter = $state(null);
   let saveTimer = null;
+  let lastKnownWordCounts = {}; // chapterId -> word count, for tracking deltas
   let entities = $state([]);
   let selectedText = $state('');
   let lastSelectedText = ''; // persists even after selection clears (for pinning)
@@ -148,6 +152,11 @@
     entities = await getEntities();
     refreshChapterCounts();
 
+    // Initialize word count tracking
+    for (const ch of chapters) {
+      lastKnownWordCounts[ch.id] = wordCount(ch.content);
+    }
+
     // Load nav history
     navHistory = await getNavHistory();
     navIndex = navHistory.length > 0 ? navHistory.length - 1 : -1;
@@ -208,109 +217,147 @@
 
   let pendingEntityName = $state(null);
 
+  let showExportMenu = $state(false);
+
+  async function handleExport(format) {
+    showExportMenu = false;
+    try {
+      let path;
+      if (format === 'docx') path = await exportDocx(chapters, projectTitle);
+      else if (format === 'txt') path = await exportTxt(chapters, projectTitle);
+      else if (format === 'html') path = await exportHtml(chapters, projectTitle);
+      else if (format === 'pdf-a4') path = await exportPdf(chapters, projectTitle, 'a4');
+      else if (format === 'pdf-book') path = await exportPdf(chapters, projectTitle, 'book');
+      if (path) addToast(`Exported to ${path.split(/[/\\]/).pop()}`, 'success');
+    } catch (e) {
+      console.error('Export failed:', e);
+      addToast('Export failed: ' + e, 'error');
+    }
+  }
+
+  function launchWritingStats() {
+    try {
+      new WebviewWindow('stats-' + Date.now(), {
+        url: '/stats',
+        title: 'Writing Stats',
+        width: 1100,
+        height: 800,
+        resizable: true,
+      });
+    } catch (e) { console.error('Failed to open stats:', e); }
+  }
+
   function handleQuickAdd(word) {
     pendingEntityName = word;
   }
 
   /**
-   * Universal jump-to-position. Used by EVERYTHING — find refs, search, analysis, etc.
-   * Works by extracting plain words from the anchor/searchText and finding the
-   * word sequence in the ProseMirror doc. No string matching on raw text.
+   * Universal jump-to-position. Used by EVERYTHING.
+   *
+   * @param chapterId - which chapter to open
+   * @param searchText - the word/phrase to highlight
+   * @param anchorOrPosition - either a char_position (number) from Rust, or an anchor string (legacy)
    */
-  async function handleGoToChapter(chapterId, searchText, anchor) {
+  async function handleGoToChapter(chapterId, searchText, anchorOrPosition) {
     await pushNavCheckpoint(true);
     await selectChapter(chapterId);
     setTimeout(() => {
       const ed = editorRef?.getEditor();
       if (!ed) return;
 
-      // Build word list from the PM doc with positions
-      const docWords = [];
-      ed.state.doc.descendants((node, pos) => {
-        if (!node.isText) return;
-        const re = /[a-zA-Z0-9\u00C0-\u024F']+/g;
-        let m;
-        while ((m = re.exec(node.text)) !== null) {
-          docWords.push({ word: m[0].toLowerCase(), pos: pos + m.index, len: m[0].length });
+      let pmFrom = null;
+      let pmTo = null;
+
+      // If anchorOrPosition is a number, use it as char_position (from Rust scanner)
+      if (typeof anchorOrPosition === 'number') {
+        const { text, posMap } = buildTextMap(ed.state.doc);
+        const charPos = anchorOrPosition;
+        const matchLen = searchText ? searchText.length : 1;
+
+        if (charPos < posMap.length && posMap[charPos] >= 0) {
+          pmFrom = posMap[charPos];
+          const endCharPos = charPos + matchLen - 1;
+          pmTo = endCharPos < posMap.length && posMap[endCharPos] >= 0
+            ? posMap[endCharPos] + 1
+            : pmFrom + matchLen;
         }
-      });
-
-      if (docWords.length === 0) return;
-
-      // Extract clean words from anchor or searchText
-      function toWords(text) {
-        if (!text) return [];
-        return text.replace(/[^a-zA-Z0-9\u00C0-\u024F'\s]/g, ' ')
-          .trim().split(/\s+/)
-          .filter(w => w.length > 0)
-          .map(w => w.toLowerCase());
       }
 
-      // Try to find word sequence in docWords
-      function findSequence(words) {
-        if (words.length === 0) return -1;
-        for (let i = 0; i <= docWords.length - words.length; i++) {
-          let match = true;
-          for (let j = 0; j < words.length; j++) {
-            if (docWords[i + j].word !== words[j]) { match = false; break; }
+      // Fallback: word-sequence search (for anchors and legacy callers)
+      if (pmFrom === null) {
+        const docWords = [];
+        ed.state.doc.descendants((node, pos) => {
+          if (!node.isText) return;
+          const re = /[a-zA-Z0-9\u00C0-\u024F']+/g;
+          let m;
+          while ((m = re.exec(node.text)) !== null) {
+            docWords.push({ word: m[0].toLowerCase(), pos: pos + m.index, len: m[0].length });
           }
-          if (match) return i;
+        });
+
+        function toWords(text) {
+          if (!text) return [];
+          return text.replace(/[^a-zA-Z0-9\u00C0-\u024F'\s]/g, ' ')
+            .trim().split(/\s+/).filter(w => w.length > 0).map(w => w.toLowerCase());
         }
-        return -1;
-      }
 
-      let startDocIdx = -1;
-      let endDocIdx = -1;
+        function findSequence(words) {
+          if (words.length === 0) return -1;
+          for (let i = 0; i <= docWords.length - words.length; i++) {
+            let match = true;
+            for (let j = 0; j < words.length; j++) {
+              if (docWords[i + j].word !== words[j]) { match = false; break; }
+            }
+            if (match) return i;
+          }
+          return -1;
+        }
 
-      // Strategy 1: find the full anchor word sequence
-      if (anchor) {
-        const anchorW = toWords(anchor);
-        if (anchorW.length >= 2) {
-          startDocIdx = findSequence(anchorW);
-          if (startDocIdx >= 0) {
-            endDocIdx = startDocIdx + anchorW.length - 1;
+        // Try anchor words, then searchText words, then first word
+        const attempts = [
+          anchorOrPosition ? toWords(String(anchorOrPosition)) : [],
+          searchText ? toWords(searchText) : [],
+        ].filter(a => a.length > 0);
+
+        for (const words of attempts) {
+          const idx = findSequence(words);
+          if (idx >= 0) {
+            pmFrom = docWords[idx].pos;
+            const last = docWords[idx + words.length - 1];
+            pmTo = last.pos + last.len;
+            break;
+          }
+        }
+
+        // Last resort: find first word
+        if (pmFrom === null && searchText) {
+          const firstWord = toWords(searchText)[0];
+          if (firstWord) {
+            const idx = docWords.findIndex(dw => dw.word === firstWord);
+            if (idx >= 0) {
+              pmFrom = docWords[idx].pos;
+              pmTo = pmFrom + docWords[idx].len;
+            }
           }
         }
       }
 
-      // Strategy 2: find the searchText word sequence
-      if (startDocIdx < 0 && searchText) {
-        const searchW = toWords(searchText);
-        if (searchW.length >= 1) {
-          startDocIdx = findSequence(searchW);
-          if (startDocIdx >= 0) {
-            endDocIdx = startDocIdx + searchW.length - 1;
-          }
-        }
-      }
-
-      // Strategy 3: find just the first word of searchText
-      if (startDocIdx < 0 && searchText) {
-        const firstWord = toWords(searchText)[0];
-        if (firstWord) {
-          startDocIdx = docWords.findIndex(dw => dw.word === firstWord);
-          endDocIdx = startDocIdx;
-        }
-      }
-
-      if (startDocIdx < 0) return;
-
-      const pmFrom = docWords[startDocIdx].pos;
-      const lastWord = docWords[endDocIdx];
-      const pmTo = lastWord.pos + lastWord.len;
+      if (pmFrom === null) return;
 
       ed.chain().focus().setTextSelection({ from: pmFrom, to: pmTo }).run();
 
-      const coords = ed.view.coordsAtPos(pmFrom);
-      const scrollEl = document.querySelector('.editor-scroll');
-      if (scrollEl) {
-        const scrollRect = scrollEl.getBoundingClientRect();
-        const targetScroll = scrollEl.scrollTop + (coords.top - scrollRect.top) - (scrollRect.height / 2);
-        const maxScroll = scrollEl.scrollHeight - scrollEl.clientHeight;
-        scrollEl.scrollTo({ top: Math.max(0, Math.min(targetScroll, maxScroll)), behavior: 'smooth' });
-      }
-
-      flashJumpHighlight(ed, pmFrom, pmTo);
+      // Delay scroll to after decoration transactions settle
+      setTimeout(() => {
+        const coords = ed.view.coordsAtPos(pmFrom);
+        const scrollEl = document.querySelector('.editor-scroll');
+        if (scrollEl) {
+          const scrollRect = scrollEl.getBoundingClientRect();
+          const targetScroll = scrollEl.scrollTop + (coords.top - scrollRect.top) - (scrollRect.height / 2);
+          const maxScroll = scrollEl.scrollHeight - scrollEl.clientHeight;
+          scrollEl.scrollTo({ top: Math.max(0, Math.min(targetScroll, maxScroll)), behavior: 'smooth' });
+        }
+        flashJumpHighlight(ed, pmFrom, pmTo);
+      }, 100);
     }, 250);
   }
 
@@ -485,6 +532,21 @@
     saveTimer = setTimeout(() => {
       updateChapterContent(activeChapter.id, content);
       refreshChapterCounts();
+
+      // Track writing activity
+      const currentWords = wordCount(content);
+      const lastWords = lastKnownWordCounts[activeChapter.id] || 0;
+      const delta = currentWords - lastWords;
+      lastKnownWordCounts[activeChapter.id] = currentWords;
+
+      if (delta !== 0) {
+        const manuscriptTotal = chapters.reduce((sum, ch) => {
+          if (ch.id === activeChapter.id) return sum + currentWords;
+          return sum + wordCount(ch.content);
+        }, 0);
+        console.log(`[stats] logging: chapter=${activeChapter.id} words=${currentWords} manuscript=${manuscriptTotal} delta=${delta}`);
+        logWritingActivity(activeChapter.id, currentWords, manuscriptTotal, delta).catch(e => console.error('[stats] log failed:', e));
+      }
     }, 500);
   }
 
@@ -506,6 +568,34 @@
     <a href="/" class="toolbar-back" title="Back to manuscripts">&larr;</a>
     <span class="toolbar-sep"></span>
     <span class="toolbar-title">{projectTitle}</span>
+    <span class="toolbar-spacer"></span>
+    <div class="export-wrap">
+      <button class="stats-btn" onclick={() => showExportMenu = !showExportMenu} title="Export manuscript">
+        <i class="bi bi-download"></i> Export
+      </button>
+      {#if showExportMenu}
+        <div class="export-menu">
+          <button class="export-option" onclick={() => handleExport('docx')}>
+            <i class="bi bi-file-earmark-word"></i> Word (.docx)
+          </button>
+          <button class="export-option" onclick={() => handleExport('pdf-a4')}>
+            <i class="bi bi-file-earmark-pdf"></i> PDF — A4
+          </button>
+          <button class="export-option" onclick={() => handleExport('pdf-book')}>
+            <i class="bi bi-book"></i> PDF — Book (5"×8")
+          </button>
+          <button class="export-option" onclick={() => handleExport('html')}>
+            <i class="bi bi-filetype-html"></i> HTML (.html)
+          </button>
+          <button class="export-option" onclick={() => handleExport('txt')}>
+            <i class="bi bi-file-earmark-text"></i> Plain Text (.txt)
+          </button>
+        </div>
+      {/if}
+    </div>
+    <button class="stats-btn" onclick={launchWritingStats} title="Writing Stats">
+      <i class="bi bi-graph-up"></i> Stats
+    </button>
     <span class="toolbar-spacer"></span>
     <button class="nav-btn" disabled={!canGoBack} onclick={navBack} title="Go back">
       <i class="bi bi-chevron-left"></i>
@@ -644,6 +734,35 @@
     color: var(--iwe-text); font-weight: 400;
   }
   .toolbar-spacer { flex: 1; }
+  .stats-btn {
+    font-family: var(--iwe-font-ui); font-size: 0.8rem;
+    padding: 0.3rem 0.7rem; border: 1px solid var(--iwe-border);
+    border-radius: var(--iwe-radius-sm); cursor: pointer;
+    background: none; color: var(--iwe-text-muted);
+    display: inline-flex; align-items: center; gap: 0.3rem;
+    transition: all 150ms;
+  }
+  .stats-btn:hover { border-color: var(--iwe-accent); color: var(--iwe-accent); }
+
+  .export-wrap { position: relative; }
+  .export-menu {
+    position: absolute; top: 100%; left: 50%; transform: translateX(-50%);
+    margin-top: 4px; z-index: 100;
+    background: var(--iwe-bg); border: 1px solid var(--iwe-border);
+    border-radius: var(--iwe-radius); padding: 0.3rem;
+    box-shadow: 0 6px 20px rgba(0,0,0,0.08);
+    display: flex; flex-direction: column; gap: 2px;
+    min-width: 170px;
+  }
+  .export-option {
+    display: flex; align-items: center; gap: 0.5rem;
+    font-family: var(--iwe-font-ui); font-size: 0.8rem;
+    padding: 0.4rem 0.6rem; border: none; border-radius: var(--iwe-radius-sm);
+    background: none; color: var(--iwe-text); cursor: pointer;
+    text-align: left; transition: background 100ms;
+  }
+  .export-option:hover { background: var(--iwe-bg-hover); }
+  .export-option i { font-size: 1rem; color: var(--iwe-text-muted); }
   .nav-btn {
     background: none; border: 1px solid var(--iwe-border);
     border-radius: var(--iwe-radius-sm); cursor: pointer;

@@ -135,6 +135,106 @@ fn delete_entity_note(state: tauri::State<'_, AppState>, id: i64) -> Result<(), 
     db::delete_entity_note(conn, id).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn reorder_entity_notes(state: tauri::State<'_, AppState>, ids: Vec<i64>) -> Result<(), String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::reorder_entity_notes(conn, &ids).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_entity_free_notes(state: tauri::State<'_, AppState>, entity_id: i64) -> Result<Vec<db::EntityFreeNote>, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::get_entity_free_notes(conn, entity_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn add_entity_free_note(state: tauri::State<'_, AppState>, entity_id: i64, text: String) -> Result<i64, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::add_entity_free_note(conn, entity_id, &text).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn update_entity_free_note(state: tauri::State<'_, AppState>, id: i64, text: String) -> Result<(), String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::update_entity_free_note(conn, id, &text).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_entity_free_note(state: tauri::State<'_, AppState>, id: i64) -> Result<(), String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::delete_entity_free_note(conn, id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn reorder_entity_free_notes(state: tauri::State<'_, AppState>, ids: Vec<i64>) -> Result<(), String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::reorder_entity_free_notes(conn, &ids).map_err(|e| e.to_string())
+}
+
+// ---- Writing stats ----
+
+#[tauri::command]
+fn log_writing_activity(state: tauri::State<'_, AppState>, chapter_id: Option<i64>, chapter_words: i64, manuscript_words: i64, words_delta: i64) -> Result<(), String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::log_writing_activity(conn, chapter_id, chapter_words, manuscript_words, words_delta).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_daily_stats(state: tauri::State<'_, AppState>, days: i64) -> Result<Vec<db::DailyStats>, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::get_daily_stats(conn, days).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_all_daily_stats(state: tauri::State<'_, AppState>) -> Result<Vec<db::DailyStats>, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::get_all_daily_stats(conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_writing_settings(state: tauri::State<'_, AppState>) -> Result<db::WritingSettings, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::get_writing_settings(conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn update_writing_settings(state: tauri::State<'_, AppState>, daily_goal: i64, session_gap_minutes: i64) -> Result<(), String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::update_writing_settings(conn, daily_goal, session_gap_minutes).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_writing_activity(state: tauri::State<'_, AppState>, date: String) -> Result<Vec<db::WritingActivity>, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::get_writing_activity(conn, &date).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_manuscript_word_history(state: tauri::State<'_, AppState>) -> Result<Vec<(String, i64)>, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::get_manuscript_word_history(conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_hourly_breakdown(state: tauri::State<'_, AppState>, date: String) -> Result<Vec<db::HourlyStats>, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::get_hourly_breakdown(conn, &date).map_err(|e| e.to_string())
+}
+
 // ---- Navigation history ----
 
 #[tauri::command]
@@ -156,6 +256,171 @@ fn truncate_nav_after(state: tauri::State<'_, AppState>, id: i64) -> Result<(), 
     let guard = state.db.lock().map_err(|e| e.to_string())?;
     let conn = guard.as_ref().ok_or("No project open")?;
     db::truncate_nav_after(conn, id).map_err(|e| e.to_string())
+}
+
+// ---- PDF export ----
+
+fn strip_html_to_text(html: &str) -> String {
+    html.replace("<br>", "\n")
+        .replace("<br/>", "\n")
+        .replace("<br />", "\n")
+        .replace("</p>", "\n\n")
+        .replace("</h1>", "\n\n")
+        .replace("</h2>", "\n\n")
+        .replace("</h3>", "\n\n")
+        .replace("<hr>", "\n\n* * *\n\n")
+        .replace("<hr/>", "\n\n* * *\n\n")
+        .replace("</li>", "\n")
+        .replace("</blockquote>", "\n")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&nbsp;", " ")
+        .split('<')
+        .map(|s| s.split_once('>').map(|(_, rest)| rest).unwrap_or(s))
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+#[tauri::command]
+fn export_pdf(state: tauri::State<'_, AppState>, path: String, title: String, format: String) -> Result<(), String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    let chapters = db::list_chapters(conn).map_err(|e| e.to_string())?;
+
+    let is_book = format == "book";
+
+    // Embedded Liberation Serif fonts — bundled in the binary, full Unicode support
+    let regular = genpdf::fonts::FontData::new(
+        include_bytes!("../fonts/LiberationSerif-Regular.ttf").to_vec(),
+        None,
+    ).map_err(|e| format!("Font error: {}", e))?;
+    let bold = genpdf::fonts::FontData::new(
+        include_bytes!("../fonts/LiberationSerif-Bold.ttf").to_vec(),
+        None,
+    ).map_err(|e| format!("Font error: {}", e))?;
+    let italic = genpdf::fonts::FontData::new(
+        include_bytes!("../fonts/LiberationSerif-Italic.ttf").to_vec(),
+        None,
+    ).map_err(|e| format!("Font error: {}", e))?;
+    let bold_italic = genpdf::fonts::FontData::new(
+        include_bytes!("../fonts/LiberationSerif-BoldItalic.ttf").to_vec(),
+        None,
+    ).map_err(|e| format!("Font error: {}", e))?;
+
+    let font_family = genpdf::fonts::FontFamily {
+        regular,
+        bold,
+        italic,
+        bold_italic,
+    };
+    let mut doc = genpdf::Document::new(font_family);
+
+    // Page setup
+    let page_size = if is_book {
+        genpdf::Size::new(127, 203) // 5x8 inches in mm
+    } else {
+        genpdf::Size::new(210, 297) // A4
+    };
+
+    struct NumberedPageDecorator {
+        margins: genpdf::Margins,
+        page: usize,
+    }
+
+    impl genpdf::PageDecorator for NumberedPageDecorator {
+        fn decorate_page<'a>(
+            &mut self,
+            context: &genpdf::Context,
+            mut area: genpdf::render::Area<'a>,
+            style: genpdf::style::Style,
+        ) -> Result<genpdf::render::Area<'a>, genpdf::error::Error> {
+            self.page += 1;
+            area.add_margins(self.margins);
+
+            // Render page number at bottom (skip page 1 = title page)
+            if self.page > 1 {
+                // Shrink content area to leave room for footer
+                let footer_height = genpdf::Mm::from(8);
+                let content_height = area.size().height - footer_height;
+
+                // Print footer at the bottom
+                let mut footer_area = area.clone();
+                footer_area.add_offset(genpdf::Position::new(0, content_height));
+                let page_str = format!("{}", self.page - 1);
+                let mut para = genpdf::elements::Paragraph::new(&page_str);
+                para.set_alignment(genpdf::Alignment::Center);
+                use genpdf::Element;
+                para.render(context, footer_area, style.with_font_size(9))?;
+
+                // Reduce content area so text doesn't overlap footer
+                area.set_height(content_height);
+            }
+
+            Ok(area)
+        }
+    }
+
+    let margins = if is_book {
+        genpdf::Margins::trbl(15, 12, 20, 12)
+    } else {
+        genpdf::Margins::trbl(25, 25, 30, 25)
+    };
+
+    doc.set_paper_size(page_size);
+    doc.set_page_decorator(NumberedPageDecorator { margins, page: 0 });
+    doc.set_font_size(if is_book { 10 } else { 12 });
+    doc.set_line_spacing(1.5);
+    doc.set_title(&title);
+
+    // Title page
+    doc.push(genpdf::elements::Break::new(5.0));
+    let mut title_para = genpdf::elements::Paragraph::new("");
+    title_para.push(genpdf::style::StyledString::new(
+        &title,
+        genpdf::style::Style::new().bold().with_font_size(if is_book { 18 } else { 24 }),
+    ));
+    title_para.set_alignment(genpdf::Alignment::Center);
+    doc.push(title_para);
+    doc.push(genpdf::elements::Break::new(20.0));
+    doc.push(genpdf::elements::PageBreak::new());
+
+    // Chapters
+    for chapter in &chapters {
+        // Chapter title
+        let mut ch_title = genpdf::elements::Paragraph::new("");
+        ch_title.push(genpdf::style::StyledString::new(
+            &chapter.title,
+            genpdf::style::Style::new().bold().with_font_size(if is_book { 14 } else { 16 }),
+        ));
+        ch_title.set_alignment(genpdf::Alignment::Center);
+        doc.push(ch_title);
+        doc.push(genpdf::elements::Break::new(1.0));
+
+        // Chapter content
+        let plain = strip_html_to_text(&chapter.content);
+        for paragraph in plain.split("\n\n") {
+            let trimmed = paragraph.trim();
+            if trimmed.is_empty() { continue; }
+            if trimmed == "* * *" {
+                let mut sep = genpdf::elements::Paragraph::new("* * *");
+                sep.set_alignment(genpdf::Alignment::Center);
+                doc.push(genpdf::elements::Break::new(0.5));
+                doc.push(sep);
+                doc.push(genpdf::elements::Break::new(0.5));
+            } else {
+                doc.push(genpdf::elements::Paragraph::new(trimmed));
+            }
+        }
+
+        doc.push(genpdf::elements::PageBreak::new());
+    }
+
+    doc.render_to_file(&path).map_err(|e| e.to_string())?;
+
+    Ok(())
 }
 
 // ---- Ignored words ----
@@ -200,9 +465,24 @@ pub fn run() {
             get_entity_notes,
             add_entity_note,
             delete_entity_note,
+            reorder_entity_notes,
+            get_entity_free_notes,
+            add_entity_free_note,
+            update_entity_free_note,
+            delete_entity_free_note,
+            reorder_entity_free_notes,
+            log_writing_activity,
+            get_daily_stats,
+            get_all_daily_stats,
+            get_writing_settings,
+            update_writing_settings,
+            get_writing_activity,
+            get_hourly_breakdown,
+            get_manuscript_word_history,
             get_nav_history,
             push_nav_entry,
             truncate_nav_after,
+            export_pdf,
             add_ignored_word,
             remove_ignored_word,
             remove_alias,
@@ -210,12 +490,15 @@ pub fn run() {
             scanner::scan_all_chapters,
             scanner::detect_entities,
             scanner::check_word,
+            scanner::debug_search_terms,
             scanner::find_references,
             scanner::relationship_search,
             scanner::text_search,
             scanner::dialogue_search,
             scanner::word_frequency,
             scanner::find_similar_phrases,
+            scanner::generate_heatmap,
+            scanner::chapter_analysis,
         ])
         .setup(|app| {
             if cfg!(debug_assertions) {

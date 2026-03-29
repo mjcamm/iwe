@@ -1,36 +1,74 @@
 <script>
-  import { wordFrequency, findSimilarPhrases } from '$lib/db.js';
+  import { wordFrequency, findSimilarPhrases, textSearch } from '$lib/db.js';
+  import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 
   let { ongotochapter, entities = [] } = $props();
 
-  let subTab = $state('repetition');
+  let subTab = $state('frequency');
 
-  // ---- Repetition finder state ----
-  let minLength = $state(4);
-  let minCount = $state(3);
+  // ---- Shared exclude state ----
   let excludeCharacters = $state(true);
   let excludePlaces = $state(true);
   let excludeThings = $state(true);
-  let useWindow = $state(false);
-  let windowSize = $state(100);
-  let results = $state(null);
-  let loading = $state(false);
-  let expandedWord = $state(null);
-  let filterText = $state('');
 
-  async function runAnalysis() {
-    loading = true;
+  // ---- Frequency finder state ----
+  let freqMinLength = $state(4);
+  let freqMinCount = $state(3);
+  let freqResults = $state(null);
+  let freqLoading = $state(false);
+  let freqExpanded = $state(null);
+  let freqFilter = $state('');
+  let freqOccurrences = $state(null); // search results for expanded word
+  let freqOccIdx = $state(0);
+  let freqOccLoading = $state(false);
+
+  // ---- Cluster finder state ----
+  let clusterMinLength = $state(4);
+  let clusterMinCount = $state(3);
+  let clusterWindowSize = $state(100);
+  let clusterResults = $state(null);
+  let clusterLoading = $state(false);
+  let clusterExpanded = $state(null);
+  let clusterFilter = $state('');
+
+  async function expandFreqWord(word) {
+    if (freqExpanded === word) {
+      freqExpanded = null;
+      freqOccurrences = null;
+      return;
+    }
+    freqExpanded = word;
+    freqOccIdx = 0;
+    freqOccLoading = true;
     try {
-      results = await wordFrequency(
-        minLength,
-        minCount,
-        useWindow ? windowSize : null
-      );
+      const result = await textSearch(word, false, true, false, false); // whole word match
+      freqOccurrences = result.results || [];
+    } catch {
+      freqOccurrences = [];
+    }
+    freqOccLoading = false;
+  }
+
+  async function runFrequency() {
+    freqLoading = true;
+    try {
+      freqResults = await wordFrequency(freqMinLength, freqMinCount, null);
     } catch (e) {
       console.warn('Word frequency failed:', e);
-      results = [];
+      freqResults = [];
     }
-    loading = false;
+    freqLoading = false;
+  }
+
+  async function runClusters() {
+    clusterLoading = true;
+    try {
+      clusterResults = await wordFrequency(clusterMinLength, clusterMinCount, clusterWindowSize);
+    } catch (e) {
+      console.warn('Cluster analysis failed:', e);
+      clusterResults = [];
+    }
+    clusterLoading = false;
   }
 
   function highlightWord(text, word) {
@@ -66,12 +104,23 @@
     return words;
   });
 
-  let filtered = $derived(() => {
-    if (!results) return [];
+  let freqFiltered = $derived(() => {
+    if (!freqResults) return [];
     const excluded = excludeWords();
-    let list = results.filter(r => !excluded.has(r.word));
-    if (filterText.trim()) {
-      const q = filterText.toLowerCase();
+    let list = freqResults.filter(r => !excluded.has(r.word));
+    if (freqFilter.trim()) {
+      const q = freqFilter.toLowerCase();
+      list = list.filter(r => r.word.includes(q));
+    }
+    return list;
+  });
+
+  let clusterFiltered = $derived(() => {
+    if (!clusterResults) return [];
+    const excluded = excludeWords();
+    let list = clusterResults.filter(r => !excluded.has(r.word));
+    if (clusterFilter.trim()) {
+      const q = clusterFilter.toLowerCase();
       list = list.filter(r => r.word.includes(q));
     }
     return list;
@@ -101,6 +150,55 @@
     return 'Somewhat similar';
   }
 
+  // ---- Heatmap state ----
+  let heatmapEntities = $state(new Set());
+
+  function toggleHeatmapEntity(id) {
+    const next = new Set(heatmapEntities);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    heatmapEntities = next;
+  }
+
+  function selectAllHeatmap() {
+    heatmapEntities = new Set(entities.map(e => e.id));
+  }
+
+  function selectNoneHeatmap() {
+    heatmapEntities = new Set();
+  }
+
+  async function launchChapterAnalysis() {
+    try {
+      new WebviewWindow('chapters-' + Date.now(), {
+        url: '/chapters',
+        title: 'Chapter Analysis',
+        width: 1200,
+        height: 800,
+        resizable: true,
+      });
+    } catch (e) {
+      console.error('Failed to open chapter analysis:', e);
+    }
+  }
+
+  async function launchHeatmap() {
+    const ids = [...heatmapEntities].join(',');
+    try {
+      const webview = new WebviewWindow('heatmap-' + Date.now(), {
+        url: `/heatmap?entities=${ids}`,
+        title: 'Entity Heatmap',
+        width: 1200,
+        height: 700,
+        resizable: true,
+      });
+      webview.once('tauri://error', (e) => {
+        console.error('Heatmap window error:', e);
+      });
+    } catch (e) {
+      console.error('Failed to open heatmap window:', e);
+    }
+  }
+
   function similarityColor(sim) {
     if (sim >= 0.9) return '#dc2626';
     if (sim >= 0.8) return '#ea580c';
@@ -112,89 +210,67 @@
 <div class="analysis-content">
   <!-- Sub-tabs for future analysis tools -->
   <div class="analysis-sub-tabs">
-    <button class="analysis-sub-tab" class:active={subTab === 'repetition'} onclick={() => subTab = 'repetition'}>
-      <i class="bi bi-arrow-repeat"></i> Repetition
+    <button class="analysis-sub-tab" class:active={subTab === 'frequency'} onclick={() => subTab = 'frequency'}>
+      <i class="bi bi-sort-numeric-down"></i> Frequency
+    </button>
+    <button class="analysis-sub-tab" class:active={subTab === 'clusters'} onclick={() => subTab = 'clusters'}>
+      <i class="bi bi-arrow-repeat"></i> Clusters
     </button>
     <button class="analysis-sub-tab" class:active={subTab === 'similar'} onclick={() => subTab = 'similar'}>
       <i class="bi bi-copy"></i> Similar
     </button>
+    <button class="analysis-sub-tab" class:active={subTab === 'chapters'} onclick={() => subTab = 'chapters'}>
+      <i class="bi bi-bar-chart"></i> Chapters
+    </button>
+    <button class="analysis-sub-tab" class:active={subTab === 'heatmap'} onclick={() => subTab = 'heatmap'}>
+      <i class="bi bi-grid-3x3-gap"></i> Heatmap
+    </button>
   </div>
 
-  {#if subTab === 'repetition'}
+  {#if subTab === 'frequency'}
+    <!-- Word Frequency -->
     <div class="rep-controls">
       <div class="rep-row">
         <label class="rep-label">
           Min word length
-          <input type="number" class="rep-num" bind:value={minLength} min="2" max="15" />
+          <input type="number" class="rep-num" bind:value={freqMinLength} min="2" max="15" />
         </label>
         <label class="rep-label">
           Min occurrences
-          <input type="number" class="rep-num" bind:value={minCount} min="2" max="50" />
+          <input type="number" class="rep-num" bind:value={freqMinCount} min="2" max="50" />
         </label>
       </div>
 
       <div class="rep-exclude">
         <span class="rep-exclude-label">Exclude entities:</span>
-        <label class="rep-exclude-opt">
-          <input type="checkbox" bind:checked={excludeCharacters} />
-          Characters
-        </label>
-        <label class="rep-exclude-opt">
-          <input type="checkbox" bind:checked={excludePlaces} />
-          Places
-        </label>
-        <label class="rep-exclude-opt">
-          <input type="checkbox" bind:checked={excludeThings} />
-          Things
-        </label>
+        <label class="rep-exclude-opt"><input type="checkbox" bind:checked={excludeCharacters} /> Characters</label>
+        <label class="rep-exclude-opt"><input type="checkbox" bind:checked={excludePlaces} /> Places</label>
+        <label class="rep-exclude-opt"><input type="checkbox" bind:checked={excludeThings} /> Things</label>
       </div>
 
-      <label class="rep-toggle">
-        <input type="checkbox" bind:checked={useWindow} />
-        <span>Proximity check</span>
-      </label>
-
-      {#if useWindow}
-        <label class="rep-label">
-          Window size
-          <div class="rep-slider-row">
-            <input type="range" class="rep-slider" bind:value={windowSize} min="20" max="500" step="10" />
-            <span class="rep-slider-val">{windowSize} words</span>
-          </div>
-          <span class="rep-hint">Flag words repeated {minCount}+ times within {windowSize} words of each other</span>
-        </label>
-      {/if}
-
-      <button class="rep-scan-btn" onclick={runAnalysis} disabled={loading}>
-        {#if loading}
-          Scanning...
-        {:else}
-          <i class="bi bi-arrow-repeat"></i> Scan Manuscript
-        {/if}
+      <button class="rep-scan-btn" onclick={runFrequency} disabled={freqLoading}>
+        {#if freqLoading}Scanning...{:else}<i class="bi bi-sort-numeric-down"></i> Scan Manuscript{/if}
       </button>
     </div>
 
-    {#if results}
+    {#if freqResults}
       <div class="rep-filter">
-        <input class="rep-filter-input" bind:value={filterText} placeholder="Filter words..." />
-        <span class="rep-total">{filtered().length} words</span>
+        <input class="rep-filter-input" bind:value={freqFilter} placeholder="Filter words..." />
+        <span class="rep-total">{freqFiltered().length} words</span>
       </div>
-
       <div class="rep-list">
-        {#each filtered() as item (item.word)}
-          <div class="rep-item" class:expanded={expandedWord === item.word}>
-            <button class="rep-item-header" onclick={() => expandedWord = expandedWord === item.word ? null : item.word}>
+        {#each freqFiltered() as item (item.word)}
+          <div class="rep-item" class:expanded={freqExpanded === item.word}>
+            <button class="rep-item-header" onclick={() => expandFreqWord(item.word)}>
               <span class="rep-word">{item.word}</span>
               <span class="rep-count">{item.total_count}&times;</span>
               <span class="rep-bar-wrap">
-                <span class="rep-bar" style="width: {Math.min(100, (item.total_count / (results[0]?.total_count || 1)) * 100)}%"></span>
+                <span class="rep-bar" style="width: {Math.min(100, (item.total_count / (freqResults[0]?.total_count || 1)) * 100)}%"></span>
               </span>
-              <i class="bi" class:bi-chevron-down={expandedWord !== item.word} class:bi-chevron-up={expandedWord === item.word} style="font-size: 0.7rem; color: var(--iwe-text-faint);"></i>
+              <i class="bi" class:bi-chevron-down={freqExpanded !== item.word} class:bi-chevron-up={freqExpanded === item.word} style="font-size: 0.7rem; color: var(--iwe-text-faint);"></i>
             </button>
-
-            {#if expandedWord === item.word}
+            {#if freqExpanded === item.word}
               <div class="rep-detail">
-                <!-- Chapter breakdown -->
                 <div class="rep-chapters">
                   {#each item.chapters.filter(c => c.count > 0).sort((a, b) => b.count - a.count) as ch}
                     <div class="rep-ch-row">
@@ -204,25 +280,100 @@
                   {/each}
                 </div>
 
-                <!-- Clusters (if window mode) -->
-                {#if item.clusters.length > 0}
-                  <div class="rep-clusters-header">
-                    <i class="bi bi-exclamation-triangle" style="font-size: 0.7rem;"></i>
-                    {item.clusters.length} cluster{item.clusters.length !== 1 ? 's' : ''} found
-                  </div>
-                  {#each item.clusters as cluster}
+                {#if freqOccLoading}
+                  <div class="occ-loading">Loading occurrences...</div>
+                {:else if freqOccurrences && freqOccurrences.length > 0}
+                  {@const occ = freqOccurrences[freqOccIdx]}
+                  <div class="occ-browser">
+                    <div class="occ-nav">
+                      <button class="occ-nav-btn" onclick={() => { if (freqOccIdx > 0) freqOccIdx--; }} disabled={freqOccIdx === 0}>
+                        <i class="bi bi-chevron-left"></i>
+                      </button>
+                      <span class="occ-counter">{freqOccIdx + 1} / {freqOccurrences.length}</span>
+                      <button class="occ-nav-btn" onclick={() => { if (freqOccIdx < freqOccurrences.length - 1) freqOccIdx++; }} disabled={freqOccIdx >= freqOccurrences.length - 1}>
+                        <i class="bi bi-chevron-right"></i>
+                      </button>
+                    </div>
+                    <div class="occ-chapter-tag">{occ.chapter_title}</div>
                     <button
-                      class="rep-cluster"
-                      onclick={() => ongotochapter?.(cluster.chapter_id, item.word, cluster.anchor)}
-                      title="Jump to this cluster"
+                      class="occ-snippet"
+                      onclick={() => ongotochapter?.(occ.chapter_id, item.word, occ.char_position)}
+                      title="Jump to this occurrence"
                     >
-                      <span class="rep-cluster-badge">{cluster.count}&times; in {cluster.chapter_title}</span>
-                      <span class="rep-cluster-text">
-                        &ldquo;...{@html highlightWord(cluster.context, item.word)}...&rdquo;
-                      </span>
+                      &ldquo;...{@html highlightWord(occ.context, item.word)}...&rdquo;
                     </button>
-                  {/each}
+                  </div>
                 {/if}
+              </div>
+            {/if}
+          </div>
+        {/each}
+      </div>
+    {/if}
+
+  {:else if subTab === 'clusters'}
+    <!-- Cluster Finder -->
+    <div class="rep-controls">
+      <div class="rep-row">
+        <label class="rep-label">
+          Min word length
+          <input type="number" class="rep-num" bind:value={clusterMinLength} min="2" max="15" />
+        </label>
+        <label class="rep-label">
+          Min to cluster
+          <input type="number" class="rep-num" bind:value={clusterMinCount} min="2" max="20" />
+        </label>
+      </div>
+
+      <label class="rep-label">
+        Window size
+        <div class="rep-slider-row">
+          <input type="range" class="rep-slider" bind:value={clusterWindowSize} min="20" max="500" step="10" />
+          <span class="rep-slider-val">{clusterWindowSize} words</span>
+        </div>
+        <span class="rep-hint">Flag words appearing {clusterMinCount}+ times within {clusterWindowSize} words</span>
+      </label>
+
+      <div class="rep-exclude">
+        <span class="rep-exclude-label">Exclude entities:</span>
+        <label class="rep-exclude-opt"><input type="checkbox" bind:checked={excludeCharacters} /> Characters</label>
+        <label class="rep-exclude-opt"><input type="checkbox" bind:checked={excludePlaces} /> Places</label>
+        <label class="rep-exclude-opt"><input type="checkbox" bind:checked={excludeThings} /> Things</label>
+      </div>
+
+      <button class="rep-scan-btn" onclick={runClusters} disabled={clusterLoading}>
+        {#if clusterLoading}Scanning...{:else}<i class="bi bi-arrow-repeat"></i> Find Clusters{/if}
+      </button>
+    </div>
+
+    {#if clusterResults}
+      <div class="rep-filter">
+        <input class="rep-filter-input" bind:value={clusterFilter} placeholder="Filter words..." />
+        <span class="rep-total">{clusterFiltered().length} words with clusters</span>
+      </div>
+      <div class="rep-list">
+        {#each clusterFiltered() as item (item.word)}
+          <div class="rep-item" class:expanded={clusterExpanded === item.word}>
+            <button class="rep-item-header" onclick={() => clusterExpanded = clusterExpanded === item.word ? null : item.word}>
+              <span class="rep-word">{item.word}</span>
+              <span class="rep-count">{item.total_count}&times; total</span>
+              <span class="rep-cluster-count">{item.clusters.length} cluster{item.clusters.length !== 1 ? 's' : ''}</span>
+              <i class="bi" class:bi-chevron-down={clusterExpanded !== item.word} class:bi-chevron-up={clusterExpanded === item.word} style="font-size: 0.7rem; color: var(--iwe-text-faint);"></i>
+            </button>
+            {#if clusterExpanded === item.word}
+              <div class="rep-detail">
+                {#each item.clusters as cluster}
+                  <button
+                    class="rep-cluster"
+                    onclick={() => ongotochapter?.(cluster.chapter_id, item.word, cluster.anchor)}
+                    title="Jump to this cluster"
+                  >
+                    <span class="rep-cluster-badge">{cluster.count}&times; within {cluster.window_words} words — {cluster.chapter_title}</span>
+                    <span class="rep-cluster-text">
+                      &ldquo;...{@html highlightWord(cluster.context, item.word)}...&rdquo;
+                    </span>
+                  </button>
+                {/each}
               </div>
             {/if}
           </div>
@@ -284,6 +435,41 @@
           </div>
         {/each}
       {/if}
+    </div>
+
+  {:else if subTab === 'chapters'}
+    <div class="hm-setup">
+      <p class="hm-setup-desc">Opens a full-screen dashboard with word counts, dialogue vs narrative breakdown, sentence length analysis, vocabulary density, and a detailed chapter comparison table.</p>
+      <button class="rep-scan-btn" onclick={launchChapterAnalysis}>
+        <i class="bi bi-bar-chart"></i> Open Chapter Analysis
+      </button>
+    </div>
+
+  {:else if subTab === 'heatmap'}
+    <div class="hm-setup">
+      <div class="hm-setup-header">
+        <span>Select entities to visualise:</span>
+        <div class="hm-select-actions">
+          <button class="hm-select-btn" onclick={selectAllHeatmap}>All</button>
+          <button class="hm-select-btn" onclick={selectNoneHeatmap}>None</button>
+        </div>
+      </div>
+
+      <div class="hm-entity-list">
+        {#each entities as entity (entity.id)}
+          <label class="hm-entity-opt">
+            <input type="checkbox" checked={heatmapEntities.has(entity.id)} onchange={() => toggleHeatmapEntity(entity.id)} />
+            <span class="hm-entity-dot" style="background: {entity.color}"></span>
+            <span class="hm-entity-name">{entity.name}</span>
+            <span class="hm-entity-type">{entity.entity_type}</span>
+          </label>
+        {/each}
+      </div>
+
+      <button class="rep-scan-btn" onclick={launchHeatmap} disabled={heatmapEntities.size === 0}>
+        <i class="bi bi-grid-3x3-gap"></i>
+        Open Heatmap ({heatmapEntities.size} entities)
+      </button>
     </div>
   {/if}
 </div>
@@ -491,6 +677,83 @@
     font-family: var(--iwe-font-prose); font-size: 0.85rem;
     color: var(--iwe-text-secondary); line-height: 1.6;
     font-style: italic;
+  }
+
+  /* Heatmap setup */
+  .hm-setup {
+    padding: 0.6rem 0.75rem;
+    display: flex; flex-direction: column; gap: 0.5rem;
+  }
+  .hm-setup-header {
+    display: flex; align-items: center; justify-content: space-between;
+    font-size: 0.8rem; color: var(--iwe-text-secondary); font-weight: 500;
+  }
+  .hm-select-actions { display: flex; gap: 0.3rem; }
+  .hm-select-btn {
+    font-family: var(--iwe-font-ui); font-size: 0.7rem;
+    padding: 0.15rem 0.4rem; border: 1px solid var(--iwe-border);
+    border-radius: var(--iwe-radius-sm); cursor: pointer;
+    background: none; color: var(--iwe-text-muted);
+  }
+  .hm-setup-desc {
+    font-size: 0.8rem; color: var(--iwe-text-secondary); line-height: 1.5;
+    margin: 0 0 0.5rem;
+  }
+  .hm-select-btn:hover { border-color: var(--iwe-accent); color: var(--iwe-accent); }
+
+  .hm-entity-list {
+    max-height: 300px; overflow-y: auto;
+    border: 1px solid var(--iwe-border-light); border-radius: var(--iwe-radius-sm);
+    padding: 0.25rem;
+  }
+  .hm-entity-opt {
+    display: flex; align-items: center; gap: 0.4rem;
+    padding: 0.3rem 0.4rem; cursor: pointer; border-radius: var(--iwe-radius-sm);
+    transition: background 100ms;
+  }
+  .hm-entity-opt:hover { background: var(--iwe-bg-hover); }
+  .hm-entity-opt input { accent-color: var(--iwe-accent); }
+  .hm-entity-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .hm-entity-name { font-size: 0.85rem; color: var(--iwe-text); flex: 1; }
+  .hm-entity-type { font-size: 0.65rem; color: var(--iwe-text-faint); text-transform: capitalize; }
+
+  /* Occurrence browser */
+  .occ-loading { font-size: 0.75rem; color: var(--iwe-text-faint); font-style: italic; padding: 0.3rem 0; }
+  .occ-browser {
+    margin-top: 0.4rem; border: 1px solid var(--iwe-border-light);
+    border-radius: var(--iwe-radius-sm); overflow: hidden;
+  }
+  .occ-nav {
+    display: flex; align-items: center; justify-content: center; gap: 0.5rem;
+    padding: 0.3rem; background: var(--iwe-bg-sidebar);
+    border-bottom: 1px solid var(--iwe-border-light);
+  }
+  .occ-nav-btn {
+    background: none; border: 1px solid var(--iwe-border);
+    border-radius: var(--iwe-radius-sm); cursor: pointer;
+    color: var(--iwe-text-secondary); padding: 0.15rem 0.4rem;
+    display: flex; align-items: center; transition: all 100ms;
+  }
+  .occ-nav-btn:hover:not(:disabled) { border-color: var(--iwe-accent); color: var(--iwe-accent); }
+  .occ-nav-btn:disabled { opacity: 0.25; cursor: default; }
+  .occ-counter { font-size: 0.75rem; color: var(--iwe-text-muted); font-weight: 500; }
+  .occ-chapter-tag {
+    font-size: 0.65rem; font-weight: 600; color: var(--iwe-text-faint);
+    background: var(--iwe-bg-active); padding: 0.2rem 0.5rem;
+    border-bottom: 1px solid var(--iwe-border-light);
+  }
+  .occ-snippet {
+    display: block; width: 100%; text-align: left;
+    background: none; border: none; padding: 0.5rem;
+    font-family: var(--iwe-font-prose); font-size: 0.8rem;
+    color: var(--iwe-text-secondary); line-height: 1.6;
+    cursor: pointer; transition: background 100ms;
+  }
+  .occ-snippet:hover { background: var(--iwe-bg-hover); }
+
+  .rep-cluster-count {
+    font-size: 0.65rem; color: #b45309; font-weight: 600;
+    background: #fef3c7; padding: 0.1rem 0.35rem; border-radius: 8px;
   }
 
   :global(.rep-highlight) {

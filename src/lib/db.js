@@ -183,12 +183,44 @@ export async function deleteEntityNote(id) {
   return invoke('delete_entity_note', { id });
 }
 
+export async function reorderEntityNotes(ids) {
+  return invoke('reorder_entity_notes', { ids });
+}
+
+export async function getEntityFreeNotes(entityId) {
+  return invoke('get_entity_free_notes', { entityId });
+}
+
+export async function addEntityFreeNote(entityId, text) {
+  return invoke('add_entity_free_note', { entityId, text });
+}
+
+export async function updateEntityFreeNote(id, text) {
+  return invoke('update_entity_free_note', { id, text });
+}
+
+export async function deleteEntityFreeNote(id) {
+  return invoke('delete_entity_free_note', { id });
+}
+
+export async function reorderEntityFreeNotes(ids) {
+  return invoke('reorder_entity_free_notes', { ids });
+}
+
 export async function textSearch(query, caseSensitive = false, wholeWord = false, useRegex = false, fuzzy = false) {
   return invoke('text_search', { query, caseSensitive, wholeWord, useRegex, fuzzy });
 }
 
 export async function wordFrequency(minLength = 4, minCount = 2, windowSize = null) {
   return invoke('word_frequency', { minLength, minCount, windowSize });
+}
+
+export async function chapterAnalysis() {
+  return invoke('chapter_analysis');
+}
+
+export async function generateHeatmap(entityIds) {
+  return invoke('generate_heatmap', { entityIds });
 }
 
 export async function findSimilarPhrases(minWords = 5, minSimilarity = 0.6) {
@@ -201,6 +233,44 @@ export async function dialogueSearch(query, caseSensitive = false, wholeWord = f
 
 export async function relationshipSearch(entityAId, entityBId, searchType, maxDistance) {
   return invoke('relationship_search', { entityAId, entityBId, searchType, maxDistance });
+}
+
+// --- Writing stats ---
+
+export async function logWritingActivity(chapterId, chapterWords, manuscriptWords, wordsDelta) {
+  return invoke('log_writing_activity', { chapterId: chapterId || null, chapterWords, manuscriptWords, wordsDelta });
+}
+
+export async function getDailyStats(days = 365) {
+  return invoke('get_daily_stats', { days });
+}
+
+export async function getAllDailyStats() {
+  return invoke('get_all_daily_stats');
+}
+
+export async function getWritingSettings() {
+  return invoke('get_writing_settings');
+}
+
+export async function updateWritingSettings(dailyGoal, sessionGapMinutes) {
+  return invoke('update_writing_settings', { dailyGoal, sessionGapMinutes });
+}
+
+export async function getWritingActivity(date) {
+  return invoke('get_writing_activity', { date });
+}
+
+export async function getHourlyBreakdown(date) {
+  return invoke('get_hourly_breakdown', { date });
+}
+
+export async function getManuscriptWordHistory() {
+  return invoke('get_manuscript_word_history');
+}
+
+export async function debugSearchTerms() {
+  return invoke('debug_search_terms');
 }
 
 export async function checkWord(word) {

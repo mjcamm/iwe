@@ -294,7 +294,7 @@
             {#each chapter.results as result}
               <button
                 class="search-slab"
-                onclick={() => ongotochapter?.(result.chapter_id, result.matched_text, result.anchor)}
+                onclick={() => ongotochapter?.(result.chapter_id, result.matched_text, result.char_position ?? result.anchor)}
                 title="Jump to this match"
               >
                 <span class="slab-text">
@@ -382,7 +382,7 @@
             {#each chapter.results as result}
               <button
                 class="search-slab"
-                onclick={() => ongotochapter?.(result.chapter_id, result.matched_text, result.anchor)}
+                onclick={() => ongotochapter?.(result.chapter_id, result.matched_text, result.char_position ?? result.anchor)}
                 title="Jump to this dialogue"
               >
                 <span class="slab-text">

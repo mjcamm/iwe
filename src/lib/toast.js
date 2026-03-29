@@ -7,7 +7,7 @@ function notify() {
   listeners.forEach(fn => fn(toasts));
 }
 
-export function addToast(message, type = 'info', duration = 3000) {
+export function addToast(message, type = 'info', duration = type === 'error' ? 10000 : 3000) {
   const id = ++toastId;
   toasts = [...toasts, { id, message, type }];
   notify();

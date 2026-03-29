@@ -8,7 +8,15 @@
       "Bash(cargo check:*)",
       "Bash(npm uninstall:*)",
       "Bash(npm run:*)",
-      "Bash(cargo remove:*)"
+      "Bash(cargo remove:*)",
+      "Bash(find ~/.cargo/registry/src -path */printpdf-0.9* -name *.rs)",
+      "Bash(mkdir -p /c/Users/mitch/Documents/projects/writing-iwe/src-tauri/fonts)",
+      "Bash(curl -sL \"https://github.com/liberationfonts/liberation-fonts/files/7261482/liberation-fonts-ttf-2.1.5.tar.gz\" -o liberation.tar.gz)",
+      "Bash(tar xzf:*)",
+      "Bash(cp liberation-fonts-ttf-2.1.5/LiberationSerif-Regular.ttf .)",
+      "Bash(cp liberation-fonts-ttf-2.1.5/LiberationSerif-Bold.ttf .)",
+      "Bash(head -100 /c/Users/mitch/Documents/projects/writing-iwe/src/routes/project/[filename]/+page.svelte)",
+      "Bash(wc:*)"
     ]
   }
 }

@@ -1,6 +1,7 @@
 <script>
-  import { detectEntities, addIgnoredWord, findReferences, getEntityNotes, addEntityNote, deleteEntityNote } from '$lib/db.js';
+  import { detectEntities, addIgnoredWord, findReferences, getEntityNotes, addEntityNote, deleteEntityNote, reorderEntityNotes, getEntityFreeNotes, addEntityFreeNote, updateEntityFreeNote, deleteEntityFreeNote, reorderEntityFreeNotes } from '$lib/db.js';
   import { addToast } from '$lib/toast.js';
+  import { dndzone } from 'svelte-dnd-action';
 
   let {
     entities = [],
@@ -78,7 +79,10 @@
   // View entity state
   let viewEntity = $state(null);
   let viewNotes = $state([]);
+  let viewFreeNotes = $state([]);
   let viewNotesLoading = $state(false);
+  let viewTab = $state('excerpts'); // 'excerpts' | 'notes'
+  let newNoteText = $state('');
 
   async function showEntityView(entity) {
     viewEntity = entity;
@@ -86,8 +90,10 @@
     view = 'view';
     try {
       viewNotes = await getEntityNotes(entity.id);
+      viewFreeNotes = await getEntityFreeNotes(entity.id);
     } catch {
       viewNotes = [];
+      viewFreeNotes = [];
     }
     viewNotesLoading = false;
   }
@@ -108,6 +114,41 @@
     if (!viewEntity) return;
     await deleteEntityNote(noteId);
     viewNotes = await getEntityNotes(viewEntity.id);
+  }
+
+  function handleExcerptDndConsider(e) {
+    viewNotes = e.detail.items;
+  }
+
+  async function handleExcerptDndFinalize(e) {
+    viewNotes = e.detail.items;
+    await reorderEntityNotes(viewNotes.map(n => n.id));
+  }
+
+  async function addFreeNote() {
+    if (!viewEntity || !newNoteText.trim()) return;
+    await addEntityFreeNote(viewEntity.id, newNoteText.trim());
+    newNoteText = '';
+    viewFreeNotes = await getEntityFreeNotes(viewEntity.id);
+  }
+
+  async function saveFreeNote(note) {
+    await updateEntityFreeNote(note.id, note.text);
+  }
+
+  async function removeFreeNote(id) {
+    if (!viewEntity) return;
+    await deleteEntityFreeNote(id);
+    viewFreeNotes = await getEntityFreeNotes(viewEntity.id);
+  }
+
+  function handleFreeNoteDndConsider(e) {
+    viewFreeNotes = e.detail.items;
+  }
+
+  async function handleFreeNoteDndFinalize(e) {
+    viewFreeNotes = e.detail.items;
+    await reorderEntityFreeNotes(viewFreeNotes.map(n => n.id));
   }
 
   async function showReferences(entity) {
@@ -153,6 +194,14 @@
 
   function escapeHtml(text) {
     return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  function highlightDetectWord(context, word) {
+    if (!context || !word) return escapeHtml(context || '');
+    const escaped = escapeHtml(context);
+    const wordEscaped = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const re = new RegExp(`(\\b${wordEscaped}\\b)`, 'gi');
+    return escaped.replace(re, '<strong>$1</strong>');
   }
 
   async function runDetection() {
@@ -565,12 +614,17 @@
               </div>
             </div>
             {#if candidate.locations.length > 0}
+              {#if candidate.locations.length > 0}
               <div class="detect-context">
                 {#if browsingCandidate === candidate.text}
                   <span class="detect-chapter-badge">{candidate.locations[browseIndex]?.chapter_title}</span>
                 {/if}
-                &ldquo;...{browsingCandidate === candidate.text ? candidate.locations[browseIndex]?.context : candidate.locations[0]?.context}...&rdquo;
+                &ldquo;...{@html highlightDetectWord(
+                  browsingCandidate === candidate.text ? candidate.locations[browseIndex]?.context : candidate.locations[0]?.context,
+                  candidate.text
+                )}...&rdquo;
               </div>
+            {/if}
             {/if}
             <div class="detect-actions">
               <button class="detect-type-btn" onclick={() => acceptCandidate(candidate, 'character')} title="Add as character">
@@ -697,35 +751,90 @@
         </div>
       {/if}
 
-      <!-- Pinned notes -->
-      <div class="view-section-header">
-        <i class="bi bi-pin-angle-fill" style="font-size: 0.7rem;"></i>
-        <span>Pinned Excerpts</span>
-        <span class="view-section-count">{viewNotes.length}</span>
+      <!-- Tabs: Excerpts / Notes -->
+      <div class="view-tabs">
+        <button class="view-tab" class:active={viewTab === 'excerpts'} onclick={() => viewTab = 'excerpts'}>
+          <i class="bi bi-pin-angle"></i> Excerpts
+          <span class="view-tab-count">{viewNotes.length}</span>
+        </button>
+        <button class="view-tab" class:active={viewTab === 'notes'} onclick={() => viewTab = 'notes'}>
+          <i class="bi bi-journal-text"></i> Notes
+          <span class="view-tab-count">{viewFreeNotes.length}</span>
+        </button>
       </div>
 
-      <div class="view-notes-list">
-        {#if viewNotesLoading}
-          <div class="view-notes-empty">Loading...</div>
-        {:else if viewNotes.length === 0}
-          <div class="view-notes-empty">
-            No pinned excerpts yet. Highlight text in the editor and click
-            <i class="bi bi-folder2-open"></i> or come here and click <strong>Pin</strong>.
-          </div>
-        {:else}
-          {#each viewNotes as note (note.id)}
-            <div class="view-note">
-              <div class="view-note-text">&ldquo;{note.text}&rdquo;</div>
-              <div class="view-note-footer">
-                <span class="view-note-date">{new Date(note.created_at).toLocaleDateString()}</span>
-                <button class="view-note-delete" onclick={() => removeNote(note.id)} title="Remove">
-                  <i class="bi bi-x"></i>
-                </button>
-              </div>
+      {#if viewTab === 'excerpts'}
+        <div class="view-notes-list">
+          {#if viewNotesLoading}
+            <div class="view-notes-empty">Loading...</div>
+          {:else if viewNotes.length === 0}
+            <div class="view-notes-empty">
+              No pinned excerpts yet. Highlight text in the editor and click
+              <i class="bi bi-pin-angle"></i> to pin it here.
             </div>
-          {/each}
-        {/if}
-      </div>
+          {:else}
+            <div class="dnd-zone" use:dndzone={{ items: viewNotes, flipDurationMs: 200 }} onconsider={handleExcerptDndConsider} onfinalize={handleExcerptDndFinalize}>
+              {#each viewNotes as note (note.id)}
+                <div class="view-note">
+                  <div class="view-note-drag"><i class="bi bi-grip-vertical"></i></div>
+                  <div class="view-note-body">
+                    <button class="view-note-text clickable" onclick={() => {
+                      // Use first few words as search text, full excerpt as anchor
+                      const words = note.text.split(/\s+/).slice(0, 5).join(' ');
+                      ongotochapter?.(note.chapter_id, words, note.text.slice(0, 40));
+                    }} title="Jump to this excerpt">
+                      &ldquo;{note.text}&rdquo;
+                    </button>
+                    <div class="view-note-footer">
+                      <span class="view-note-date">{new Date(note.created_at).toLocaleDateString()}</span>
+                      <button class="view-note-delete" onclick={() => removeNote(note.id)} title="Remove">
+                        <i class="bi bi-x"></i>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              {/each}
+            </div>
+          {/if}
+        </div>
+
+      {:else if viewTab === 'notes'}
+        <div class="view-notes-list">
+          <div class="free-note-add">
+            <textarea class="free-note-input" bind:value={newNoteText} placeholder="Write a note..." rows="4"></textarea>
+            <button class="view-pin-btn" onclick={addFreeNote} disabled={!newNoteText.trim()}>
+              <i class="bi bi-plus"></i> Add
+            </button>
+          </div>
+
+          {#if viewFreeNotes.length === 0}
+            <div class="view-notes-empty">No notes yet. Write one above.</div>
+          {:else}
+            <div class="dnd-zone" use:dndzone={{ items: viewFreeNotes, flipDurationMs: 200 }} onconsider={handleFreeNoteDndConsider} onfinalize={handleFreeNoteDndFinalize}>
+              {#each viewFreeNotes as note (note.id)}
+                <div class="view-note free-note-card">
+                  <div class="view-note-drag"><i class="bi bi-grip-vertical"></i></div>
+                  <div class="view-note-body">
+                    <textarea
+                      class="free-note-edit"
+                      value={note.text}
+                      oninput={e => { note.text = e.target.value; }}
+                      onblur={() => saveFreeNote(note)}
+                      rows="2"
+                    ></textarea>
+                    <div class="view-note-footer">
+                      <span class="view-note-date">{new Date(note.created_at).toLocaleDateString()}</span>
+                      <button class="view-note-delete" onclick={() => removeFreeNote(note.id)} title="Delete">
+                        <i class="bi bi-x"></i>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              {/each}
+            </div>
+          {/if}
+        </div>
+      {/if}
     {/if}
   {/if}
 </div>
@@ -988,8 +1097,7 @@
   .detect-goto.active { background: var(--iwe-accent-light); color: var(--iwe-accent); border-color: var(--iwe-accent); }
   .detect-context {
     font-size: 0.75rem; color: var(--iwe-text-muted); font-style: italic;
-    margin-bottom: 0.4rem; line-height: 1.4;
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    margin-bottom: 0.4rem; line-height: 1.5;
   }
   .detect-chapter-badge {
     font-style: normal; font-size: 0.65rem; font-weight: 500;
@@ -1176,8 +1284,13 @@
   .view-note-text {
     font-family: var(--iwe-font-prose); font-size: 0.85rem;
     color: var(--iwe-text-secondary); line-height: 1.6;
-    font-style: italic;
+    background: none; border: none; padding: 0; margin: 0;
+    text-align: left; width: 100%;
   }
+  .view-note-text.clickable {
+    cursor: pointer; transition: color 100ms;
+  }
+  .view-note-text.clickable:hover { color: var(--iwe-accent); }
   .view-note-footer {
     display: flex; align-items: center; justify-content: space-between;
     margin-top: 0.3rem;
@@ -1200,4 +1313,62 @@
   .entity-action-btn.pin-btn:hover {
     background: var(--iwe-accent); color: white;
   }
+
+  /* View tabs */
+  .view-tabs {
+    display: flex; border-bottom: 1px solid var(--iwe-border-light);
+  }
+  .view-tab {
+    flex: 1; display: flex; align-items: center; justify-content: center; gap: 0.3rem;
+    padding: 0.4rem 0.5rem;
+    font-family: var(--iwe-font-ui); font-size: 0.75rem; font-weight: 500;
+    background: none; border: none; border-bottom: 2px solid transparent;
+    color: var(--iwe-text-muted); cursor: pointer; transition: all 150ms;
+  }
+  .view-tab:hover { color: var(--iwe-text-secondary); background: var(--iwe-bg-hover); }
+  .view-tab.active { color: var(--iwe-text); border-bottom-color: var(--iwe-accent); }
+  .view-tab-count {
+    font-size: 0.6rem; background: var(--iwe-bg-active);
+    padding: 0.05rem 0.3rem; border-radius: 8px; color: var(--iwe-text-faint);
+  }
+
+  /* Drag and drop */
+  .dnd-zone { min-height: 20px; }
+  .view-note {
+    display: flex; align-items: flex-start; gap: 0.3rem;
+    padding: 0.5rem 0.5rem 0.5rem 0.25rem;
+    border-bottom: 1px solid var(--iwe-border-light);
+  }
+  .view-note:hover { background: var(--iwe-bg-hover); }
+  .view-note-drag {
+    color: var(--iwe-text-faint); cursor: grab;
+    padding: 0.2rem 0; font-size: 0.9rem; flex-shrink: 0;
+    opacity: 0.4;
+  }
+  .view-note-drag:hover { opacity: 1; }
+  .view-note-body { flex: 1; min-width: 0; }
+
+  /* Free notes */
+  .free-note-add {
+    padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--iwe-border-light);
+    display: flex; flex-direction: column; gap: 0.3rem;
+  }
+  .free-note-input {
+    font-family: var(--iwe-font-prose); font-size: 0.95rem;
+    padding: 0.5rem 0.6rem; border: 1px solid var(--iwe-border);
+    border-radius: var(--iwe-radius-sm); background: var(--iwe-bg);
+    color: var(--iwe-text); outline: none; resize: vertical;
+    line-height: 1.6;
+  }
+  .free-note-input:focus { border-color: var(--iwe-accent); }
+  .free-note-input::placeholder { color: var(--iwe-text-faint); }
+  .free-note-edit {
+    width: 100%; font-family: var(--iwe-font-prose); font-size: 0.85rem;
+    padding: 0.3rem 0.4rem; border: 1px solid transparent;
+    border-radius: var(--iwe-radius-sm); background: transparent;
+    color: var(--iwe-text-secondary); outline: none; resize: vertical;
+    line-height: 1.6;
+  }
+  .free-note-edit:focus { border-color: var(--iwe-accent); background: var(--iwe-bg); }
+  .free-note-card { }
 </style>

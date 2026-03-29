@@ -1,4 +1,4 @@
-use aho_corasick::AhoCorasick;
+use aho_corasick::{AhoCorasick, MatchKind};
 use regex::RegexBuilder;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -137,12 +137,14 @@ fn build_terms_filtered(entities: &[db::Entity], only_visible: bool) -> Vec<Sear
             text: entity.name.clone(),
         });
         for alias in &entity.aliases {
+            let trimmed = alias.trim().to_string();
+            if trimmed.is_empty() { continue; }
             terms.push(SearchTerm {
                 entity_id: entity.id,
                 entity_name: entity.name.clone(),
                 entity_type: entity.entity_type.clone(),
                 color: entity.color.clone(),
-                text: alias.clone(),
+                text: trimmed,
             });
         }
     }
@@ -163,6 +165,7 @@ fn scan_plain(plain: &str, terms: &[SearchTerm]) -> Vec<Match> {
 
     let ac = match AhoCorasick::builder()
         .ascii_case_insensitive(true)
+        .match_kind(MatchKind::LeftmostLongest)
         .build(&patterns)
     {
         Ok(ac) => ac,
@@ -234,6 +237,16 @@ pub fn scan_text(state: tauri::State<'_, AppState>, html: String) -> Result<Vec<
     let plain = strip_html(&html);
 
     Ok(scan_plain(&plain, &terms))
+}
+
+/// Debug: return the current search terms so we can verify aliases are loaded
+#[tauri::command]
+pub fn debug_search_terms(state: tauri::State<'_, AppState>) -> Result<Vec<String>, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    let entities = db::list_entities(conn).map_err(|e| e.to_string())?;
+    let terms = build_terms_all(&entities);
+    Ok(terms.iter().map(|t| format!("{}: {} ({})", t.entity_name, t.text, t.entity_type)).collect())
 }
 
 #[tauri::command]
@@ -493,12 +506,31 @@ pub fn detect_entities(state: tauri::State<'_, AppState>, min_count: Option<usiz
                 }
 
                 for candidate in candidates_to_add {
+                    // Normalize: strip possessive 's
+                    let candidate = normalize_candidate(&candidate);
+                    if candidate.len() < 2 { continue; }
                     if !is_unknown_candidate(&candidate, &known) {
                         continue;
                     }
-                    let locations = counts.entry(candidate).or_default();
-                    if locations.len() < 20 { // cap stored locations
-                        let context = extract_context(&chars, word_start, pos.min(chars.len()));
+                    let locations = counts.entry(candidate.clone()).or_default();
+                    if locations.len() < 20 {
+                        // Build a wider context: ~20 words before and after
+                        let mut ctx_start = word_start;
+                        let mut words_before = 0;
+                        while ctx_start > 0 && words_before < 20 {
+                            ctx_start -= 1;
+                            if chars[ctx_start].is_whitespace() { words_before += 1; }
+                        }
+                        if ctx_start > 0 { ctx_start += 1; } // skip past the space
+
+                        let mut ctx_end = pos.min(chars.len());
+                        let mut words_after = 0;
+                        while ctx_end < chars.len() && words_after < 20 {
+                            if chars[ctx_end].is_whitespace() { words_after += 1; }
+                            ctx_end += 1;
+                        }
+
+                        let context: String = chars[ctx_start..ctx_end].iter().collect();
                         locations.push(CandidateLocation {
                             chapter_id: chapter.id,
                             chapter_title: chapter.title.clone(),
@@ -704,7 +736,8 @@ pub struct TextSearchResult {
     pub matched_text: String,
     pub context: String,
     pub anchor: String,
-    pub match_count: usize, // total matches in this chapter
+    pub char_position: usize, // char offset in stripped plain text
+    pub match_count: usize,
 }
 
 #[derive(Serialize)]
@@ -865,6 +898,7 @@ pub fn text_search(
                 matched_text: matched.clone(),
                 context,
                 anchor,
+                char_position: start,
                 match_count: chapter_match_count,
             });
 
@@ -1036,28 +1070,7 @@ pub fn word_frequency(
     let min_length = min_length.unwrap_or(4);
     let min_count = min_count.unwrap_or(2);
 
-    let stop_words: HashSet<&str> = [
-        "the", "and", "but", "for", "not", "you", "all", "can", "had", "her",
-        "was", "one", "our", "out", "are", "has", "his", "how", "its", "may",
-        "new", "now", "old", "see", "way", "who", "did", "get", "got", "him",
-        "let", "say", "she", "too", "use", "been", "each", "have", "from",
-        "into", "just", "like", "long", "make", "many", "more", "most", "much",
-        "must", "only", "over", "such", "take", "than", "that", "them", "then",
-        "they", "this", "very", "what", "when", "will", "with", "your", "about",
-        "after", "also", "back", "been", "come", "could", "down", "even",
-        "every", "first", "give", "good", "here", "just", "know",
-        "last", "left", "look", "made", "make", "mean",
-        "might", "most", "much", "need", "never", "next", "only", "open",
-        "other", "over", "part", "right", "same", "seem", "show", "side",
-        "some", "still", "such", "sure", "tell", "than", "that", "their",
-        "them", "then", "there", "these", "they", "thing", "think", "this",
-        "those", "time", "turn", "upon", "used", "want", "well", "were",
-        "what", "when", "where", "which", "while", "will", "with", "word",
-        "work", "would", "your", "being", "could", "don't", "didn't",
-        "doesn't", "going", "would", "should", "before", "through",
-        "because", "between", "another", "around",
-        "something", "thought", "enough",
-    ].iter().copied().collect();
+    // No stop words — let the author see everything and decide what matters
 
     // For each chapter, build a list of (word, word_index, char_position)
     struct WordInfo {
@@ -1080,7 +1093,7 @@ pub fn word_frequency(
         for word in lower.split(|c: char| !c.is_alphanumeric() && c != '\'') {
             let clean = word.trim_matches('\'');
             if !clean.is_empty() {
-                if clean.len() >= min_length && !stop_words.contains(clean) {
+                if clean.len() >= min_length {
                     word_infos.entry(clean.to_string()).or_default().push(WordInfo {
                         word: clean.to_string(),
                         word_index,
@@ -1140,22 +1153,32 @@ pub fn word_frequency(
                         .count();
 
                     if nearby_count + 1 >= min_count {
-                        // Mark all nearby as used to avoid duplicate clusters
+                        // Find the full range of this cluster — earliest to latest occurrence
+                        let mut cluster_min_pos = info.char_pos;
+                        let mut cluster_max_pos = info.char_pos + word.len();
+
                         for (j, other) in infos.iter().enumerate() {
                             if (other.word_index as i64 - info.word_index as i64).unsigned_abs() as usize <= ws {
                                 used[j] = true;
+                                if other.char_pos < cluster_min_pos {
+                                    cluster_min_pos = other.char_pos;
+                                }
+                                let other_end = other.char_pos + word.len();
+                                if other_end > cluster_max_pos {
+                                    cluster_max_pos = other_end;
+                                }
                             }
                         }
 
-                        // Build context around this cluster
-                        let ctx_start = info.char_pos.saturating_sub(150);
-                        let ctx_end = (info.char_pos + 150).min(chars.len());
+                        // Build context: full cluster range plus 50 chars padding
+                        let ctx_start = cluster_min_pos.saturating_sub(50);
+                        let ctx_end = (cluster_max_pos + 50).min(chars.len());
                         let actual_start = if ctx_start == 0 { 0 } else {
-                            (ctx_start..info.char_pos).find(|&k| chars[k].is_whitespace())
+                            (ctx_start..cluster_min_pos).find(|&k| chars[k].is_whitespace())
                                 .map(|k| k + 1).unwrap_or(ctx_start)
                         };
                         let actual_end = if ctx_end >= chars.len() { chars.len() } else {
-                            (info.char_pos..ctx_end).rev().find(|&k| chars[k].is_whitespace())
+                            (cluster_max_pos..ctx_end).rev().find(|&k| chars[k].is_whitespace())
                                 .unwrap_or(ctx_end)
                         };
 
@@ -1453,6 +1476,276 @@ pub fn find_similar_phrases(
     groups.truncate(100);
 
     Ok(groups)
+}
+
+// ---- Heatmap data ----
+
+#[derive(Serialize)]
+pub struct HeatmapData {
+    pub chapters: Vec<HeatmapChapter>,
+    pub entities: Vec<HeatmapEntity>,
+    pub chapter_grid: Vec<Vec<usize>>,      // [entity_idx][chapter_idx] = mention count
+    pub sentence_grid: Vec<Vec<u8>>,         // [entity_idx][sentence_idx] = presence (0 or 1)
+    pub sentence_chapter_breaks: Vec<usize>, // sentence index where each chapter starts
+    pub total_sentences: usize,
+}
+
+#[derive(Serialize)]
+pub struct HeatmapChapter {
+    pub id: i64,
+    pub title: String,
+}
+
+#[derive(Serialize)]
+pub struct HeatmapEntity {
+    pub id: i64,
+    pub name: String,
+    pub color: String,
+    pub entity_type: String,
+}
+
+#[tauri::command]
+pub fn generate_heatmap(
+    state: tauri::State<'_, AppState>,
+    entity_ids: Vec<i64>,
+) -> Result<HeatmapData, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+
+    let all_entities = db::list_entities(conn).map_err(|e| e.to_string())?;
+    let chapters = db::list_chapters(conn).map_err(|e| e.to_string())?;
+
+    // Filter to requested entities
+    let entities: Vec<&db::Entity> = entity_ids.iter()
+        .filter_map(|id| all_entities.iter().find(|e| e.id == *id))
+        .collect();
+
+    let heatmap_chapters: Vec<HeatmapChapter> = chapters.iter()
+        .map(|c| HeatmapChapter { id: c.id, title: c.title.clone() })
+        .collect();
+
+    let heatmap_entities: Vec<HeatmapEntity> = entities.iter()
+        .map(|e| HeatmapEntity {
+            id: e.id, name: e.name.clone(),
+            color: e.color.clone(), entity_type: e.entity_type.clone(),
+        })
+        .collect();
+
+    // Build search terms per entity
+    let entity_terms: Vec<Vec<SearchTerm>> = entities.iter()
+        .map(|e| build_terms_all(&[(*e).clone()]))
+        .collect();
+
+    // Chapter-level grid
+    let mut chapter_grid: Vec<Vec<usize>> = vec![vec![0; chapters.len()]; entities.len()];
+
+    // Sentence-level grid
+    let mut sentence_grid: Vec<Vec<u8>> = Vec::new();
+    let mut sentence_chapter_breaks: Vec<usize> = Vec::new();
+    let mut total_sentences: usize = 0;
+
+    for (ch_idx, chapter) in chapters.iter().enumerate() {
+        let plain = strip_html(&chapter.content);
+        let chars: Vec<char> = plain.chars().collect();
+
+        // Split into sentences
+        let mut sentences: Vec<(usize, usize)> = Vec::new(); // (start, end) char positions
+        let mut sent_start = 0;
+        for (i, &ch) in chars.iter().enumerate() {
+            if ch == '.' || ch == '?' || ch == '!' {
+                if i > sent_start {
+                    sentences.push((sent_start, i + 1));
+                }
+                sent_start = i + 1;
+            }
+        }
+        // Last sentence (no terminator)
+        if sent_start < chars.len() {
+            let trimmed: String = chars[sent_start..].iter().collect();
+            if trimmed.trim().len() > 5 {
+                sentences.push((sent_start, chars.len()));
+            }
+        }
+
+        sentence_chapter_breaks.push(total_sentences);
+
+        for (ent_idx, terms) in entity_terms.iter().enumerate() {
+            let matches = scan_plain(&plain, terms);
+
+            // Chapter-level count
+            chapter_grid[ent_idx][ch_idx] = matches.len();
+
+            // Sentence-level presence
+            // Ensure the grid row exists
+            while sentence_grid.len() <= ent_idx {
+                sentence_grid.push(Vec::new());
+            }
+
+            for (sent_idx, &(sent_start, sent_end)) in sentences.iter().enumerate() {
+                let global_sent_idx = total_sentences + sent_idx;
+
+                // Ensure the row is long enough
+                while sentence_grid[ent_idx].len() <= global_sent_idx {
+                    sentence_grid[ent_idx].push(0);
+                }
+
+                // Check if any match falls within this sentence
+                let has_match = matches.iter().any(|m| {
+                    m.start >= sent_start && m.start < sent_end
+                });
+
+                sentence_grid[ent_idx][global_sent_idx] = if has_match { 1 } else { 0 };
+            }
+        }
+
+        total_sentences += sentences.len();
+    }
+
+    // Pad all entity rows to total_sentences length
+    for row in &mut sentence_grid {
+        while row.len() < total_sentences {
+            row.push(0);
+        }
+    }
+
+    Ok(HeatmapData {
+        chapters: heatmap_chapters,
+        entities: heatmap_entities,
+        chapter_grid,
+        sentence_grid,
+        sentence_chapter_breaks,
+        total_sentences,
+    })
+}
+
+// ---- Chapter analysis ----
+
+#[derive(Serialize)]
+pub struct ChapterAnalysis {
+    pub chapter_id: i64,
+    pub chapter_title: String,
+    pub total_words: usize,
+    pub dialogue_words: usize,
+    pub narrative_words: usize,
+    pub sentence_count: usize,
+    pub paragraph_count: usize,
+    pub avg_sentence_length: f64,
+    pub avg_paragraph_length: f64,
+    pub longest_sentence: usize,
+    pub shortest_sentence: usize,
+    pub unique_words: usize,
+    pub vocabulary_density: f64, // unique_words / total_words
+}
+
+fn count_words_in(text: &str) -> usize {
+    text.split(|c: char| !c.is_alphanumeric() && c != '\'')
+        .filter(|w| !w.is_empty())
+        .count()
+}
+
+#[tauri::command]
+pub fn chapter_analysis(state: tauri::State<'_, AppState>) -> Result<Vec<ChapterAnalysis>, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    let chapters = db::list_chapters(conn).map_err(|e| e.to_string())?;
+
+    let quote_re = RegexBuilder::new(r#"[""\u{201C}](.*?)[""\u{201D}]"#)
+        .dot_matches_new_line(true)
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let mut results = Vec::new();
+
+    for chapter in &chapters {
+        let plain = strip_html(&chapter.content);
+        if plain.trim().is_empty() {
+            results.push(ChapterAnalysis {
+                chapter_id: chapter.id,
+                chapter_title: chapter.title.clone(),
+                total_words: 0, dialogue_words: 0, narrative_words: 0,
+                sentence_count: 0, paragraph_count: 0,
+                avg_sentence_length: 0.0, avg_paragraph_length: 0.0,
+                longest_sentence: 0, shortest_sentence: 0,
+                unique_words: 0, vocabulary_density: 0.0,
+            });
+            continue;
+        }
+
+        let total_words = count_words_in(&plain);
+
+        // Dialogue vs narrative
+        let mut dialogue_text = String::new();
+        for m in quote_re.find_iter(&plain) {
+            dialogue_text.push_str(m.as_str());
+            dialogue_text.push(' ');
+        }
+        let dialogue_words = count_words_in(&dialogue_text);
+        let narrative_words = total_words.saturating_sub(dialogue_words);
+
+        // Sentences
+        let chars: Vec<char> = plain.chars().collect();
+        let mut sentences: Vec<usize> = Vec::new(); // word counts per sentence
+        let mut sent_start = 0;
+        for (i, &ch) in chars.iter().enumerate() {
+            if ch == '.' || ch == '?' || ch == '!' {
+                let sent_text: String = chars[sent_start..=i].iter().collect();
+                let wc = count_words_in(&sent_text);
+                if wc > 0 { sentences.push(wc); }
+                sent_start = i + 1;
+            }
+        }
+        // Trailing text
+        if sent_start < chars.len() {
+            let sent_text: String = chars[sent_start..].iter().collect();
+            let wc = count_words_in(&sent_text);
+            if wc > 0 { sentences.push(wc); }
+        }
+
+        let sentence_count = sentences.len();
+        let longest_sentence = sentences.iter().copied().max().unwrap_or(0);
+        let shortest_sentence = sentences.iter().copied().min().unwrap_or(0);
+        let avg_sentence_length = if sentence_count > 0 {
+            sentences.iter().sum::<usize>() as f64 / sentence_count as f64
+        } else { 0.0 };
+
+        // Paragraphs (split by double newlines or block boundaries — in stripped HTML, these become runs of text)
+        // Since we strip HTML, paragraphs are separated by where block tags were.
+        // Use the HTML content to count <p> tags
+        let paragraph_count = chapter.content.matches("<p>").count()
+            .max(chapter.content.matches("<p ").count())
+            .max(1);
+        let avg_paragraph_length = if paragraph_count > 0 {
+            total_words as f64 / paragraph_count as f64
+        } else { 0.0 };
+
+        // Vocabulary density
+        let lower = plain.to_lowercase();
+        let unique: HashSet<&str> = lower.split(|c: char| !c.is_alphanumeric() && c != '\'')
+            .filter(|w| w.len() >= 2)
+            .collect();
+        let unique_words = unique.len();
+        let vocabulary_density = if total_words > 0 {
+            unique_words as f64 / total_words as f64
+        } else { 0.0 };
+
+        results.push(ChapterAnalysis {
+            chapter_id: chapter.id,
+            chapter_title: chapter.title.clone(),
+            total_words,
+            dialogue_words,
+            narrative_words,
+            sentence_count,
+            paragraph_count,
+            avg_sentence_length,
+            avg_paragraph_length,
+            longest_sentence,
+            shortest_sentence,
+            unique_words,
+            vocabulary_density,
+        });
+    }
+
+    Ok(results)
 }
 
 /// Check a single word against known entities, aliases, ignored words, and hard excludes.
