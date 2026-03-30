@@ -7,9 +7,10 @@
   import Superscript from '@tiptap/extension-superscript';
   import Subscript from '@tiptap/extension-subscript';
   import { Extension } from '@tiptap/core';
-  import { scanText, checkWord, addIgnoredWord, checkSpelling, addToDictionary } from '$lib/db.js';
+  import { scanText, addIgnoredWord, checkSpelling, addToDictionary } from '$lib/db.js';
   import { createHighlightPlugin, createSpellCheckPlugin, buildTextMap, applyDecorations, applySpellDecorations, entityHighlightKey, spellCheckKey } from '$lib/entityHighlight.js';
   import WordModal from './WordModal.svelte';
+  import PalettePickerModal from './PalettePickerModal.svelte';
 
   let { openTabs, activeTabId, chapter, onselecttab, onclosetab, onchange, onselectionchange, onentityclick, onquickadd, viewedEntityIds = new Set() } = $props();
 
@@ -28,6 +29,8 @@
   // Spell check state
   let spellErrors = $state([]); // [{ word, start, end, suggestions }]
   let spellTimer = null;
+  let spellCache = new Map(); // word -> true (correct) or { suggestions } (misspelled)
+  let lastSpellText = '';
 
   // Context menu state
   let ctxMenu = $state({ show: false, x: 0, y: 0, word: '', from: 0, to: 0, isEntity: false, entityId: null, entityName: null, isMisspelled: false, suggestions: [] });
@@ -35,121 +38,9 @@
   // Word modal state
   let wordModal = $state({ show: false, word: '', isMisspelled: false, suggestions: [], from: 0, to: 0 });
 
-  // Live suggestion bubbles — multiple at once, each with own timer
-  let suggestions = $state([]); // [{ word, top, left, startTime, id }]
-  const SUGGESTION_DURATION = 30000;
-  let keystrokeCount = 0;
-  let suggestionIdCounter = 0;
-  let suggestionTick = null;
+  // Palette picker modal state
+  let paletteModal = $state({ show: false, word: '', from: 0, to: 0 });
 
-  function tickSuggestions() {
-    const now = Date.now();
-    const remaining = suggestions.filter(s => now - s.startTime < SUGGESTION_DURATION);
-    // Reassign to trigger Svelte re-render (updates progress bars)
-    suggestions = remaining;
-    if (suggestions.length > 0) {
-      suggestionTick = setTimeout(tickSuggestions, 500);
-    } else {
-      suggestionTick = null;
-    }
-  }
-
-  function addSuggestion(word, top, left) {
-    if (suggestions.find(s => s.word === word)) return;
-    suggestions = [...suggestions, { word, top, left, startTime: Date.now(), id: ++suggestionIdCounter }];
-    if (!suggestionTick) suggestionTick = setTimeout(tickSuggestions, 500);
-  }
-
-  function dismissSuggestion(id) {
-    suggestions = suggestions.filter(s => s.id !== id);
-  }
-
-  async function handleSuggestionAdd(s) {
-    dismissSuggestion(s.id);
-    onquickadd?.(s.word);
-  }
-
-  async function handleSuggestionIgnore(s) {
-    dismissSuggestion(s.id);
-    await addIgnoredWord(s.word);
-  }
-
-  function checkForSuggestion() {
-    if (!editorRaw) return;
-    const { state } = editorRaw;
-    const { from } = state.selection;
-
-    const start = Math.max(1, from - 150);
-    let recentText;
-    try {
-      recentText = state.doc.textBetween(start, from, ' ');
-    } catch { return; }
-    if (!recentText) return;
-
-    // Only match completed words — must be followed by a non-letter character (space, punctuation, etc.)
-    const words = [...recentText.matchAll(/[A-Z\u00C0-\u024F][a-zA-Z\u00C0-\u024F'\u2019]*(?=[^a-zA-Z\u00C0-\u024F])/g)];
-    if (words.length === 0) return;
-
-    // Check ALL candidate words, not just the most recent
-    for (const m of words) {
-      const word = m[0];
-      const wordIdx = m.index;
-
-      if (word.length < 2) continue;
-      // Already showing?
-      if (suggestions.find(s => s.word === word)) continue;
-
-      // Sentence start check
-      const before = recentText.slice(0, wordIdx);
-      let foundTerminator = false;
-      let foundLetter = false;
-      for (let i = before.length - 1; i >= 0; i--) {
-        const ch = before[i];
-        if ('.?!:\u2014'.includes(ch)) { foundTerminator = true; break; }
-        if (/[a-zA-Z0-9]/.test(ch)) { foundLetter = true; break; }
-      }
-      if (!before.trim()) foundTerminator = true;
-      if (foundTerminator || (!foundLetter && !foundTerminator)) continue;
-
-      // Check with Rust (async, fire and forget for each word)
-      const capturedWord = word;
-      checkWord(capturedWord).then(isCandidate => {
-        if (!isCandidate || !editorRaw) return;
-        if (suggestions.find(s => s.word === capturedWord)) return;
-
-        // Find word position in doc
-        const doc = editorRaw.state.doc;
-        let wordFrom = null;
-        doc.descendants((node, pos) => {
-          if (wordFrom !== null || !node.isText) return;
-          const i = node.text.indexOf(capturedWord);
-          if (i >= 0 && Math.abs(pos + i - from) < 200) {
-            wordFrom = pos + i;
-          }
-        });
-
-        const posForBubble = wordFrom !== null ? wordFrom : from;
-        const coords = editorRaw.view.coordsAtPos(posForBubble);
-        const scrollEl = element.closest('.editor-scroll');
-        if (!scrollEl) return;
-        const scrollRect = scrollEl.getBoundingClientRect();
-
-        // Position above the word — bubble is ~75px tall, add 10px gap
-        let top = coords.top - scrollRect.top + scrollEl.scrollTop - 85;
-
-        // Avoid overlapping with existing bubbles — nudge up if too close
-        for (const existing of suggestions) {
-          if (Math.abs(existing.top - top) < 70 && Math.abs(existing.left - (coords.left - scrollRect.left)) < 120) {
-            top = existing.top - 70;
-          }
-        }
-
-        const left = Math.max(10, Math.min(coords.left - scrollRect.left, scrollRect.width - 120));
-
-        addSuggestion(capturedWord, top, left);
-      }).catch(() => {});
-    }
-  }
 
   // ---- Context menu ----
 
@@ -249,7 +140,9 @@
   async function ctxAddToDictionary() {
     await addToDictionary(ctxMenu.word);
     closeCtxMenu();
-    // Re-scan to remove squiggly
+    // Clear cache and re-scan to remove squiggly
+    spellCache.clear();
+    lastSpellText = '';
     doScan();
   }
 
@@ -287,11 +180,27 @@
   }
 
   function handleModalDictionaryAdd() {
+    spellCache.clear();
+    lastSpellText = '';
     doScan();
   }
 
   function handleModalClose() {
     wordModal = { ...wordModal, show: false };
+  }
+
+  function ctxOpenPalette() {
+    paletteModal = {
+      show: true,
+      word: ctxMenu.word,
+      from: ctxMenu.from,
+      to: ctxMenu.to,
+    };
+    closeCtxMenu();
+  }
+
+  function handlePaletteClose() {
+    paletteModal = { ...paletteModal, show: false };
   }
 
   function toHtml(content) {
@@ -306,89 +215,118 @@
     scanText(text).then(matches => {
       scanMatches = matches;
       scanPosMap = posMap;
-      // Trigger spell check after entity scan
-      doSpellCheck(text, posMap, matches);
+      // Schedule spell check with its own debounce
+      clearTimeout(spellTimer);
+      spellTimer = setTimeout(() => doSpellCheck(text, posMap, matches), 1200);
     }).catch(e => { console.warn('[scan] error:', e); });
   }
 
   function doSpellCheck(text, posMap, entityMatches) {
     if (!text) return;
 
-    // Build entity char ranges to exclude
-    const entityChars = new Set();
-    for (const m of entityMatches) {
-      for (let i = m.start; i < m.end; i++) entityChars.add(i);
+    // Skip if text hasn't changed since last spell check
+    if (text === lastSpellText) {
+      // Still re-apply decorations since entity matches may have changed
+      reapplySpellDecorations(posMap, entityMatches);
+      return;
     }
+    lastSpellText = text;
+
+    // Build entity char ranges to exclude (use sorted ranges instead of per-char Set)
+    const entityRanges = entityMatches.map(m => [m.start, m.end]);
 
     // Extract unique words with their positions
     const wordRegex = /[a-zA-Z\u00C0-\u024F'\u2019]+/g;
     let match;
-    const uniqueWords = new Map(); // word -> [{ start, end }]
+    const uniqueWords = new Map(); // lowercase -> [{ word, start, end }]
     while ((match = wordRegex.exec(text)) !== null) {
       const w = match[0];
-      // Skip short words, all-apostrophe, or entity-overlapping
       if (w.length < 2) continue;
       const start = match.index;
       const end = start + w.length;
-      let inEntity = false;
-      for (let i = start; i < end; i++) {
-        if (entityChars.has(i)) { inEntity = true; break; }
-      }
-      if (inEntity) continue;
 
-      // Clean word: strip leading/trailing apostrophes
+      // Skip entity-overlapping words (binary-ish check on sorted ranges)
+      if (entityRanges.some(([rs, re]) => start < re && end > rs)) continue;
+
       const cleaned = w.replace(/^['\u2019]+|['\u2019]+$/g, '');
       if (cleaned.length < 2) continue;
+      const lower = cleaned.toLowerCase();
 
-      if (!uniqueWords.has(cleaned.toLowerCase())) {
-        uniqueWords.set(cleaned.toLowerCase(), []);
-      }
-      uniqueWords.get(cleaned.toLowerCase()).push({ word: cleaned, start, end });
+      if (!uniqueWords.has(lower)) uniqueWords.set(lower, []);
+      uniqueWords.get(lower).push({ word: cleaned, start, end });
     }
 
-    const wordsToCheck = [...uniqueWords.keys()];
-    if (wordsToCheck.length === 0) {
-      spellErrors = [];
-      if (editorRaw) {
-        applyingDecorations = true;
-        applySpellDecorations(editorRaw, [], posMap, entityChars);
-        applyingDecorations = false;
-      }
+    // Only send words we haven't cached yet
+    const unchecked = [];
+    for (const lower of uniqueWords.keys()) {
+      if (!spellCache.has(lower)) unchecked.push(lower);
+    }
+
+    if (unchecked.length === 0) {
+      // All words are cached — apply from cache
+      buildAndApplySpellErrors(uniqueWords, posMap, entityRanges);
       return;
     }
 
-    checkSpelling(wordsToCheck).then(results => {
-      // results is array of { word, suggestions } for misspelled words
-      const errorMap = new Map();
+    checkSpelling(unchecked).then(results => {
+      // Cache results
+      const misspelledSet = new Set();
       for (const r of results) {
-        errorMap.set(r.word.toLowerCase(), r.suggestions);
+        const lower = r.word.toLowerCase();
+        spellCache.set(lower, r.suggestions);
+        misspelledSet.add(lower);
+      }
+      // Cache correct words too
+      for (const w of unchecked) {
+        if (!misspelledSet.has(w)) spellCache.set(w, true);
       }
 
-      // Build error positions
-      const errors = [];
-      for (const [lower, positions] of uniqueWords) {
-        if (errorMap.has(lower)) {
-          const sug = errorMap.get(lower);
-          for (const pos of positions) {
-            errors.push({ word: pos.word, start: pos.start, end: pos.end, suggestions: sug });
-          }
+      buildAndApplySpellErrors(uniqueWords, posMap, entityRanges);
+    }).catch(e => { console.warn('[spell] error:', e); });
+  }
+
+  function buildAndApplySpellErrors(uniqueWords, posMap, entityRanges) {
+    const errors = [];
+    for (const [lower, positions] of uniqueWords) {
+      const cached = spellCache.get(lower);
+      if (cached && cached !== true) {
+        for (const pos of positions) {
+          errors.push({ word: pos.word, start: pos.start, end: pos.end, suggestions: cached });
         }
       }
+    }
+    spellErrors = errors;
 
-      spellErrors = errors;
-
-      // Apply spell decorations
-      if (editorRaw) {
-        applyingDecorations = true;
-        applySpellDecorations(editorRaw, errors, posMap, entityChars);
-        applyingDecorations = false;
+    if (editorRaw) {
+      const entityChars = new Set();
+      for (const [rs, re] of entityRanges) {
+        for (let i = rs; i < re; i++) entityChars.add(i);
       }
-    }).catch(e => { console.warn('[spell] error:', e); });
+      applyingDecorations = true;
+      applySpellDecorations(editorRaw, errors, posMap, entityChars);
+      applyingDecorations = false;
+    }
+  }
+
+  function reapplySpellDecorations(posMap, entityMatches) {
+    if (!editorRaw || spellErrors.length === 0) return;
+    const entityChars = new Set();
+    for (const m of entityMatches) {
+      for (let i = m.start; i < m.end; i++) entityChars.add(i);
+    }
+    applyingDecorations = true;
+    applySpellDecorations(editorRaw, spellErrors, posMap, entityChars);
+    applyingDecorations = false;
   }
 
   // Exported so parent can trigger rescans after entity CRUD
   export function rescan() {
     doScan();
+  }
+
+  export function clearSpellCache() {
+    spellCache.clear();
+    lastSpellText = '';
   }
 
   export function getEditor() {
@@ -438,13 +376,6 @@
       onUpdate: ({ editor: ed }) => {
         if (!updatingFromProp) {
           onchange(ed.getHTML());
-        }
-        // Check for live entity suggestion (debounced)
-        // Check for entity suggestion every 4 keystrokes
-        keystrokeCount++;
-        if (keystrokeCount >= 4) {
-          keystrokeCount = 0;
-          checkForSuggestion();
         }
         // Debounced scan on content change
         clearTimeout(scanTimer);
@@ -663,19 +594,6 @@
       </div>
     {/if}
 
-    {#each suggestions as s (s.id)}
-      <div class="suggestion-bubble" style="top: {s.top}px; left: {s.left}px;">
-        <div class="suggestion-progress" style="animation-duration: {SUGGESTION_DURATION}ms;"></div>
-        <div class="suggestion-header">
-          <span class="suggestion-word">{s.word}</span>
-          <button class="suggestion-dismiss" onclick={() => dismissSuggestion(s.id)}>&times;</button>
-        </div>
-        <div class="suggestion-actions">
-          <button class="suggestion-btn add" onclick={() => handleSuggestionAdd(s)}>+ Add Entity</button>
-          <button class="suggestion-btn ignore" onclick={() => handleSuggestionIgnore(s)}>Ignore</button>
-        </div>
-      </div>
-    {/each}
   </div>
 
   {#if ctxMenu.show}
@@ -698,6 +616,10 @@
             <i class="bi bi-spellcheck ctx-icon"></i>
             Spelling & Synonyms...
           </button>
+          <button class="ctx-item" onclick={ctxOpenPalette}>
+            <i class="bi bi-palette2 ctx-icon"></i>
+            Word Palettes...
+          </button>
           <button class="ctx-item" onclick={ctxAddToDictionary}>
             <i class="bi bi-plus-circle ctx-icon"></i>
             Add to dictionary
@@ -707,10 +629,12 @@
             <i class="bi bi-journal-text ctx-icon"></i>
             Synonyms...
           </button>
+          <button class="ctx-item" onclick={ctxOpenPalette}>
+            <i class="bi bi-palette2 ctx-icon"></i>
+            Word Palettes...
+          </button>
         {/if}
-        {#if ctxMenu.isEntity || ctxMenu.isMisspelled}
-          <div class="ctx-divider"></div>
-        {/if}
+        <div class="ctx-divider"></div>
         {#if !ctxMenu.isEntity}
           <button class="ctx-item" onclick={ctxCreateEntity}>
             <i class="bi bi-person-plus ctx-icon"></i>
@@ -719,7 +643,7 @@
         {/if}
         <button class="ctx-item" onclick={ctxIgnore}>
           <i class="bi bi-eye-slash ctx-icon"></i>
-            Ignore "{ctxMenu.word}"
+            Ignore "{ctxMenu.word}" for spell check
           </button>
       </div>
     </div>
@@ -735,6 +659,15 @@
     onreplace={handleModalReplace}
     ondictionaryadd={handleModalDictionaryAdd}
     onclose={handleModalClose}
+  />
+
+  <PalettePickerModal
+    show={paletteModal.show}
+    word={paletteModal.word}
+    editorFrom={paletteModal.from}
+    editorTo={paletteModal.to}
+    onreplace={handleModalReplace}
+    onclose={handlePaletteClose}
   />
 </div>
 
@@ -878,69 +811,17 @@
     font-family: var(--iwe-font-prose); font-style: italic;
   }
 
-  /* Live suggestion bubbles */
-  .suggestion-bubble {
-    position: absolute; z-index: 50;
-    display: flex; flex-direction: column; gap: 0.25rem;
-    padding: 0.4rem 0.5rem;
-    background: var(--iwe-bg); border: 1px solid var(--iwe-border);
-    border-radius: var(--iwe-radius); box-shadow: 0 4px 16px rgba(0,0,0,0.1);
-    font-family: var(--iwe-font-ui); font-size: 0.75rem;
-    animation: bubbleFade 0.2s ease;
-    width: 100px; overflow: hidden;
-  }
-  @keyframes bubbleFade {
-    from { opacity: 0; transform: translateY(4px); }
-    to { opacity: 1; transform: translateY(0); }
-  }
-  .suggestion-progress {
-    position: absolute; bottom: 0; left: 0; height: 2px;
-    background: var(--iwe-accent);
-    border-radius: 0 0 var(--iwe-radius) 0;
-    pointer-events: none;
-    width: 100%;
-    animation: progressShrink linear forwards;
-  }
-  @keyframes progressShrink {
-    from { width: 100%; }
-    to { width: 0%; }
-  }
-  .suggestion-header {
-    display: flex; align-items: center; justify-content: space-between; gap: 0.5rem;
-  }
-  .suggestion-word {
-    font-weight: 600; color: var(--iwe-text); font-size: 0.8rem;
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  }
-  .suggestion-actions {
-    display: flex; flex-direction: column; gap: 0.15rem;
-  }
-  .suggestion-btn {
-    font-family: var(--iwe-font-ui); font-size: 0.65rem; font-weight: 500;
-    padding: 0.2rem 0.3rem; border-radius: var(--iwe-radius-sm);
-    cursor: pointer; border: 1px solid var(--iwe-border); transition: all 100ms;
-    text-align: center; width: 100%;
-  }
-  .suggestion-btn.add {
-    background: var(--iwe-accent-light); color: var(--iwe-accent); border-color: var(--iwe-accent);
-  }
-  .suggestion-btn.add:hover { background: var(--iwe-accent); color: white; }
-  .suggestion-btn.ignore {
-    background: none; color: var(--iwe-text-faint);
-  }
-  .suggestion-btn.ignore:hover { border-color: var(--iwe-danger); color: var(--iwe-danger); }
-  .suggestion-dismiss {
-    background: none; border: none; color: var(--iwe-text-faint);
-    cursor: pointer; font-size: 1rem; line-height: 1; padding: 0 2px;
-  }
-  .suggestion-dismiss:hover { color: var(--iwe-text); }
-
   /* Spell error underlines */
   .editor-page :global(.spell-error) {
     text-decoration: wavy underline;
     text-decoration-color: var(--iwe-danger, #b85450);
     text-underline-offset: 3px;
     text-decoration-thickness: 1.5px;
+    animation: spellIn 0.5s ease both;
+  }
+  @keyframes spellIn {
+    from { text-decoration-color: transparent; }
+    to { text-decoration-color: var(--iwe-danger, #b85450); }
   }
 
   /* Context menu */

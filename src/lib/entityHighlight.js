@@ -192,7 +192,13 @@ export function createSpellCheckPlugin() {
         if (meta?.decorations !== undefined) {
           return meta.decorations;
         }
-        return decorationSet.map(tr.mapping, tr.doc);
+        // On doc change, clear spell decorations immediately.
+        // The Editor component handles fade-out via a CSS class before this fires,
+        // and fade-in via CSS animation when new decorations arrive.
+        if (tr.docChanged) {
+          return DecorationSet.empty;
+        }
+        return decorationSet;
       },
     },
 

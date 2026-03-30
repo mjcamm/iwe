@@ -1,4 +1,5 @@
 mod db;
+mod palettes;
 mod scanner;
 mod spellcheck;
 mod synonyms;
@@ -7,6 +8,7 @@ mod wordlists;
 use db::AppState;
 use rusqlite::Connection;
 use std::sync::Mutex;
+use tauri::Manager;
 
 // ---- Project commands ----
 
@@ -524,6 +526,27 @@ pub fn run() {
             spellcheck::set_spell_language,
             spellcheck::get_spell_language,
             synonyms::get_synonyms,
+            palettes::get_palettes,
+            palettes::create_palette,
+            palettes::update_palette,
+            palettes::delete_palette,
+            palettes::toggle_palette,
+            palettes::copy_palette,
+            palettes::get_word_groups,
+            palettes::get_word_group,
+            palettes::create_word_group,
+            palettes::update_word_group,
+            palettes::delete_word_group,
+            palettes::get_all_section_names,
+            palettes::add_section,
+            palettes::add_all_sections,
+            palettes::rename_section,
+            palettes::delete_section,
+            palettes::add_word_entry,
+            palettes::add_word_entries,
+            palettes::remove_word_entry,
+            palettes::search_word_groups,
+            palettes::get_active_groups,
         ])
         .setup(|app| {
             if cfg!(debug_assertions) {
@@ -533,6 +556,18 @@ pub fn run() {
                         .build(),
                 )?;
             }
+
+            // Initialize palettes DB in app data directory
+            let app_data = app.path().app_data_dir().expect("Failed to get app data dir");
+            std::fs::create_dir_all(&app_data).ok();
+            let palette_path = app_data.join("palettes.db");
+            let palette_conn = palettes::init_palette_db(
+                palette_path.to_str().expect("Invalid palette path")
+            ).expect("Failed to init palettes DB");
+            app.manage(palettes::PaletteState {
+                db: Mutex::new(palette_conn),
+            });
+
             Ok(())
         })
         .run(tauri::generate_context!())

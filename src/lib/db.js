@@ -326,3 +326,89 @@ export async function getSpellLanguage() {
 export async function getSynonyms(word) {
   return invoke('get_synonyms', { word });
 }
+
+// --- Word Palettes ---
+
+export async function getPalettes() {
+  return invoke('get_palettes');
+}
+
+export async function createPalette(name, description = null) {
+  return invoke('create_palette', { name, description });
+}
+
+export async function updatePalette(id, name, description = null) {
+  return invoke('update_palette', { id, name, description });
+}
+
+export async function deletePalette(id) {
+  return invoke('delete_palette', { id });
+}
+
+export async function togglePalette(id, active) {
+  return invoke('toggle_palette', { id, active });
+}
+
+export async function copyPalette(id, newName) {
+  return invoke('copy_palette', { id, newName });
+}
+
+export async function getWordGroups(paletteId) {
+  return invoke('get_word_groups', { paletteId });
+}
+
+export async function getWordGroup(id) {
+  return invoke('get_word_group', { id });
+}
+
+export async function createWordGroup(paletteId, name, description = null) {
+  return invoke('create_word_group', { paletteId, name, description });
+}
+
+export async function updateWordGroup(id, name, description = null) {
+  return invoke('update_word_group', { id, name, description });
+}
+
+export async function deleteWordGroup(id) {
+  return invoke('delete_word_group', { id });
+}
+
+export async function getAllSectionNames() {
+  return invoke('get_all_section_names');
+}
+
+export async function addSection(groupId, name) {
+  return invoke('add_section', { groupId, name });
+}
+
+export async function addAllSections(groupId, names) {
+  return invoke('add_all_sections', { groupId, names });
+}
+
+export async function renameSection(id, name) {
+  return invoke('rename_section', { id, name });
+}
+
+export async function deleteSection(id) {
+  return invoke('delete_section', { id });
+}
+
+export async function addWordEntry(groupId, sectionId = null, word) {
+  return invoke('add_word_entry', { groupId, sectionId, word });
+}
+
+export async function addWordEntries(groupId, sectionId = null, words) {
+  return invoke('add_word_entries', { groupId, sectionId, words });
+}
+
+export async function removeWordEntry(id) {
+  return invoke('remove_word_entry', { id });
+}
+
+export async function searchWordGroups(query) {
+  return invoke('search_word_groups', { query });
+}
+
+export async function getActiveGroups() {
+  return invoke('get_active_groups');
+}
