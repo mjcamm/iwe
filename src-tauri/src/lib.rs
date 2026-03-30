@@ -519,6 +519,7 @@ pub fn run() {
             scanner::find_similar_phrases,
             scanner::generate_heatmap,
             scanner::chapter_analysis,
+            scanner::debug_stripped_text,
             spellcheck::check_spelling,
             spellcheck::get_spell_suggestions,
             spellcheck::debug_spell_check,

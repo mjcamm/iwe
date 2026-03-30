@@ -297,7 +297,7 @@
                     <div class="occ-chapter-tag">{occ.chapter_title}</div>
                     <button
                       class="occ-snippet"
-                      onclick={() => ongotochapter?.(occ.chapter_id, item.word, occ.char_position)}
+                      onclick={() => ongotochapter?.(occ.chapter_id, item.word, occ.anchor)}
                       title="Jump to this occurrence"
                     >
                       &ldquo;...{@html highlightWord(occ.context, item.word)}...&rdquo;

@@ -78,15 +78,59 @@ pub struct EntityCount {
 fn strip_html(html: &str) -> String {
     let mut plain = String::with_capacity(html.len());
     let mut in_tag = false;
+    let mut in_entity = false;
+    let mut entity_buf = String::new();
+
     for ch in html.chars() {
         if ch == '<' {
+            // Trim trailing whitespace before opening a tag — ProseMirror
+            // trims trailing spaces from text nodes, so "text </p>" produces
+            // "text" not "text ". Without this, char positions drift.
+            while plain.ends_with(' ') || plain.ends_with('\t') {
+                plain.pop();
+            }
             in_tag = true;
         } else if ch == '>' {
             in_tag = false;
         } else if !in_tag {
-            plain.push(ch);
+            if ch == '&' {
+                in_entity = true;
+                entity_buf.clear();
+                entity_buf.push(ch);
+            } else if in_entity {
+                entity_buf.push(ch);
+                if ch == ';' {
+                    let decoded = match entity_buf.as_str() {
+                        "&amp;" => "&",
+                        "&lt;" => "<",
+                        "&gt;" => ">",
+                        "&quot;" => "\"",
+                        "&#39;" | "&apos;" => "'",
+                        "&nbsp;" => " ",
+                        "&#x27;" => "'",
+                        "&#x2F;" => "/",
+                        _ => {
+                            plain.push_str(&entity_buf);
+                            in_entity = false;
+                            continue;
+                        }
+                    };
+                    plain.push_str(decoded);
+                    in_entity = false;
+                } else if entity_buf.len() > 10 {
+                    plain.push_str(&entity_buf);
+                    in_entity = false;
+                }
+            } else {
+                plain.push(ch);
+            }
         }
     }
+
+    if in_entity {
+        plain.push_str(&entity_buf);
+    }
+
     plain
 }
 
@@ -239,7 +283,21 @@ pub fn scan_text(state: tauri::State<'_, AppState>, html: String) -> Result<Vec<
     Ok(scan_plain(&plain, &terms))
 }
 
-/// Debug: return the current search terms so we can verify aliases are loaded
+/// Debug: dump a section of the Rust strip_html output for a chapter
+#[tauri::command]
+pub fn debug_stripped_text(state: tauri::State<'_, AppState>, chapter_id: i64, start: usize, length: usize) -> Result<String, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    let chapter = db::get_chapter(conn, chapter_id).map_err(|e| e.to_string())?
+        .ok_or("Chapter not found")?;
+    let plain = strip_html(&chapter.content);
+    let chars: Vec<char> = plain.chars().collect();
+    let end = (start + length).min(chars.len());
+    let total_len = chars.len();
+    let snippet: String = chars[start.saturating_sub(30)..end.min(chars.len())].iter().collect();
+    Ok(format!("total_chars={} snippet[{}-{}]={:?}", total_len, start.saturating_sub(30), end, snippet))
+}
+
 #[tauri::command]
 pub fn debug_search_terms(state: tauri::State<'_, AppState>) -> Result<Vec<String>, String> {
     let guard = state.db.lock().map_err(|e| e.to_string())?;
@@ -296,6 +354,7 @@ pub struct CandidateLocation {
     pub chapter_id: i64,
     pub chapter_title: String,
     pub context: String,
+    pub char_position: usize,
 }
 
 #[derive(Serialize)]
@@ -540,6 +599,7 @@ pub fn detect_entities(state: tauri::State<'_, AppState>, min_count: Option<usiz
                             chapter_id: chapter.id,
                             chapter_title: chapter.title.clone(),
                             context,
+                            char_position: word_start,
                         });
                     }
                 }

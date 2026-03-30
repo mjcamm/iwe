@@ -246,7 +246,7 @@
     }
     const loc = candidate.locations[browseIndex];
     if (loc && ongotochapter) {
-      ongotochapter(loc.chapter_id, candidate.text);
+      ongotochapter(loc.chapter_id, candidate.text, loc.context);
     }
   }
 

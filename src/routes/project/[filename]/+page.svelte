@@ -6,7 +6,6 @@
   import Editor from '$lib/components/Editor.svelte';
   import EntityPanel from '$lib/components/EntityPanel.svelte';
   import Toasts from '$lib/components/Toasts.svelte';
-  import { buildTextMap } from '$lib/entityHighlight.js';
   import { exportDocx, exportTxt, exportHtml, exportPdf } from '$lib/export.js';
   import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
   import SearchPanel from '$lib/components/SearchPanel.svelte';
@@ -272,81 +271,94 @@
       const ed = editorRef?.getEditor();
       if (!ed) return;
 
+      // Build word index from PM doc — single source of truth
+      const docWords = [];
+      ed.state.doc.descendants((node, pos) => {
+        if (!node.isText) return;
+        const re = /[a-zA-Z0-9\u00C0-\u024F'\u2019]+/g;
+        let m;
+        while ((m = re.exec(node.text)) !== null) {
+          docWords.push({ word: m[0].toLowerCase(), pos: pos + m.index, len: m[0].length });
+        }
+      });
+
+      function toWords(text) {
+        if (!text) return [];
+        return text.replace(/[^a-zA-Z0-9\u00C0-\u024F'\u2019\s]/g, ' ')
+          .trim().split(/\s+/).filter(w => w.length > 0).map(w => w.toLowerCase());
+      }
+
+      function findSequence(words) {
+        if (words.length === 0) return -1;
+        for (let i = 0; i <= docWords.length - words.length; i++) {
+          let match = true;
+          for (let j = 0; j < words.length; j++) {
+            if (docWords[i + j].word !== words[j]) { match = false; break; }
+          }
+          if (match) return i;
+        }
+        return -1;
+      }
+
       let pmFrom = null;
       let pmTo = null;
 
-      // If anchorOrPosition is a number, use it as char_position (from Rust scanner)
-      if (typeof anchorOrPosition === 'number') {
-        const { text, posMap } = buildTextMap(ed.state.doc);
-        const charPos = anchorOrPosition;
-        const matchLen = searchText ? searchText.length : 1;
+      // Build search attempts in priority order:
+      // 1. Anchor text (context around the match — most specific, disambiguates repeated phrases)
+      // 2. Search text (the matched word/phrase itself)
+      const anchor = typeof anchorOrPosition === 'string' ? anchorOrPosition : null;
+      const attempts = [
+        anchor ? toWords(anchor) : [],
+        searchText ? toWords(searchText) : [],
+      ].filter(a => a.length > 0);
 
-        if (charPos < posMap.length && posMap[charPos] >= 0) {
-          pmFrom = posMap[charPos];
-          const endCharPos = charPos + matchLen - 1;
-          pmTo = endCharPos < posMap.length && posMap[endCharPos] >= 0
-            ? posMap[endCharPos] + 1
-            : pmFrom + matchLen;
-        }
-      }
-
-      // Fallback: word-sequence search (for anchors and legacy callers)
-      if (pmFrom === null) {
-        const docWords = [];
-        ed.state.doc.descendants((node, pos) => {
-          if (!node.isText) return;
-          const re = /[a-zA-Z0-9\u00C0-\u024F']+/g;
-          let m;
-          while ((m = re.exec(node.text)) !== null) {
-            docWords.push({ word: m[0].toLowerCase(), pos: pos + m.index, len: m[0].length });
-          }
-        });
-
-        function toWords(text) {
-          if (!text) return [];
-          return text.replace(/[^a-zA-Z0-9\u00C0-\u024F'\s]/g, ' ')
-            .trim().split(/\s+/).filter(w => w.length > 0).map(w => w.toLowerCase());
-        }
-
-        function findSequence(words) {
-          if (words.length === 0) return -1;
-          for (let i = 0; i <= docWords.length - words.length; i++) {
-            let match = true;
-            for (let j = 0; j < words.length; j++) {
-              if (docWords[i + j].word !== words[j]) { match = false; break; }
+      for (const words of attempts) {
+        const idx = findSequence(words);
+        if (idx >= 0) {
+          // Find the actual searchText words within the matched sequence
+          // so we highlight just the search term, not the whole anchor
+          if (searchText && anchor && words.length > toWords(searchText).length) {
+            const searchWords = toWords(searchText);
+            const searchIdx = findSequenceFrom(words, searchWords);
+            if (searchIdx >= 0) {
+              pmFrom = docWords[idx + searchIdx].pos;
+              const last = docWords[idx + searchIdx + searchWords.length - 1];
+              pmTo = last.pos + last.len;
+            } else {
+              pmFrom = docWords[idx].pos;
+              const last = docWords[idx + words.length - 1];
+              pmTo = last.pos + last.len;
             }
-            if (match) return i;
-          }
-          return -1;
-        }
-
-        // Try anchor words, then searchText words, then first word
-        const attempts = [
-          anchorOrPosition ? toWords(String(anchorOrPosition)) : [],
-          searchText ? toWords(searchText) : [],
-        ].filter(a => a.length > 0);
-
-        for (const words of attempts) {
-          const idx = findSequence(words);
-          if (idx >= 0) {
+          } else {
             pmFrom = docWords[idx].pos;
             const last = docWords[idx + words.length - 1];
             pmTo = last.pos + last.len;
-            break;
           }
+          break;
         }
+      }
 
-        // Last resort: find first word
-        if (pmFrom === null && searchText) {
-          const firstWord = toWords(searchText)[0];
-          if (firstWord) {
-            const idx = docWords.findIndex(dw => dw.word === firstWord);
-            if (idx >= 0) {
-              pmFrom = docWords[idx].pos;
-              pmTo = pmFrom + docWords[idx].len;
-            }
+      // Last resort: find first occurrence of the first word
+      if (pmFrom === null && searchText) {
+        const firstWord = toWords(searchText)[0];
+        if (firstWord) {
+          const idx = docWords.findIndex(dw => dw.word === firstWord);
+          if (idx >= 0) {
+            pmFrom = docWords[idx].pos;
+            pmTo = pmFrom + docWords[idx].len;
           }
         }
+      }
+
+      function findSequenceFrom(haystack, needle) {
+        for (let i = 0; i <= haystack.length - needle.length; i++) {
+          let match = true;
+          for (let j = 0; j < needle.length; j++) {
+            if (haystack[i + j] !== needle[j]) { match = false; break; }
+          }
+          if (match) return i;
+        }
+        return -1;
       }
 
       if (pmFrom === null) return;

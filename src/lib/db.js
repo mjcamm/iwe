@@ -416,3 +416,9 @@ export async function searchWordGroups(query) {
 export async function getActiveGroups() {
   return invoke('get_active_groups');
 }
+
+// --- Debug ---
+
+export async function debugStrippedText(chapterId, start, length) {
+  return invoke('debug_stripped_text', { chapterId, start, length });
+}
