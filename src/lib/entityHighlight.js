@@ -2,6 +2,7 @@ import { Plugin, PluginKey } from '@tiptap/pm/state';
 import { Decoration, DecorationSet } from '@tiptap/pm/view';
 
 export const entityHighlightKey = new PluginKey('entityHighlight');
+export const spellCheckKey = new PluginKey('spellCheck');
 
 /**
  * Walk the ProseMirror doc and build plain text + a position map
@@ -67,6 +68,57 @@ export function applyDecorations(editor, matches, posMap, viewedEntityIds) {
 }
 
 /**
+ * Apply spell-error decorations to misspelled words.
+ * `misspelled` is an array of { word, start, end } where start/end are char indices.
+ * `posMap` is the same posMap from buildTextMap.
+ * `entityRanges` is a Set of char indices covered by entity decorations (to skip).
+ */
+export function applySpellDecorations(editor, misspelled, posMap, entityRanges) {
+  if (!editor || !editor.view) return;
+
+  const doc = editor.state.doc;
+  const decorations = [];
+
+  for (const item of misspelled) {
+    if (item.start >= posMap.length) continue;
+
+    // Skip words that overlap entity decorations
+    let overlapsEntity = false;
+    for (let i = item.start; i < item.end && i < posMap.length; i++) {
+      if (entityRanges.has(i)) {
+        overlapsEntity = true;
+        break;
+      }
+    }
+    if (overlapsEntity) continue;
+
+    const from = posMap[item.start];
+    const toIdx = item.end - 1;
+    const to = toIdx < posMap.length ? posMap[toIdx] : null;
+
+    if (from == null || to == null || from < 0 || to < 0) continue;
+    const toPos = to + 1;
+    if (from >= toPos) continue;
+
+    decorations.push(
+      Decoration.inline(from, toPos, {
+        class: 'spell-error',
+        nodeName: 'span',
+      }, {
+        spellError: true,
+        word: item.word,
+      })
+    );
+  }
+
+  const tr = editor.state.tr;
+  tr.setMeta(spellCheckKey, {
+    decorations: DecorationSet.create(doc, decorations),
+  });
+  editor.view.dispatch(tr);
+}
+
+/**
  * Create the ProseMirror plugin that holds and renders decorations.
  */
 export function createHighlightPlugin(onEntityClick) {
@@ -93,48 +145,60 @@ export function createHighlightPlugin(onEntityClick) {
 
       handleDOMEvents: {
         mousedown(view, event) {
-          console.log('[entity-click] mousedown fired', { ctrlKey: event.ctrlKey, metaKey: event.metaKey, button: event.button });
-
-          if (!onEntityClick) { console.log('[entity-click] no onEntityClick callback'); return false; }
+          if (!onEntityClick) return false;
 
           const coords = { left: event.clientX, top: event.clientY };
-          console.log('[entity-click] coords:', coords);
-
           const pos = view.posAtCoords(coords);
-          console.log('[entity-click] posAtCoords result:', pos);
-          if (!pos) { console.log('[entity-click] no pos from coords'); return false; }
+          if (!pos) return false;
 
           const decos = entityHighlightKey.getState(view.state);
-          console.log('[entity-click] decorations state:', decos ? `${decos.find(0, view.state.doc.content.size).length} total decos` : 'null');
-          if (!decos) { console.log('[entity-click] no decoration state'); return false; }
+          if (!decos) return false;
 
           const found = decos.find(pos.pos, pos.pos);
-          console.log('[entity-click] decos at pos', pos.pos, ':', found.length, 'found');
+          if (found.length > 0 && found[0].spec.entityId) {
+            const isCtrl = event.ctrlKey || event.metaKey;
+            const entityId = found[0].spec.entityId;
+            const entityName = found[0].spec.entityName;
 
-          if (found.length > 0) {
-            console.log('[entity-click] first deco spec:', found[0].spec);
-            if (found[0].spec.entityId) {
-              const isCtrl = event.ctrlKey || event.metaKey;
-              const entityId = found[0].spec.entityId;
-              const entityName = found[0].spec.entityName;
-              console.log(`[entity-click] MATCH! entity="${entityName}" id=${entityId} isCtrl=${isCtrl}`);
+            setTimeout(() => {
+              onEntityClick(entityId, entityName, isCtrl);
+            }, 0);
 
-              setTimeout(() => {
-                console.log(`[entity-click] firing callback for "${entityName}" isCtrl=${isCtrl}`);
-                onEntityClick(entityId, entityName, isCtrl);
-              }, 0);
-
-              if (isCtrl) {
-                event.preventDefault();
-                console.log('[entity-click] prevented default for Ctrl+click');
-                return true;
-              }
+            if (isCtrl) {
+              event.preventDefault();
+              return true;
             }
-          } else {
-            console.log('[entity-click] no entity decoration at click position');
           }
           return false;
         },
+      },
+    },
+  });
+}
+
+/**
+ * Create the spell-check decoration plugin.
+ */
+export function createSpellCheckPlugin() {
+  return new Plugin({
+    key: spellCheckKey,
+
+    state: {
+      init() {
+        return DecorationSet.empty;
+      },
+      apply(tr, decorationSet) {
+        const meta = tr.getMeta(spellCheckKey);
+        if (meta?.decorations !== undefined) {
+          return meta.decorations;
+        }
+        return decorationSet.map(tr.mapping, tr.doc);
+      },
+    },
+
+    props: {
+      decorations(state) {
+        return this.getState(state);
       },
     },
   });

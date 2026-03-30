@@ -163,6 +163,15 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         conn.execute_batch("ALTER TABLE entity_notes ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0;")?;
     }
 
+    // Migration: custom_words table for spell checker
+    conn.execute_batch("
+        CREATE TABLE IF NOT EXISTS custom_words (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            word TEXT NOT NULL UNIQUE,
+            source TEXT NOT NULL DEFAULT 'user'
+        );
+    ")?;
+
     Ok(())
 }
 
@@ -347,6 +356,63 @@ pub fn add_ignored_word(conn: &Connection, word: &str) -> rusqlite::Result<()> {
 
 pub fn remove_ignored_word(conn: &Connection, word: &str) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM ignored_words WHERE word = ?1", params![word])?;
+    Ok(())
+}
+
+// ---- Custom words (spell checker) ----
+
+pub fn list_custom_words(conn: &Connection) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT word FROM custom_words ORDER BY word ASC")?;
+    let rows = stmt.query_map([], |row| row.get(0))?;
+    rows.collect()
+}
+
+pub fn get_custom_words_full(conn: &Connection) -> rusqlite::Result<Vec<(i64, String, String)>> {
+    let mut stmt = conn.prepare("SELECT id, word, source FROM custom_words ORDER BY word ASC")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+    })?;
+    rows.collect()
+}
+
+pub fn add_custom_word(conn: &Connection, word: &str, source: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO custom_words (word, source) VALUES (?1, ?2)",
+        params![word, source],
+    )?;
+    Ok(())
+}
+
+pub fn remove_custom_word(conn: &Connection, word: &str) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM custom_words WHERE word = ?1", params![word])?;
+    Ok(())
+}
+
+/// Sync entity names/aliases into custom_words with source='entity'.
+/// Called when entities change.
+pub fn sync_entity_words(conn: &Connection) -> rusqlite::Result<()> {
+    // Remove old entity-sourced words
+    conn.execute("DELETE FROM custom_words WHERE source = 'entity'", [])?;
+
+    // Add current entity names and aliases
+    let entities = list_entities(conn)?;
+    for ent in &entities {
+        for word in ent.name.split_whitespace() {
+            let _ = conn.execute(
+                "INSERT OR IGNORE INTO custom_words (word, source) VALUES (?1, 'entity')",
+                params![word],
+            );
+        }
+        for alias in &ent.aliases {
+            for word in alias.split_whitespace() {
+                let _ = conn.execute(
+                    "INSERT OR IGNORE INTO custom_words (word, source) VALUES (?1, 'entity')",
+                    params![word],
+                );
+            }
+        }
+    }
+
     Ok(())
 }
 

@@ -92,7 +92,8 @@ src/
 │   ├── theme.css                 # Design system CSS variables
 │   ├── toast.js                  # Toast notification store
 │   └── components/
-│       ├── Editor.svelte         # TipTap editor + toolbar + suggestions
+│       ├── Editor.svelte         # TipTap editor + toolbar + suggestions + spellcheck + context menu
+│       ├── WordModal.svelte      # Combined spelling & synonym modal
 │       ├── EntityPanel.svelte    # Entity CRUD + notes + detection
 │       ├── ChapterNav.svelte     # Chapter sidebar
 │       ├── SearchPanel.svelte    # Text/dialogue/relationship search
@@ -102,23 +103,29 @@ src/
 src-tauri/
 ├── src/
 │   ├── main.rs                   # Entry point
-│   ├── lib.rs                    # ~44 Tauri commands + PDF export
+│   ├── lib.rs                    # ~49 Tauri commands + PDF export
 │   ├── db.rs                     # Database schema + all queries
 │   ├── scanner.rs                # Aho-Corasick scanner + 13 commands
+│   ├── spellcheck.rs             # Hunspell dictionary + spell checking + custom words
+│   ├── synonyms.rs               # Moby Thesaurus lookup (in-memory)
 │   └── wordlists.rs              # Verb/adjective/adverb lists for POS tags
 ├── fonts/
 │   └── LiberationSerif-*.ttf     # Embedded fonts for PDF export
+├── resources/
+│   ├── dictionaries/en_US.*      # Hunspell dictionary (embedded via include_str!)
+│   └── mthesaur.txt              # Moby Thesaurus II (embedded via include_str!)
 ├── capabilities/default.json     # Tauri permissions
 └── Cargo.toml
 ```
 
-## Database Schema (11 tables)
+## Database Schema (12 tables)
 
 - **chapters** — id, title, content (HTML), sort_order, timestamps
 - **entities** — id, name, entity_type (character/place/thing), description, color, visible
 - **aliases** — entity_id, alias text
 - **entity_fields** — key-value custom fields (schema exists, UI not built)
 - **ignored_words** — words excluded from entity detection
+- **custom_words** — spell checker custom dictionary (word, source: 'user' or 'entity')
 - **entity_notes** — pinned text excerpts from chapters, with sort_order
 - **entity_free_notes** — free-form note cards per entity, with sort_order
 - **writing_activity** — per-save log (timestamp, chapter, word counts, delta)
@@ -144,6 +151,18 @@ Visibility is stored in the DB (`visible` column). `build_terms()` only includes
 
 ### Live entity suggestion bubbles
 Every 4 keystrokes, `checkForSuggestion()` in Editor.svelte checks the last 150 chars for capitalized mid-sentence words. Calls Rust `check_word` to verify against known entities + ignored + hard excludes. Shows floating bubbles with 30-second CSS-animated progress bars. Multiple bubbles can show simultaneously.
+
+### Spell checking
+Uses a hand-rolled Hunspell-compatible dictionary parser (`spellcheck.rs`) that reads `en_US.dic` + `en_US.aff` (embedded via `include_str!`), expands affix rules, and builds a `HashSet<String>` of ~180K words at startup. Spell checking runs after entity scanning (400ms debounce) — words covered by entity decorations are skipped. Suggestions use edit-distance-1 and edit-distance-2 candidates. The `custom_words` table stores per-project additions with source tracking ('user' vs 'entity'). Entity names/aliases are auto-synced to the custom dictionary on create/update/delete.
+
+### Synonyms (Moby Thesaurus)
+The Moby Thesaurus II (~30K entries) is embedded via `include_str!` and parsed into an in-memory `HashMap` at startup (`synonyms.rs`). Lookups try the exact word first, then strip common suffixes (-s, -ed, -ing, -ly, etc.) to find base forms. Returns up to 200 synonyms per word.
+
+### Right-click context menu
+The editor has a custom context menu (`handleContextMenu` in Editor.svelte) that adapts based on what was right-clicked: entity words get "Go to definition" and "Find references"; misspelled words get "Spelling & Synonyms..." and "Add to dictionary"; all words get "Synonyms..." and entity creation options. The WordModal component is a large modal with flowing pill grids for both spelling suggestions and synonyms.
+
+### Spell + entity decoration coexistence
+Two separate ProseMirror plugins manage decorations independently: `entityHighlightKey` for entity highlights and `spellCheckKey` for red squiggly underlines. The `applyingDecorations` flag prevents both from triggering infinite loops. Spell decorations skip any character positions covered by entity matches.
 
 ### Writing stats tracking
 On every content save (500ms debounce), the project page computes word count delta and calls `logWritingActivity()`. The Rust side updates `daily_stats` atomically. Active time is computed from gaps between consecutive activities (capped at session_gap_minutes).

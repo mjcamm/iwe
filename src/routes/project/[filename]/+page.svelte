@@ -1,7 +1,7 @@
 <script>
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
-  import { getProjectsDir, getSettings, saveSettings, openProject, getChapters, getChapter, addChapter, updateChapterContent, renameChapter, deleteChapter, getEntities, createEntity, updateEntity, deleteEntity, setEntityVisible, addAlias, removeAlias, scanAllChapters, getNavHistory, pushNavEntry, truncateNavAfter, addEntityNote, logWritingActivity } from '$lib/db.js';
+  import { getProjectsDir, getSettings, saveSettings, openProject, getChapters, getChapter, addChapter, updateChapterContent, renameChapter, deleteChapter, getEntities, createEntity, updateEntity, deleteEntity, setEntityVisible, addAlias, removeAlias, scanAllChapters, getNavHistory, pushNavEntry, truncateNavAfter, addEntityNote, logWritingActivity, setSpellLanguage } from '$lib/db.js';
   import ChapterNav from '$lib/components/ChapterNav.svelte';
   import Editor from '$lib/components/Editor.svelte';
   import EntityPanel from '$lib/components/EntityPanel.svelte';
@@ -144,6 +144,9 @@
     const settings = await getSettings();
     if (settings.leftPanelWidth) leftWidth = settings.leftPanelWidth;
     if (settings.rightPanelWidth) rightWidth = settings.rightPanelWidth;
+    if (settings.spellLanguage) {
+      try { await setSpellLanguage(settings.spellLanguage); } catch {}
+    }
 
     const filepath = `${dir}/${data.filename}`;
     await openProject(filepath);

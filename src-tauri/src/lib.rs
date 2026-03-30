@@ -1,5 +1,7 @@
 mod db;
 mod scanner;
+mod spellcheck;
+mod synonyms;
 mod wordlists;
 
 use db::AppState;
@@ -74,21 +76,27 @@ fn get_entities(state: tauri::State<'_, AppState>) -> Result<Vec<db::Entity>, St
 fn create_entity(state: tauri::State<'_, AppState>, name: String, entity_type: String, description: String, color: Option<String>) -> Result<i64, String> {
     let guard = state.db.lock().map_err(|e| e.to_string())?;
     let conn = guard.as_ref().ok_or("No project open")?;
-    db::create_entity(conn, &name, &entity_type, &description, &color.unwrap_or_default()).map_err(|e| e.to_string())
+    let id = db::create_entity(conn, &name, &entity_type, &description, &color.unwrap_or_default()).map_err(|e| e.to_string())?;
+    let _ = db::sync_entity_words(conn);
+    Ok(id)
 }
 
 #[tauri::command]
 fn update_entity(state: tauri::State<'_, AppState>, id: i64, name: String, entity_type: String, description: String, color: String) -> Result<(), String> {
     let guard = state.db.lock().map_err(|e| e.to_string())?;
     let conn = guard.as_ref().ok_or("No project open")?;
-    db::update_entity(conn, id, &name, &entity_type, &description, &color).map_err(|e| e.to_string())
+    db::update_entity(conn, id, &name, &entity_type, &description, &color).map_err(|e| e.to_string())?;
+    let _ = db::sync_entity_words(conn);
+    Ok(())
 }
 
 #[tauri::command]
 fn delete_entity(state: tauri::State<'_, AppState>, id: i64) -> Result<(), String> {
     let guard = state.db.lock().map_err(|e| e.to_string())?;
     let conn = guard.as_ref().ok_or("No project open")?;
-    db::delete_entity(conn, id).map_err(|e| e.to_string())
+    db::delete_entity(conn, id).map_err(|e| e.to_string())?;
+    let _ = db::sync_entity_words(conn);
+    Ok(())
 }
 
 #[tauri::command]
@@ -102,14 +110,18 @@ fn set_entity_visible(state: tauri::State<'_, AppState>, id: i64, visible: bool)
 fn add_alias(state: tauri::State<'_, AppState>, entity_id: i64, alias: String) -> Result<(), String> {
     let guard = state.db.lock().map_err(|e| e.to_string())?;
     let conn = guard.as_ref().ok_or("No project open")?;
-    db::add_alias(conn, entity_id, &alias).map_err(|e| e.to_string())
+    db::add_alias(conn, entity_id, &alias).map_err(|e| e.to_string())?;
+    let _ = db::sync_entity_words(conn);
+    Ok(())
 }
 
 #[tauri::command]
 fn remove_alias(state: tauri::State<'_, AppState>, entity_id: i64, alias: String) -> Result<(), String> {
     let guard = state.db.lock().map_err(|e| e.to_string())?;
     let conn = guard.as_ref().ok_or("No project open")?;
-    db::remove_alias(conn, entity_id, &alias).map_err(|e| e.to_string())
+    db::remove_alias(conn, entity_id, &alias).map_err(|e| e.to_string())?;
+    let _ = db::sync_entity_words(conn);
+    Ok(())
 }
 
 // ---- Entity notes ----
@@ -441,10 +453,16 @@ fn remove_ignored_word(state: tauri::State<'_, AppState>, word: String) -> Resul
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Initialize spell checker and synonym state at startup
+    let spell_state = spellcheck::init_spellcheck();
+    let synonym_state = synonyms::init_synonyms();
+
     tauri::Builder::default()
         .manage(AppState {
             db: Mutex::new(None),
         })
+        .manage(spell_state)
+        .manage(synonym_state)
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
@@ -499,6 +517,13 @@ pub fn run() {
             scanner::find_similar_phrases,
             scanner::generate_heatmap,
             scanner::chapter_analysis,
+            spellcheck::check_spelling,
+            spellcheck::add_to_dictionary,
+            spellcheck::remove_from_dictionary,
+            spellcheck::get_custom_words,
+            spellcheck::set_spell_language,
+            spellcheck::get_spell_language,
+            synonyms::get_synonyms,
         ])
         .setup(|app| {
             if cfg!(debug_assertions) {

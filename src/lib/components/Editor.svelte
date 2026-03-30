@@ -7,8 +7,9 @@
   import Superscript from '@tiptap/extension-superscript';
   import Subscript from '@tiptap/extension-subscript';
   import { Extension } from '@tiptap/core';
-  import { scanText, checkWord, addIgnoredWord } from '$lib/db.js';
-  import { createHighlightPlugin, buildTextMap, applyDecorations } from '$lib/entityHighlight.js';
+  import { scanText, checkWord, addIgnoredWord, checkSpelling, addToDictionary } from '$lib/db.js';
+  import { createHighlightPlugin, createSpellCheckPlugin, buildTextMap, applyDecorations, applySpellDecorations, entityHighlightKey, spellCheckKey } from '$lib/entityHighlight.js';
+  import WordModal from './WordModal.svelte';
 
   let { openTabs, activeTabId, chapter, onselecttab, onclosetab, onchange, onselectionchange, onentityclick, onquickadd, viewedEntityIds = new Set() } = $props();
 
@@ -23,6 +24,16 @@
   let scanPosMap = $state([]);
   let scanTimer = null;
   let applyingDecorations = false;
+
+  // Spell check state
+  let spellErrors = $state([]); // [{ word, start, end, suggestions }]
+  let spellTimer = null;
+
+  // Context menu state
+  let ctxMenu = $state({ show: false, x: 0, y: 0, word: '', from: 0, to: 0, isEntity: false, entityId: null, entityName: null, isMisspelled: false, suggestions: [] });
+
+  // Word modal state
+  let wordModal = $state({ show: false, word: '', isMisspelled: false, suggestions: [], from: 0, to: 0 });
 
   // Live suggestion bubbles — multiple at once, each with own timer
   let suggestions = $state([]); // [{ word, top, left, startTime, id }]
@@ -140,6 +151,149 @@
     }
   }
 
+  // ---- Context menu ----
+
+  function getWordAtPos(view, pos) {
+    const doc = view.state.doc;
+    const wordPattern = /[a-zA-Z\u00C0-\u024F'\u2019]/;
+
+    // Walk backward from pos to find word start
+    let from = pos;
+    while (from > 0) {
+      const prevChar = doc.textBetween(from - 1, from, '', '');
+      if (!prevChar || !wordPattern.test(prevChar)) break;
+      from--;
+    }
+
+    // Walk forward from pos to find word end
+    let to = pos;
+    const docSize = doc.content.size;
+    while (to < docSize) {
+      const nextChar = doc.textBetween(to, to + 1, '', '');
+      if (!nextChar || !wordPattern.test(nextChar)) break;
+      to++;
+    }
+
+    if (from === to) return null;
+    const rawWord = doc.textBetween(from, to, '', '');
+    const word = rawWord.replace(/^['\u2019]+|['\u2019]+$/g, '');
+    if (word.length < 2) return null;
+
+    // Adjust from/to if we stripped leading/trailing apostrophes
+    const leadStripped = rawWord.length - rawWord.replace(/^['\u2019]+/, '').length;
+    const trailStripped = rawWord.length - rawWord.replace(/['\u2019]+$/, '').length;
+
+    return { word, from: from + leadStripped, to: to - trailStripped };
+  }
+
+  function handleContextMenu(e) {
+    if (!editorRaw) return;
+    e.preventDefault();
+
+    const coords = { left: e.clientX, top: e.clientY };
+    const posResult = editorRaw.view.posAtCoords(coords);
+    if (!posResult) return;
+
+    const pos = posResult.pos;
+    const wordInfo = getWordAtPos(editorRaw.view, pos);
+    if (!wordInfo) return;
+
+    // Check if this word is an entity
+    const entityDecos = entityHighlightKey.getState(editorRaw.state);
+    const entityFound = entityDecos ? entityDecos.find(wordInfo.from, wordInfo.to) : [];
+    const entityDeco = entityFound.find(d => d.spec.entityId);
+
+    // Check if this word is misspelled
+    const spellDecos = spellCheckKey.getState(editorRaw.state);
+    const spellFound = spellDecos ? spellDecos.find(wordInfo.from, wordInfo.to) : [];
+    const isSpellError = spellFound.some(d => d.spec.spellError);
+
+    // Find suggestions from spellErrors state
+    let suggestions = [];
+    if (isSpellError) {
+      const err = spellErrors.find(e => e.word.toLowerCase() === wordInfo.word.toLowerCase());
+      if (err) suggestions = err.suggestions;
+    }
+
+    ctxMenu = {
+      show: true,
+      x: e.clientX,
+      y: e.clientY,
+      word: wordInfo.word,
+      from: wordInfo.from,
+      to: wordInfo.to,
+      isEntity: !!entityDeco,
+      entityId: entityDeco?.spec.entityId || null,
+      entityName: entityDeco?.spec.entityName || null,
+      isMisspelled: isSpellError,
+      suggestions,
+    };
+  }
+
+  function closeCtxMenu() {
+    ctxMenu = { ...ctxMenu, show: false };
+  }
+
+  function ctxOpenModal() {
+    wordModal = {
+      show: true,
+      word: ctxMenu.word,
+      isMisspelled: ctxMenu.isMisspelled,
+      suggestions: ctxMenu.suggestions,
+      from: ctxMenu.from,
+      to: ctxMenu.to,
+    };
+    closeCtxMenu();
+  }
+
+  async function ctxAddToDictionary() {
+    await addToDictionary(ctxMenu.word);
+    closeCtxMenu();
+    // Re-scan to remove squiggly
+    doScan();
+  }
+
+  function ctxGoToDefinition() {
+    if (ctxMenu.entityId) {
+      onentityclick?.(ctxMenu.entityId, ctxMenu.entityName, true);
+    }
+    closeCtxMenu();
+  }
+
+  function ctxFindReferences() {
+    if (ctxMenu.entityId) {
+      onentityclick?.(ctxMenu.entityId, ctxMenu.entityName, false);
+    }
+    closeCtxMenu();
+  }
+
+  function ctxCreateEntity() {
+    onquickadd?.(ctxMenu.word);
+    closeCtxMenu();
+  }
+
+  async function ctxIgnore() {
+    await addIgnoredWord(ctxMenu.word);
+    closeCtxMenu();
+    doScan();
+  }
+
+  function handleModalReplace(newWord, from, to) {
+    if (!editorRaw) return;
+    const { tr } = editorRaw.state;
+    tr.replaceWith(from, to, editorRaw.state.schema.text(newWord));
+    editorRaw.view.dispatch(tr);
+    editorRaw.view.focus();
+  }
+
+  function handleModalDictionaryAdd() {
+    doScan();
+  }
+
+  function handleModalClose() {
+    wordModal = { ...wordModal, show: false };
+  }
+
   function toHtml(content) {
     if (!content) return '';
     if (content.trim().startsWith('<')) return content;
@@ -150,14 +304,86 @@
     if (!editorRaw) return;
     const { text, posMap } = buildTextMap(editorRaw.state.doc);
     scanText(text).then(matches => {
-      console.log(`[scan] found ${matches.length} matches, text length: ${text.length}, posMap length: ${posMap.length}`);
-      if (matches.length > 0) {
-        const sample = matches.slice(0, 5).map(m => `"${m.matched_text}" at ${m.start}-${m.end}`);
-        console.log('[scan] samples:', sample);
-      }
       scanMatches = matches;
       scanPosMap = posMap;
+      // Trigger spell check after entity scan
+      doSpellCheck(text, posMap, matches);
     }).catch(e => { console.warn('[scan] error:', e); });
+  }
+
+  function doSpellCheck(text, posMap, entityMatches) {
+    if (!text) return;
+
+    // Build entity char ranges to exclude
+    const entityChars = new Set();
+    for (const m of entityMatches) {
+      for (let i = m.start; i < m.end; i++) entityChars.add(i);
+    }
+
+    // Extract unique words with their positions
+    const wordRegex = /[a-zA-Z\u00C0-\u024F'\u2019]+/g;
+    let match;
+    const uniqueWords = new Map(); // word -> [{ start, end }]
+    while ((match = wordRegex.exec(text)) !== null) {
+      const w = match[0];
+      // Skip short words, all-apostrophe, or entity-overlapping
+      if (w.length < 2) continue;
+      const start = match.index;
+      const end = start + w.length;
+      let inEntity = false;
+      for (let i = start; i < end; i++) {
+        if (entityChars.has(i)) { inEntity = true; break; }
+      }
+      if (inEntity) continue;
+
+      // Clean word: strip leading/trailing apostrophes
+      const cleaned = w.replace(/^['\u2019]+|['\u2019]+$/g, '');
+      if (cleaned.length < 2) continue;
+
+      if (!uniqueWords.has(cleaned.toLowerCase())) {
+        uniqueWords.set(cleaned.toLowerCase(), []);
+      }
+      uniqueWords.get(cleaned.toLowerCase()).push({ word: cleaned, start, end });
+    }
+
+    const wordsToCheck = [...uniqueWords.keys()];
+    if (wordsToCheck.length === 0) {
+      spellErrors = [];
+      if (editorRaw) {
+        applyingDecorations = true;
+        applySpellDecorations(editorRaw, [], posMap, entityChars);
+        applyingDecorations = false;
+      }
+      return;
+    }
+
+    checkSpelling(wordsToCheck).then(results => {
+      // results is array of { word, suggestions } for misspelled words
+      const errorMap = new Map();
+      for (const r of results) {
+        errorMap.set(r.word.toLowerCase(), r.suggestions);
+      }
+
+      // Build error positions
+      const errors = [];
+      for (const [lower, positions] of uniqueWords) {
+        if (errorMap.has(lower)) {
+          const sug = errorMap.get(lower);
+          for (const pos of positions) {
+            errors.push({ word: pos.word, start: pos.start, end: pos.end, suggestions: sug });
+          }
+        }
+      }
+
+      spellErrors = errors;
+
+      // Apply spell decorations
+      if (editorRaw) {
+        applyingDecorations = true;
+        applySpellDecorations(editorRaw, errors, posMap, entityChars);
+        applyingDecorations = false;
+      }
+    }).catch(e => { console.warn('[spell] error:', e); });
   }
 
   // Exported so parent can trigger rescans after entity CRUD
@@ -197,6 +423,7 @@
               createHighlightPlugin((entityId, entityName, isCtrl) => {
                 onentityclick?.(entityId, entityName, isCtrl);
               }),
+              createSpellCheckPlugin(),
             ];
           },
         }),
@@ -205,7 +432,7 @@
       editorProps: {
         attributes: {
           class: 'prose-editor',
-          spellcheck: 'true'
+          spellcheck: 'false'
         },
       },
       onUpdate: ({ editor: ed }) => {
@@ -427,7 +654,8 @@
     </div>
   {/if}
 
-  <div class="editor-scroll">
+  <div class="editor-scroll" oncontextmenu={handleContextMenu}
+    onclick={() => { closeCtxMenu(); }}>
     <div bind:this={element} class="editor-page"></div>
     {#if !chapter}
       <div class="editor-empty">
@@ -449,6 +677,65 @@
       </div>
     {/each}
   </div>
+
+  {#if ctxMenu.show}
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="ctx-backdrop" onclick={closeCtxMenu} oncontextmenu={(e) => { e.preventDefault(); closeCtxMenu(); }}>
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div class="ctx-menu" style="left: {ctxMenu.x}px; top: {ctxMenu.y}px;" onclick={(e) => e.stopPropagation()}>
+        {#if ctxMenu.isEntity}
+          <button class="ctx-item" onclick={ctxGoToDefinition}>
+            <i class="bi bi-link-45deg ctx-icon"></i>
+            Go to definition
+          </button>
+          <button class="ctx-item" onclick={ctxFindReferences}>
+            <i class="bi bi-search ctx-icon"></i>
+            Find references
+          </button>
+        {/if}
+        {#if ctxMenu.isMisspelled}
+          <button class="ctx-item" onclick={ctxOpenModal}>
+            <i class="bi bi-spellcheck ctx-icon"></i>
+            Spelling & Synonyms...
+          </button>
+          <button class="ctx-item" onclick={ctxAddToDictionary}>
+            <i class="bi bi-plus-circle ctx-icon"></i>
+            Add to dictionary
+          </button>
+        {:else}
+          <button class="ctx-item" onclick={ctxOpenModal}>
+            <i class="bi bi-journal-text ctx-icon"></i>
+            Synonyms...
+          </button>
+        {/if}
+        {#if ctxMenu.isEntity || ctxMenu.isMisspelled}
+          <div class="ctx-divider"></div>
+        {/if}
+        {#if !ctxMenu.isEntity}
+          <button class="ctx-item" onclick={ctxCreateEntity}>
+            <i class="bi bi-person-plus ctx-icon"></i>
+            Create entity "{ctxMenu.word}"
+          </button>
+        {/if}
+        <button class="ctx-item" onclick={ctxIgnore}>
+          <i class="bi bi-eye-slash ctx-icon"></i>
+            Ignore "{ctxMenu.word}"
+          </button>
+      </div>
+    </div>
+  {/if}
+
+  <WordModal
+    show={wordModal.show}
+    word={wordModal.word}
+    isMisspelled={wordModal.isMisspelled}
+    suggestions={wordModal.suggestions}
+    editorFrom={wordModal.from}
+    editorTo={wordModal.to}
+    onreplace={handleModalReplace}
+    ondictionaryadd={handleModalDictionaryAdd}
+    onclose={handleModalClose}
+  />
 </div>
 
 <style>
@@ -647,4 +934,42 @@
     cursor: pointer; font-size: 1rem; line-height: 1; padding: 0 2px;
   }
   .suggestion-dismiss:hover { color: var(--iwe-text); }
+
+  /* Spell error underlines */
+  .editor-page :global(.spell-error) {
+    text-decoration: wavy underline;
+    text-decoration-color: var(--iwe-danger, #b85450);
+    text-underline-offset: 3px;
+    text-decoration-thickness: 1.5px;
+  }
+
+  /* Context menu */
+  .ctx-backdrop {
+    position: fixed; inset: 0; z-index: 1000;
+  }
+  .ctx-menu {
+    position: fixed; z-index: 1001;
+    background: var(--iwe-bg); border: 1px solid var(--iwe-border);
+    border-radius: var(--iwe-radius); padding: 0.3rem;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.12), 0 2px 6px rgba(0,0,0,0.06);
+    min-width: 200px;
+    font-family: var(--iwe-font-ui); font-size: 0.82rem;
+    animation: ctxFade 0.1s ease;
+  }
+  @keyframes ctxFade {
+    from { opacity: 0; transform: scale(0.96); }
+    to { opacity: 1; transform: scale(1); }
+  }
+  .ctx-item {
+    display: flex; align-items: center; gap: 0.5rem;
+    width: 100%; background: none; border: none; border-radius: var(--iwe-radius-sm);
+    cursor: pointer; padding: 0.45rem 0.6rem; text-align: left;
+    color: var(--iwe-text); transition: background 80ms;
+  }
+  .ctx-item:hover { background: var(--iwe-bg-hover); }
+  .ctx-icon { color: var(--iwe-text-muted); flex-shrink: 0; font-size: 0.85rem; width: 1rem; text-align: center; }
+  .ctx-divider {
+    height: 1px; background: var(--iwe-border-light);
+    margin: 0.2rem 0.4rem;
+  }
 </style>

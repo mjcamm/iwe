@@ -294,3 +294,35 @@ export async function truncateNavAfter(id) {
 export async function findReferences(entityId) {
   return invoke('find_references', { entityId });
 }
+
+// --- Spell checker ---
+
+export async function checkSpelling(words) {
+  return invoke('check_spelling', { words });
+}
+
+export async function addToDictionary(word) {
+  return invoke('add_to_dictionary', { word });
+}
+
+export async function removeFromDictionary(word) {
+  return invoke('remove_from_dictionary', { word });
+}
+
+export async function getCustomWords() {
+  return invoke('get_custom_words');
+}
+
+export async function setSpellLanguage(language) {
+  return invoke('set_spell_language', { language });
+}
+
+export async function getSpellLanguage() {
+  return invoke('get_spell_language');
+}
+
+// --- Synonyms ---
+
+export async function getSynonyms(word) {
+  return invoke('get_synonyms', { word });
+}

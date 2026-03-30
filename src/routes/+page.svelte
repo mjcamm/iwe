@@ -3,21 +3,36 @@
   import { goto } from '$app/navigation';
   import { open } from '@tauri-apps/plugin-dialog';
   import { revealItemInDir } from '@tauri-apps/plugin-opener';
-  import { getProjectsDir, setProjectsDir, listProjects, createProject, deleteProject } from '$lib/db.js';
+  import { getProjectsDir, setProjectsDir, listProjects, createProject, deleteProject, getSettings, saveSettings, setSpellLanguage, getSpellLanguage } from '$lib/db.js';
 
   let projectsDir = $state(null);
   let projects = $state([]);
   let newTitle = $state('');
   let showNewForm = $state(false);
   let loading = $state(true);
+  let spellLang = $state('en_US');
 
   onMount(async () => {
     projectsDir = await getProjectsDir();
     if (projectsDir) {
       projects = await listProjects();
     }
+    // Load spell language preference
+    const settings = await getSettings();
+    if (settings.spellLanguage) {
+      spellLang = settings.spellLanguage;
+      try { await setSpellLanguage(spellLang); } catch {}
+    }
     loading = false;
   });
+
+  async function handleSpellLangChange(e) {
+    spellLang = e.target.value;
+    const settings = await getSettings();
+    settings.spellLanguage = spellLang;
+    await saveSettings(settings);
+    try { await setSpellLanguage(spellLang); } catch {}
+  }
 
   async function pickFolder() {
     const selected = await open({ directory: true, title: 'Choose where to store your projects' });
@@ -101,6 +116,14 @@
 
       <div class="home-path">
         <span>{projectsDir}</span>
+        <span class="home-path-sep"></span>
+        <label class="spell-lang-label">
+          Dictionary:
+          <select class="spell-lang-select" value={spellLang} onchange={handleSpellLangChange}>
+            <option value="en_US">English (US)</option>
+            <option value="en_GB">English (UK)</option>
+          </select>
+        </label>
       </div>
 
       {#if projects.length > 0}
@@ -182,8 +205,26 @@
   .home-path {
     font-size: 0.75rem; color: var(--iwe-text-faint); margin-bottom: 1.5rem;
     padding-bottom: 1rem; border-bottom: 1px solid var(--iwe-border-light);
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    display: flex; align-items: center; gap: 0.5rem;
   }
+  .home-path > span:first-child {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1;
+  }
+  .home-path-sep {
+    width: 3px; height: 3px; border-radius: 50%; background: var(--iwe-text-faint);
+    flex-shrink: 0;
+  }
+  .spell-lang-label {
+    display: flex; align-items: center; gap: 0.3rem;
+    font-size: 0.75rem; color: var(--iwe-text-muted); white-space: nowrap; flex-shrink: 0;
+  }
+  .spell-lang-select {
+    font-family: var(--iwe-font-ui); font-size: 0.75rem;
+    background: var(--iwe-bg); border: 1px solid var(--iwe-border);
+    border-radius: var(--iwe-radius-sm); padding: 0.15rem 0.4rem;
+    color: var(--iwe-text-secondary); cursor: pointer;
+  }
+  .spell-lang-select:focus { border-color: var(--iwe-accent); outline: none; }
 
   .project-list { list-style: none; padding: 0; margin: 0; }
 

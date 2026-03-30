@@ -16,7 +16,29 @@
       "Bash(cp liberation-fonts-ttf-2.1.5/LiberationSerif-Regular.ttf .)",
       "Bash(cp liberation-fonts-ttf-2.1.5/LiberationSerif-Bold.ttf .)",
       "Bash(head -100 /c/Users/mitch/Documents/projects/writing-iwe/src/routes/project/[filename]/+page.svelte)",
-      "Bash(wc:*)"
+      "Bash(wc:*)",
+      "WebFetch(domain:www.gutenberg.org)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(curl -sL -o src-tauri/resources/dictionaries/en_US.aff \"https://raw.githubusercontent.com/LibreOffice/dictionaries/master/en/en_US.aff\")",
+      "Bash(curl -sL -o src-tauri/resources/dictionaries/en_US.dic \"https://raw.githubusercontent.com/LibreOffice/dictionaries/master/en/en_US.dic\")",
+      "Bash(curl -sL \"https://www.gutenberg.org/files/3202/files/mthesaur.txt\" -o /tmp/mthesaur.txt)",
+      "Read(//tmp/**)",
+      "Bash(npx svelte-check:*)",
+      "Bash(taskkill //F //IM \"app.exe\")",
+      "Bash(taskkill //F //IM \"cargo.exe\")",
+      "Bash(curl -sL \"https://raw.githubusercontent.com/wooorm/dictionaries/main/dictionaries/en/index.dic\")",
+      "Bash(curl -sL https://raw.githubusercontent.com/wooorm/dictionaries/main/dictionaries/en/index.dic)",
+      "Bash(curl -sL \"https://raw.githubusercontent.com/wooorm/dictionaries/main/dictionaries/en-US/index.dic\")",
+      "Bash(curl -sL https://raw.githubusercontent.com/wooorm/dictionaries/main/dictionaries/en-US/index.dic)",
+      "Bash(curl -sL \"https://raw.githubusercontent.com/wooorm/dictionaries/main/dictionaries/en-GB/index.dic\")",
+      "Bash(curl -sL https://raw.githubusercontent.com/wooorm/dictionaries/main/dictionaries/en-GB/index.dic)",
+      "Bash(curl -sL \"https://raw.githubusercontent.com/wooorm/dictionaries/main/dictionaries/en-AU/index.dic\")",
+      "Bash(curl -sL https://raw.githubusercontent.com/wooorm/dictionaries/main/dictionaries/en-AU/index.dic)",
+      "Bash(curl -sL https://raw.githubusercontent.com/wooorm/dictionaries/main/dictionaries/en/license)",
+      "Bash(curl -sL https://raw.githubusercontent.com/wooorm/dictionaries/main/dictionaries/en-GB/license)",
+      "Bash(curl:*)",
+      "WebSearch",
+      "Bash(cargo build:*)"
     ]
   }
 }

@@ -25,3 +25,7 @@ vite.config.ts.timestamp-*
 # Tauri
 /src-tauri/target
 /src-tauri/gen
+
+# Bundled resources (too large for git, embedded via include_str!)
+/src-tauri/resources/dictionaries/
+/src-tauri/resources/mthesaur.txt
