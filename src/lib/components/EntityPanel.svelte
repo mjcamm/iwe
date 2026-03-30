@@ -21,7 +21,7 @@
     onclearselection
   } = $props();
 
-  let view = $state('list'); // 'list' | 'create' | 'edit' | 'detect' | 'references' | 'view'
+  let view = $state('list'); // 'list' | 'create' | 'detect' | 'references' | 'view'
   let editingEntity = $state(null);
   let filterText = $state('');
   let filterType = $state('all');
@@ -86,6 +86,12 @@
 
   async function showEntityView(entity) {
     viewEntity = entity;
+    editingEntity = entity;
+    editName = entity.name;
+    editType = entity.entity_type;
+    editColor = entity.color || defaultColors[entity.entity_type];
+    newAlias = '';
+    showDeleteConfirm = false;
     viewNotesLoading = true;
     view = 'view';
     try {
@@ -209,7 +215,7 @@
     try {
       candidates = await detectEntities(3);
       // Sort by occurrence count, most common first
-      candidates.sort((a, b) => b.count - a.count);
+      candidates.sort((a, b) => b.count - a.count || a.text.localeCompare(b.text));
     } catch (e) {
       console.warn('Detection failed:', e);
       candidates = [];
@@ -389,7 +395,9 @@
               <span class="group-count">{items.length}</span>
             </div>
             {#each items as entity (entity.id)}
-              <div class="entity-item" class:viewed={entity.visible}>
+              <!-- svelte-ignore a11y_click_events_have_key_events -->
+              <!-- svelte-ignore a11y_no_static_element_interactions -->
+              <div class="entity-item" class:viewed={entity.visible} onclick={() => showEntityView(entity)}>
                 <span class="entity-color-dot" style="background: {entity.color}"></span>
                 <div class="entity-info">
                   <span class="entity-name">{entity.name}</span>
@@ -399,57 +407,14 @@
                     </span>
                   {/if}
                 </div>
-                <div class="entity-actions">
-                  <button
-                    class="entity-action-btn"
-                    class:active={entity.visible}
-                    onclick={() => ontoggleview?.(entity.id)}
-                    title={entity.visible ? 'Hide highlights' : 'Show highlights'}
-                  >
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                      {#if entity.visible}
-                        <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
-                        <circle cx="12" cy="12" r="3"/>
-                      {:else}
-                        <path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94"/>
-                        <path d="M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19"/>
-                        <line x1="1" y1="1" x2="23" y2="23"/>
-                      {/if}
-                    </svg>
-                  </button>
-                  {#if selectedText}
-                    <button
-                      class="entity-action-btn pin-btn"
-                      onclick={async () => { await pinSelectedText(entity.id); }}
-                      title={`Pin selection to ${entity.name}`}
-                    >
-                      <i class="bi bi-pin-angle" style="font-size: 0.85rem;"></i>
-                    </button>
-                  {/if}
-                  <button
-                    class="entity-action-btn"
-                    onclick={() => showEntityView(entity)}
-                    title={`View ${entity.name}`}
-                  >
-                    <i class="bi bi-folder2-open" style="font-size: 0.85rem;"></i>
-                  </button>
-                  <button
-                    class="entity-action-btn"
-                    onclick={() => showReferences(entity)}
-                    title="Find all references"
-                  >
-                    <i class="bi bi-search" style="font-size: 0.85rem;"></i>
-                  </button>
-                  <button
-                    class="entity-action-btn"
-                    onclick={() => startEdit(entity)}
-                    title="Edit entity"
-                  >
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                      <path d="M17 3l4 4-12 12H5v-4L17 3z" stroke-linejoin="round"/>
-                    </svg>
-                  </button>
-                </div>
+                <button
+                  class="entity-action-btn"
+                  class:active={entity.visible}
+                  onclick={(e) => { e.stopPropagation(); ontoggleview?.(entity.id); }}
+                  title={entity.visible ? 'Hide highlights' : 'Show highlights'}
+                >
+                  <i class="bi" class:bi-eye-fill={entity.visible} class:bi-eye-slash={!entity.visible}></i>
+                </button>
               </div>
             {/each}
           </div>
@@ -514,81 +479,6 @@
       <div class="form-actions">
         <button class="btn-author btn-author-primary" onclick={submitCreate}>Create Entity</button>
         <button class="btn-author btn-author-subtle" onclick={() => view = 'list'}>Cancel</button>
-      </div>
-    </div>
-
-  {:else if view === 'edit'}
-    <!-- Edit View -->
-    <div class="panel-header">
-      <button class="back-btn" onclick={() => view = 'list'}>&larr;</button>
-      <span class="panel-label">Edit Entity</span>
-    </div>
-
-    <div class="entity-form">
-      <label class="form-label">
-        Name
-        <input class="form-input" bind:value={editName} placeholder="Entity name..."
-          onblur={submitEdit} />
-      </label>
-
-      <label class="form-label">
-        Type
-        <div class="type-select">
-          <button class="type-option" class:selected={editType === 'character'} onclick={() => { editType = 'character'; submitEdit(); }}>
-            <span class="type-dot" style="background: {defaultColors.character}"></span> Character
-          </button>
-          <button class="type-option" class:selected={editType === 'place'} onclick={() => { editType = 'place'; submitEdit(); }}>
-            <span class="type-dot" style="background: {defaultColors.place}"></span> Place
-          </button>
-          <button class="type-option" class:selected={editType === 'thing'} onclick={() => { editType = 'thing'; submitEdit(); }}>
-            <span class="type-dot" style="background: {defaultColors.thing}"></span> Thing
-          </button>
-        </div>
-      </label>
-
-      <label class="form-label">
-        Color
-        <div class="color-pick">
-          <input type="color" class="color-input" bind:value={editColor} onchange={submitEdit} />
-          <span class="color-hex">{editColor}</span>
-          <button class="btn-text-sm" onclick={() => { editColor = defaultColors[editType]; submitEdit(); }}>Reset</button>
-        </div>
-      </label>
-
-      <label class="form-label">
-        Aliases
-        <div class="alias-list">
-          {#each editingEntity?.aliases || [] as alias}
-            <div class="alias-tag">
-              <span>{alias}</span>
-              <button class="alias-remove" onclick={() => handleRemoveAlias(alias)}>&times;</button>
-            </div>
-          {/each}
-        </div>
-        <form class="alias-add" onsubmit={e => { e.preventDefault(); handleAddAlias(); }}>
-          <input class="form-input" bind:value={newAlias} placeholder="Add alias..." />
-          <button class="btn-author btn-author-subtle" type="submit">Add</button>
-        </form>
-      </label>
-
-      <label class="form-label">
-        Description
-        <textarea class="form-textarea" bind:value={editDescription} placeholder="Notes..."
-          rows="4" onblur={submitEdit}></textarea>
-      </label>
-
-      <div class="form-actions">
-        {#if showDeleteConfirm}
-          <div class="delete-confirm">
-            <p class="delete-confirm-msg">Delete <strong>"{editingEntity.name}"</strong>?</p>
-            <div class="delete-confirm-actions">
-              <button class="btn-danger" onclick={confirmDeleteEntity}>Delete</button>
-              <button class="btn-author btn-author-subtle btn-author-sm" onclick={cancelDeleteEntity}>Cancel</button>
-            </div>
-          </div>
-        {:else}
-          <button class="btn-danger" onclick={handleDelete}>Delete Entity</button>
-        {/if}
       </div>
     </div>
 
@@ -721,47 +611,59 @@
     </div>
 
   {:else if view === 'view'}
-    <!-- Entity View Pane -->
+    <!-- Combined Entity View + Edit -->
     <div class="panel-header">
       <button class="back-btn" onclick={() => view = 'list'}>&larr;</button>
-      <span class="panel-label">Entity</span>
+      <span class="panel-label">{editName || 'Entity'}</span>
       <div class="view-header-actions">
         <button class="entity-action-btn" onclick={() => showReferences(viewEntity)} title="Find references">
           <i class="bi bi-search" style="font-size: 0.85rem;"></i>
-        </button>
-        <button class="entity-action-btn" onclick={() => startEdit(viewEntity)} title="Edit">
-          <i class="bi bi-pencil" style="font-size: 0.85rem;"></i>
         </button>
       </div>
     </div>
 
     {#if viewEntity}
-      <div class="view-entity-header">
-        <span class="view-color" style="background: {viewEntity.color}"></span>
-        <div class="view-entity-info">
-          <span class="view-name">{viewEntity.name}</span>
-          <span class="view-type">{viewEntity.entity_type}</span>
+      <!-- Inline edit: name + type + color -->
+      <div class="view-edit-section">
+        <div class="view-edit-row">
+          <input type="color" class="view-color-input" bind:value={editColor} onchange={submitEdit} title="Entity color" />
+          <input class="view-name-input" bind:value={editName} onblur={submitEdit} onkeydown={e => { if (e.key === 'Enter') e.target.blur(); }} placeholder="Name..." />
+        </div>
+        <div class="type-select">
+          <button class="type-option" class:selected={editType === 'character'} onclick={() => { editType = 'character'; submitEdit(); }}>
+            <span class="type-dot" style="background: {defaultColors.character}"></span> Character
+          </button>
+          <button class="type-option" class:selected={editType === 'place'} onclick={() => { editType = 'place'; submitEdit(); }}>
+            <span class="type-dot" style="background: {defaultColors.place}"></span> Place
+          </button>
+          <button class="type-option" class:selected={editType === 'thing'} onclick={() => { editType = 'thing'; submitEdit(); }}>
+            <span class="type-dot" style="background: {defaultColors.thing}"></span> Thing
+          </button>
         </div>
       </div>
 
-      {#if viewEntity.aliases.length > 0}
-        <div class="view-aliases">
-          {#each viewEntity.aliases as alias}
-            <span class="view-alias-tag">{alias}</span>
+      <!-- Aliases -->
+      <div class="view-aliases-section">
+        <div class="alias-list">
+          {#each editingEntity?.aliases || [] as alias}
+            <div class="alias-tag">
+              <span>{alias}</span>
+              <button class="alias-remove" onclick={() => handleRemoveAlias(alias)}>&times;</button>
+            </div>
           {/each}
         </div>
-      {/if}
+        <form class="alias-add" onsubmit={e => { e.preventDefault(); handleAddAlias(); }}>
+          <input class="form-input alias-input" bind:value={newAlias} placeholder="Add alias..." />
+          <button class="btn-author btn-author-subtle btn-author-sm" type="submit">Add</button>
+        </form>
+      </div>
 
-      {#if viewEntity.description}
-        <div class="view-description">{viewEntity.description}</div>
-      {/if}
-
-      <!-- Pin selected text -->
+      <!-- Pin selected text from editor -->
       {#if selectedText}
         <div class="view-pin-bar">
           <span class="view-pin-preview">&ldquo;{selectedText.length > 60 ? selectedText.slice(0, 60) + '...' : selectedText}&rdquo;</span>
           <button class="view-pin-btn" onclick={() => pinSelectedText(viewEntity.id)}>
-            <i class="bi bi-pin-angle"></i> Pin
+            <i class="bi bi-pin-angle"></i> Pin excerpt
           </button>
         </div>
       {/if}
@@ -850,6 +752,21 @@
           {/if}
         </div>
       {/if}
+
+      <!-- Delete -->
+      <div class="view-delete-section">
+        {#if showDeleteConfirm}
+          <div class="delete-confirm">
+            <p class="delete-confirm-msg">Delete <strong>"{editingEntity?.name}"</strong>?</p>
+            <div class="delete-confirm-actions">
+              <button class="btn-danger" onclick={confirmDeleteEntity}>Delete</button>
+              <button class="btn-author btn-author-subtle btn-author-sm" onclick={cancelDeleteEntity}>Cancel</button>
+            </div>
+          </div>
+        {:else}
+          <button class="btn-danger-subtle" onclick={handleDelete}>Delete Entity</button>
+        {/if}
+      </div>
     {/if}
   {/if}
 </div>
@@ -917,7 +834,7 @@
   .type-tab.active { background: var(--iwe-accent-light); color: var(--iwe-accent); font-weight: 500; }
 
   /* Entity list */
-  .entity-list { flex: 1; overflow-y: auto; padding: 0.25rem 0; }
+  .entity-list { flex: 1; overflow-y: auto; padding: 0.25rem 0 3rem; }
 
   .entity-group { margin-bottom: 0.25rem; }
   .group-header {
@@ -934,13 +851,14 @@
   .entity-item {
     display: flex; align-items: center; gap: 0.5rem;
     width: 100%;
-    padding: 0.35rem 0.5rem 0.35rem 1.5rem;
+    padding: 0.45rem 0.5rem 0.45rem 1.5rem;
     transition: background 100ms;
     font-family: var(--iwe-font-ui);
+    border-bottom: 1px solid var(--iwe-border-light);
+    cursor: pointer;
   }
   .entity-item:hover { background: var(--iwe-bg-hover); }
   .entity-item:hover .entity-actions { opacity: 1; }
-  .entity-item.viewed { background: var(--iwe-bg-hover); }
   .entity-item.viewed .entity-actions { opacity: 1; }
 
   .entity-color-dot {
@@ -1234,6 +1152,48 @@
 
   /* Entity view pane */
   .view-header-actions { display: flex; gap: 2px; margin-left: auto; }
+
+  .view-edit-section {
+    padding: 0.6rem 0.75rem;
+    border-bottom: 1px solid var(--iwe-border-light);
+  }
+  .view-edit-row {
+    display: flex; align-items: center; gap: 0.5rem;
+    margin-bottom: 0.5rem;
+  }
+  .view-color-input {
+    width: 28px; height: 28px; border: 1px solid var(--iwe-border);
+    border-radius: 50%; cursor: pointer; padding: 0;
+    background: none; flex-shrink: 0;
+  }
+  .view-color-input::-webkit-color-swatch-wrapper { padding: 2px; }
+  .view-color-input::-webkit-color-swatch { border: none; border-radius: 50%; }
+  .view-name-input {
+    flex: 1; font-family: var(--iwe-font-prose); font-size: 1.1rem;
+    font-weight: 600; color: var(--iwe-text);
+    border: none; background: none; outline: none;
+    border-bottom: 1px dashed transparent; padding: 0.1rem 0;
+  }
+  .view-name-input:focus { border-bottom-color: var(--iwe-accent); }
+
+  .view-aliases-section {
+    padding: 0.5rem 0.75rem;
+    border-bottom: 1px solid var(--iwe-border-light);
+  }
+  .alias-input { font-size: 0.8rem; padding: 0.25rem 0.5rem; }
+
+  .view-delete-section {
+    padding: 0.75rem;
+    margin-top: auto;
+    border-top: 1px solid var(--iwe-border-light);
+  }
+  .btn-danger-subtle {
+    font-family: var(--iwe-font-ui); font-size: 0.75rem;
+    padding: 0.3rem 0.6rem; border: none;
+    border-radius: var(--iwe-radius-sm); cursor: pointer;
+    background: none; color: var(--iwe-text-faint); transition: all 150ms;
+  }
+  .btn-danger-subtle:hover { color: var(--iwe-danger); background: var(--iwe-danger-light); }
 
   .view-entity-header {
     display: flex; align-items: center; gap: 0.6rem;

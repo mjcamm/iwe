@@ -87,7 +87,16 @@
     if (!posResult) return;
 
     const pos = posResult.pos;
-    const wordInfo = getWordAtPos(editorRaw.view, pos);
+
+    // Check if click is within the current text selection — if so, use the selection
+    const { from: selFrom, to: selTo } = editorRaw.state.selection;
+    let wordInfo;
+    if (selFrom !== selTo && pos >= selFrom && pos <= selTo) {
+      const selectedText = editorRaw.state.doc.textBetween(selFrom, selTo, '');
+      wordInfo = { word: selectedText, from: selFrom, to: selTo };
+    } else {
+      wordInfo = getWordAtPos(editorRaw.view, pos);
+    }
     if (!wordInfo) return;
 
     // Check if this word is an entity

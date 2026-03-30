@@ -621,30 +621,24 @@
   .wp-empty-sec { font-size: 0.75rem; color: var(--iwe-text-faint); font-style: italic; }
 
   .wp-pills {
-    display: flex; flex-wrap: wrap;
-    gap: 0; line-height: 1.9;
+    display: flex; flex-direction: column; gap: 0;
   }
   .wp-pill {
     font-family: var(--iwe-font-prose); font-size: 0.88rem;
-    padding: 0; background: none; border: none;
+    padding: 0.5rem 0.5rem; background: none; border: none;
     color: var(--iwe-text-secondary);
-    display: inline-flex; align-items: baseline; gap: 0;
-    border-radius: 3px; transition: color 100ms;
-    position: relative;
+    display: flex; align-items: baseline; gap: 0.3rem;
+    border-radius: var(--iwe-radius-sm); transition: all 100ms;
+    line-height: 1.5; text-align: left;
+    border-bottom: 1px solid var(--iwe-border-light);
   }
-  .wp-pill::after {
-    content: '\b7';
-    color: var(--iwe-text-faint);
-    margin: 0 0.45rem;
-    font-weight: 300;
-  }
-  .wp-pill:last-child::after { content: ''; margin: 0; }
-  .wp-pill:hover { color: var(--iwe-accent); }
+  .wp-pill:last-child { border-bottom: none; }
+  .wp-pill:hover { color: var(--iwe-text); background: var(--iwe-bg-hover); }
   .wp-pill-x {
     background: none; border: none; cursor: pointer;
     color: var(--iwe-text-faint); font-size: 0.75rem; line-height: 1;
     padding: 0 0.15rem; opacity: 0; transition: opacity 80ms;
-    vertical-align: super; font-family: var(--iwe-font-ui);
+    margin-left: auto; font-family: var(--iwe-font-ui); flex-shrink: 0;
   }
   .wp-pill:hover .wp-pill-x { opacity: 1; }
   .wp-pill-x:hover { color: var(--iwe-danger); }

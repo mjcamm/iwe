@@ -5,6 +5,7 @@
   import ChapterNav from '$lib/components/ChapterNav.svelte';
   import Editor from '$lib/components/Editor.svelte';
   import EntityPanel from '$lib/components/EntityPanel.svelte';
+  import PalettePickerModal from '$lib/components/PalettePickerModal.svelte';
   import Toasts from '$lib/components/Toasts.svelte';
   import { exportDocx, exportTxt, exportHtml, exportPdf } from '$lib/export.js';
   import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
@@ -16,6 +17,7 @@
 
   let projectLoading = $state(true);
   let editorReady = $state(false);
+  let showPaletteBrowse = $state(false);
   let projectTitle = $state('');
   let chapters = $state([]);
   let openTabs = $state([]);
@@ -621,6 +623,9 @@
         </div>
       {/if}
     </div>
+    <button class="stats-btn" onclick={() => showPaletteBrowse = true} title="Word Palettes">
+      <i class="bi bi-palette2"></i> Palettes
+    </button>
     <button class="stats-btn" onclick={launchWritingStats} title="Writing Stats">
       <i class="bi bi-graph-up"></i> Stats
     </button>
@@ -737,6 +742,15 @@
   </div>
 </div>
 {/if}
+
+<PalettePickerModal
+  show={showPaletteBrowse}
+  word=""
+  editorFrom={0}
+  editorTo={0}
+  onreplace={() => {}}
+  onclose={() => showPaletteBrowse = false}
+/>
 
 <Toasts />
 

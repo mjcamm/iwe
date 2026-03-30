@@ -3727,16 +3727,103 @@ pub fn remove_word_entry(state: tauri::State<'_, PaletteState>, id: i64) -> Resu
 
 // ---- Search (across active palettes) ----
 
+/// Strip common English suffixes to get a rough stem for fuzzy matching.
+fn rough_stem(word: &str) -> String {
+    let w = word.to_lowercase();
+    for suffix in &["ness", "ment", "tion", "sion", "ious", "eous", "ible", "able", "ful",
+                     "less", "ling", "ally", "ily", "ous", "ive", "ing", "ied", "ier",
+                     "est", "ity", "ant", "ent", "ise", "ize", "ely", "ate",
+                     "ly", "ed", "er", "en", "al", "ic", "es", "is", "ty", "ry", "ny"] {
+        if w.len() > suffix.len() + 2 {
+            if let Some(base) = w.strip_suffix(suffix) {
+                return base.to_string();
+            }
+        }
+    }
+    // Also try stripping trailing 's' for plurals
+    if w.len() > 3 && w.ends_with('s') && !w.ends_with("ss") {
+        return w[..w.len()-1].to_string();
+    }
+    w
+}
+
+/// Search groups across active palettes.
+/// Priority: 5=exact name, 4=name contains, 3=name stem match, 2=description match, 1=content match.
 #[tauri::command]
 pub fn search_word_groups(state: tauri::State<'_, PaletteState>, query: String) -> Result<Vec<WordGroup>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
-    let pattern = format!("%{}%", query.to_lowercase());
-    let mut stmt = conn.prepare(&format!(
-        "{} JOIN palettes p2 ON g.palette_id = p2.id WHERE p2.is_active = 1 AND LOWER(g.name) LIKE ?1 ORDER BY g.sort_order ASC",
-        GROUP_SELECT
-    )).map_err(|e| e.to_string())?;
-    let rows = stmt.query_map(params![pattern], |row| read_group(row)).map_err(|e| e.to_string())?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    let lower_query = query.to_lowercase();
+    let pattern = format!("%{}%", lower_query);
+    let query_stem = rough_stem(&lower_query);
+
+    // Get all active groups
+    let mut all_groups = Vec::new();
+    {
+        let mut stmt = conn.prepare(&format!(
+            "{} JOIN palettes p2 ON g.palette_id = p2.id WHERE p2.is_active = 1",
+            GROUP_SELECT
+        )).map_err(|e| e.to_string())?;
+        let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            all_groups.push(read_group(row).map_err(|e| e.to_string())?);
+        }
+    }
+
+    let mut scored: Vec<(WordGroup, u8)> = Vec::new();
+
+    for group in all_groups {
+        let name_lower = group.name.to_lowercase();
+
+        // Exact name match
+        if name_lower == lower_query {
+            scored.push((group, 5));
+            continue;
+        }
+
+        // Name contains query
+        if name_lower.contains(&lower_query) {
+            scored.push((group, 4));
+            continue;
+        }
+
+        // Fuzzy name match: stem of query matches name, or stem of name matches query
+        // Require stem length >= 4 to avoid overly broad matches
+        let name_stem = rough_stem(&name_lower);
+        if query_stem.len() >= 4 && name_lower.contains(&query_stem) {
+            scored.push((group, 3));
+            continue;
+        }
+        if name_stem.len() >= 4 && lower_query.contains(&name_stem) {
+            scored.push((group, 3));
+            continue;
+        }
+
+        // Description contains exact query (no stem — too loose)
+        let desc_match = group.description.as_ref().map(|d| {
+            d.to_lowercase().contains(&lower_query)
+        }).unwrap_or(false);
+
+        if desc_match {
+            scored.push((group, 2));
+            continue;
+        }
+
+        // Content match: word entries contain exact query
+        let has_content: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM word_entries WHERE group_id = ?1 AND LOWER(word) LIKE ?2)",
+            params![group.id, pattern],
+            |row| row.get(0),
+        ).unwrap_or(false);
+        if has_content {
+            scored.push((group, 1));
+            continue;
+        }
+    }
+
+    // Sort by score descending, then alphabetically
+    scored.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.name.cmp(&b.0.name)));
+
+    Ok(scored.into_iter().map(|(g, _)| g).collect())
 }
 
 /// Get all groups from all active palettes (for the editor picker)
@@ -3749,4 +3836,51 @@ pub fn get_active_groups(state: tauri::State<'_, PaletteState>) -> Result<Vec<Wo
     )).map_err(|e| e.to_string())?;
     let rows = stmt.query_map([], |row| read_group(row)).map_err(|e| e.to_string())?;
     rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+}
+
+#[derive(Serialize)]
+pub struct SearchHit {
+    pub group_id: i64,
+    pub group_name: String,
+    pub section_name: Option<String>,
+    pub word: String,
+    pub entry_id: i64,
+}
+
+/// Search word entries across active palettes, returning flat results with context.
+/// Only returns entries that directly contain the query — no fuzzy/stem for entries.
+#[tauri::command]
+pub fn search_palette_entries(state: tauri::State<'_, PaletteState>, query: String) -> Result<Vec<SearchHit>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let lower_query = query.to_lowercase();
+    let pattern = format!("%{}%", lower_query);
+
+    let mut hits: Vec<SearchHit> = Vec::new();
+
+    let sql = "
+        SELECT e.id, e.group_id, e.word, g.name as group_name, s.name as section_name
+        FROM word_entries e
+        JOIN word_groups g ON e.group_id = g.id
+        JOIN palettes p ON g.palette_id = p.id
+        LEFT JOIN word_sections s ON e.section_id = s.id
+        WHERE p.is_active = 1 AND LOWER(e.word) LIKE ?1
+        ORDER BY g.name, s.sort_order, e.sort_order
+        LIMIT 50
+    ";
+
+    {
+        let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+        let mut rows = stmt.query(params![pattern]).map_err(|e| e.to_string())?;
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            hits.push(SearchHit {
+                entry_id: row.get(0).unwrap(),
+                group_id: row.get(1).unwrap(),
+                word: row.get(2).unwrap(),
+                group_name: row.get(3).unwrap(),
+                section_name: row.get(4).unwrap(),
+            });
+        }
+    }
+
+    Ok(hits)
 }

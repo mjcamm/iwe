@@ -413,6 +413,10 @@ export async function searchWordGroups(query) {
   return invoke('search_word_groups', { query });
 }
 
+export async function searchPaletteEntries(query) {
+  return invoke('search_palette_entries', { query });
+}
+
 export async function getActiveGroups() {
   return invoke('get_active_groups');
 }

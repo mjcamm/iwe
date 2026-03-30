@@ -510,6 +510,9 @@ pub fn detect_entities(state: tauri::State<'_, AppState>, min_count: Option<usiz
     let chapters = db::list_chapters(conn).map_err(|e| e.to_string())?;
     let known = build_known_set(&entities, &ignored);
 
+    // Build entity search terms so we can find which positions are already highlighted
+    let terms = build_terms_all(&entities);
+
     // Count occurrences and track locations (locations capped at 20 for memory, count is exact)
     let mut locations_map: HashMap<String, Vec<CandidateLocation>> = HashMap::new();
     let mut count_map: HashMap<String, usize> = HashMap::new();
@@ -517,6 +520,11 @@ pub fn detect_entities(state: tauri::State<'_, AppState>, min_count: Option<usiz
     for chapter in &chapters {
         let plain = strip_html(&chapter.content);
         let chars: Vec<char> = plain.chars().collect();
+
+        // Run entity scan to get all matched ranges in this chapter
+        let entity_matches = scan_plain(&plain, &terms);
+        let entity_ranges: Vec<(usize, usize)> = entity_matches.iter().map(|m| (m.start, m.end)).collect();
+
         let mut i = 0;
 
         while i < chars.len() {
@@ -575,6 +583,10 @@ pub fn detect_entities(state: tauri::State<'_, AppState>, min_count: Option<usiz
                     if !is_unknown_candidate(&candidate, &known) {
                         continue;
                     }
+                    // Skip if this position is already covered by an entity highlight
+                    let cand_end = word_start + candidate.chars().count();
+                    let overlaps_entity = entity_ranges.iter().any(|(es, ee)| word_start < *ee && cand_end > *es);
+                    if overlaps_entity { continue; }
                     *count_map.entry(candidate.clone()).or_insert(0) += 1;
                     let locations = locations_map.entry(candidate.clone()).or_default();
                     if locations.len() < 20 {

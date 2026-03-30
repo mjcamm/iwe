@@ -549,6 +549,7 @@ pub fn run() {
             palettes::add_word_entries,
             palettes::remove_word_entry,
             palettes::search_word_groups,
+            palettes::search_palette_entries,
             palettes::get_active_groups,
         ])
         .setup(|app| {
