@@ -113,7 +113,7 @@ pub fn check_spelling(
     state: tauri::State<'_, AppState>,
     spell: tauri::State<'_, SpellState>,
     words: Vec<String>,
-) -> Result<Vec<SpellResult>, String> {
+) -> Result<Vec<String>, String> {
     let guard = state.db.lock().map_err(|e| e.to_string())?;
     let conn = guard.as_ref().ok_or("No project open")?;
 
@@ -139,19 +139,24 @@ pub fn check_spelling(
         custom.insert(w.to_lowercase());
     }
 
+    // Only check correctness — no suggestions (fast path)
     let mut results = Vec::new();
-
     for word in &words {
         if !is_correct(word, &spell, &custom) {
-            let suggestions = get_suggestions(word, &spell, 10);
-            results.push(SpellResult {
-                word: word.clone(),
-                suggestions,
-            });
+            results.push(word.clone());
         }
     }
 
     Ok(results)
+}
+
+/// Get spelling suggestions for a single word (on-demand, called from right-click)
+#[tauri::command]
+pub fn get_spell_suggestions(
+    spell: tauri::State<'_, SpellState>,
+    word: String,
+) -> Result<Vec<String>, String> {
+    Ok(get_suggestions(&word, &spell, 10))
 }
 
 #[tauri::command]

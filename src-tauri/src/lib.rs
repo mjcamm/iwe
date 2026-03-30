@@ -520,6 +520,7 @@ pub fn run() {
             scanner::generate_heatmap,
             scanner::chapter_analysis,
             spellcheck::check_spelling,
+            spellcheck::get_spell_suggestions,
             spellcheck::add_to_dictionary,
             spellcheck::remove_from_dictionary,
             spellcheck::get_custom_words,

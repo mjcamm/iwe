@@ -38,7 +38,8 @@
       "Bash(curl -sL https://raw.githubusercontent.com/wooorm/dictionaries/main/dictionaries/en-GB/license)",
       "Bash(curl:*)",
       "WebSearch",
-      "Bash(cargo build:*)"
+      "Bash(cargo build:*)",
+      "Bash(grep -n \"^</div>$\\\\|^<style>\" /c/Users/mitch/Documents/projects/writing-iwe/src/routes/project/[filename]/+page.svelte)"
     ]
   }
 }

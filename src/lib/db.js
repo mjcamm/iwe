@@ -301,6 +301,10 @@ export async function checkSpelling(words) {
   return invoke('check_spelling', { words });
 }
 
+export async function getSpellSuggestions(word) {
+  return invoke('get_spell_suggestions', { word });
+}
+
 export async function addToDictionary(word) {
   return invoke('add_to_dictionary', { word });
 }

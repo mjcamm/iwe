@@ -7,12 +7,12 @@
   import Superscript from '@tiptap/extension-superscript';
   import Subscript from '@tiptap/extension-subscript';
   import { Extension } from '@tiptap/core';
-  import { scanText, addIgnoredWord, checkSpelling, addToDictionary } from '$lib/db.js';
+  import { scanText, addIgnoredWord, checkSpelling, getSpellSuggestions, addToDictionary } from '$lib/db.js';
   import { createHighlightPlugin, createSpellCheckPlugin, buildTextMap, applyDecorations, applySpellDecorations, entityHighlightKey, spellCheckKey } from '$lib/entityHighlight.js';
   import WordModal from './WordModal.svelte';
   import PalettePickerModal from './PalettePickerModal.svelte';
 
-  let { openTabs, activeTabId, chapter, onselecttab, onclosetab, onchange, onselectionchange, onentityclick, onquickadd, viewedEntityIds = new Set() } = $props();
+  let { openTabs, activeTabId, chapter, onselecttab, onclosetab, onchange, onselectionchange, onentityclick, onquickadd, onready, viewedEntityIds = new Set() } = $props();
 
   let element = $state();
   // Official Svelte 5 pattern: wrap editor in object so reassignment triggers reactivity
@@ -29,8 +29,9 @@
   // Spell check state
   let spellErrors = $state([]); // [{ word, start, end, suggestions }]
   let spellTimer = null;
-  let spellCache = new Map(); // word -> true (correct) or { suggestions } (misspelled)
+  let spellCache = new Map(); // word -> true (correct) or 'misspelled'
   let lastSpellText = '';
+  let initialScanDone = false;
 
   // Context menu state
   let ctxMenu = $state({ show: false, x: 0, y: 0, word: '', from: 0, to: 0, isEntity: false, entityId: null, entityName: null, isMisspelled: false, suggestions: [] });
@@ -77,7 +78,7 @@
     return { word, from: from + leadStripped, to: to - trailStripped };
   }
 
-  function handleContextMenu(e) {
+  async function handleContextMenu(e) {
     if (!editorRaw) return;
     e.preventDefault();
 
@@ -99,11 +100,10 @@
     const spellFound = spellDecos ? spellDecos.find(wordInfo.from, wordInfo.to) : [];
     const isSpellError = spellFound.some(d => d.spec.spellError);
 
-    // Find suggestions from spellErrors state
+    // Fetch suggestions on-demand (only when misspelled)
     let suggestions = [];
     if (isSpellError) {
-      const err = spellErrors.find(e => e.word.toLowerCase() === wordInfo.word.toLowerCase());
-      if (err) suggestions = err.suggestions;
+      try { suggestions = await getSpellSuggestions(wordInfo.word); } catch {}
     }
 
     ctxMenu = {
@@ -210,19 +210,36 @@
   }
 
   function doScan() {
-    if (!editorRaw) return;
+    if (!editorRaw) {
+      signalReady();
+      return;
+    }
     const { text, posMap } = buildTextMap(editorRaw.state.doc);
+    if (!text || !text.trim()) {
+      // Empty document — no scan needed, signal ready immediately
+      scanMatches = [];
+      scanPosMap = posMap;
+      signalReady();
+      return;
+    }
     scanText(text).then(matches => {
       scanMatches = matches;
       scanPosMap = posMap;
       // Schedule spell check with its own debounce
       clearTimeout(spellTimer);
       spellTimer = setTimeout(() => doSpellCheck(text, posMap, matches), 1200);
-    }).catch(e => { console.warn('[scan] error:', e); });
+    }).catch(e => { console.warn('[scan] error:', e); signalReady(); });
+  }
+
+  function signalReady() {
+    if (!initialScanDone) {
+      initialScanDone = true;
+      onready?.();
+    }
   }
 
   function doSpellCheck(text, posMap, entityMatches) {
-    if (!text) return;
+    if (!text) { signalReady(); return; }
 
     // Skip if text hasn't changed since last spell check
     if (text === lastSpellText) {
@@ -268,17 +285,12 @@
       return;
     }
 
-    checkSpelling(unchecked).then(results => {
+    checkSpelling(unchecked).then(misspelled => {
+      // results is now just a list of misspelled word strings (no suggestions)
+      const misspelledSet = new Set(misspelled.map(w => w.toLowerCase()));
       // Cache results
-      const misspelledSet = new Set();
-      for (const r of results) {
-        const lower = r.word.toLowerCase();
-        spellCache.set(lower, r.suggestions);
-        misspelledSet.add(lower);
-      }
-      // Cache correct words too
       for (const w of unchecked) {
-        if (!misspelledSet.has(w)) spellCache.set(w, true);
+        spellCache.set(w, misspelledSet.has(w) ? 'misspelled' : true);
       }
 
       buildAndApplySpellErrors(uniqueWords, posMap, entityRanges);
@@ -289,9 +301,9 @@
     const errors = [];
     for (const [lower, positions] of uniqueWords) {
       const cached = spellCache.get(lower);
-      if (cached && cached !== true) {
+      if (cached === 'misspelled') {
         for (const pos of positions) {
-          errors.push({ word: pos.word, start: pos.start, end: pos.end, suggestions: cached });
+          errors.push({ word: pos.word, start: pos.start, end: pos.end });
         }
       }
     }
@@ -306,6 +318,8 @@
       applySpellDecorations(editorRaw, errors, posMap, entityChars);
       applyingDecorations = false;
     }
+
+    signalReady();
   }
 
   function reapplySpellDecorations(posMap, entityMatches) {

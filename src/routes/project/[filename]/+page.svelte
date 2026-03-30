@@ -15,6 +15,8 @@
 
   let { data } = $props();
 
+  let projectLoading = $state(true);
+  let editorReady = $state(false);
   let projectTitle = $state('');
   let chapters = $state([]);
   let openTabs = $state([]);
@@ -167,6 +169,8 @@
     if (chapters.length > 0) {
       await selectChapter(chapters[0].id);
     }
+
+    projectLoading = false;
 
     // Set up scroll listener for auto-checkpointing
     setTimeout(() => {
@@ -565,6 +569,15 @@
   let currentWords = $derived(activeChapter ? wordCount(activeChapter.content) : 0);
 </script>
 
+{#if projectLoading || !editorReady}
+  <div class="project-loading">
+    <div class="project-loading-inner">
+      <div class="loader"></div>
+      <p class="loading-text">Loading your manuscript...</p>
+    </div>
+  </div>
+{/if}
+{#if !projectLoading}
 <div class="workspace">
   <!-- Toolbar -->
   <div class="toolbar">
@@ -643,6 +656,7 @@
         onselectionchange={text => { selectedText = text; if (text.trim()) lastSelectedText = text; }}
         onentityclick={handleEntityClick}
         onquickadd={handleQuickAdd}
+        onready={() => { editorReady = true; }}
         {viewedEntityIds}
       />
     </div>
@@ -710,10 +724,41 @@
     <span>{totalWords.toLocaleString()} total</span>
   </div>
 </div>
+{/if}
 
 <Toasts />
 
 <style>
+  .project-loading {
+    position: fixed; inset: 0; z-index: 10000;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--iwe-bg-warm);
+  }
+  .project-loading-inner {
+    display: flex; flex-direction: column; align-items: center; gap: 1.2rem;
+  }
+  .loader {
+    width: 45px;
+    aspect-ratio: .75;
+    --c: no-repeat linear-gradient(var(--iwe-accent) 0 0);
+    background:
+      var(--c) 0%   50%,
+      var(--c) 50%  50%,
+      var(--c) 100% 50%;
+    background-size: 20% 50%;
+    animation: l6 1s infinite linear;
+  }
+  @keyframes l6 {
+    20% {background-position: 0% 0%  ,50% 50% ,100% 50% }
+    40% {background-position: 0% 100%,50% 0%  ,100% 50% }
+    60% {background-position: 0% 50% ,50% 100%,100% 0%  }
+    80% {background-position: 0% 50% ,50% 50% ,100% 100%}
+  }
+  .loading-text {
+    font-family: var(--iwe-font-prose); font-size: 0.95rem;
+    color: var(--iwe-text-muted); font-style: italic; margin: 0;
+  }
+
   .workspace {
     display: flex; flex-direction: column; height: 100vh;
     background: var(--iwe-bg);

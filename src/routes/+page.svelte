@@ -56,12 +56,27 @@
     goto(`/project/${encodeURIComponent(filename)}`);
   }
 
-  async function handleDelete(e, project) {
+  // Delete confirmation modal
+  let deleteModal = $state({ show: false, project: null });
+  let deleteConfirmText = $state('');
+
+  function handleDelete(e, project) {
     e.stopPropagation();
-    if (confirm(`Delete "${project.title}"? This cannot be undone.`)) {
-      await deleteProject(project.filepath);
-      projects = await listProjects();
-    }
+    deleteConfirmText = '';
+    deleteModal = { show: true, project };
+  }
+
+  async function confirmDelete() {
+    if (!deleteModal.project) return;
+    await deleteProject(deleteModal.project.filepath);
+    deleteModal = { show: false, project: null };
+    deleteConfirmText = '';
+    projects = await listProjects();
+  }
+
+  function cancelDelete() {
+    deleteModal = { show: false, project: null };
+    deleteConfirmText = '';
   }
 
   async function openFolder() {
@@ -196,6 +211,42 @@
       {/if}
     </main>
   </div>
+
+  {#if deleteModal.show}
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="del-backdrop" onclick={cancelDelete}>
+      <div class="del-modal" onclick={(e) => e.stopPropagation()}>
+        <div class="del-header">
+          <span class="del-title">Delete project</span>
+          <button class="del-close" onclick={cancelDelete}>&times;</button>
+        </div>
+        <div class="del-body">
+          <p class="del-msg">
+            This will permanently delete <strong>"{deleteModal.project.title}"</strong> and all its contents. This cannot be undone.
+          </p>
+          <label class="del-label">
+            Type <strong>delete</strong> to confirm:
+          </label>
+          <input
+            class="del-input"
+            type="text"
+            bind:value={deleteConfirmText}
+            placeholder="delete"
+            onkeydown={(e) => { if (e.key === 'Enter' && deleteConfirmText.toLowerCase() === 'delete') confirmDelete(); }}
+          />
+        </div>
+        <div class="del-footer">
+          <button class="btn-author btn-author-subtle" onclick={cancelDelete}>Cancel</button>
+          <button
+            class="del-confirm-btn"
+            disabled={deleteConfirmText.toLowerCase() !== 'delete'}
+            onclick={confirmDelete}
+          >Delete project</button>
+        </div>
+      </div>
+    </div>
+  {/if}
 {/if}
 
 <style>
@@ -358,6 +409,71 @@
     font-size: 0.8rem; color: var(--iwe-text-muted);
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     max-width: 280px;
+  }
+
+  /* Delete confirmation modal */
+  .del-backdrop {
+    position: fixed; inset: 0; z-index: 9999;
+    background: rgba(0, 0, 0, 0.4);
+    display: flex; align-items: center; justify-content: center;
+    animation: del-fade 0.15s ease;
+  }
+  @keyframes del-fade { from { opacity: 0; } to { opacity: 1; } }
+  .del-modal {
+    background: var(--iwe-bg); border-radius: 12px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.2);
+    width: 90vw; max-width: 420px;
+    animation: del-slide 0.2s ease;
+  }
+  @keyframes del-slide {
+    from { opacity: 0; transform: translateY(10px) scale(0.98); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+  }
+  .del-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 1rem 1.2rem; border-bottom: 1px solid var(--iwe-border);
+  }
+  .del-title {
+    font-family: var(--iwe-font-ui); font-size: 1rem; font-weight: 600;
+    color: var(--iwe-danger);
+  }
+  .del-close {
+    background: none; border: none; cursor: pointer;
+    font-size: 1.5rem; line-height: 1; color: var(--iwe-text-faint);
+    padding: 0.2rem 0.4rem; border-radius: var(--iwe-radius-sm);
+  }
+  .del-close:hover { color: var(--iwe-text); background: var(--iwe-bg-hover); }
+  .del-body { padding: 1.2rem; }
+  .del-msg {
+    font-family: var(--iwe-font-ui); font-size: 0.88rem;
+    color: var(--iwe-text); line-height: 1.6; margin: 0 0 1rem;
+  }
+  .del-label {
+    font-family: var(--iwe-font-ui); font-size: 0.82rem;
+    color: var(--iwe-text-secondary); display: block; margin-bottom: 0.4rem;
+  }
+  .del-input {
+    width: 100%; font-family: var(--iwe-font-ui); font-size: 0.9rem;
+    padding: 0.5rem 0.7rem; border: 1px solid var(--iwe-border);
+    border-radius: var(--iwe-radius-sm); outline: none;
+    color: var(--iwe-text); background: var(--iwe-bg);
+  }
+  .del-input:focus { border-color: var(--iwe-danger); }
+  .del-footer {
+    display: flex; justify-content: flex-end; gap: 0.5rem;
+    padding: 0.8rem 1.2rem; border-top: 1px solid var(--iwe-border-light);
+  }
+  .del-confirm-btn {
+    font-family: var(--iwe-font-ui); font-size: 0.85rem; font-weight: 500;
+    padding: 0.45rem 1rem; border: none; border-radius: var(--iwe-radius-sm);
+    cursor: pointer; background: var(--iwe-danger); color: white;
+    transition: all 150ms;
+  }
+  .del-confirm-btn:disabled {
+    opacity: 0.35; cursor: not-allowed;
+  }
+  .del-confirm-btn:not(:disabled):hover {
+    background: var(--iwe-danger-hover, #a0403d);
   }
 
   /* Shared components */
