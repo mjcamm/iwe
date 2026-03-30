@@ -367,6 +367,9 @@ const HARD_EXCLUDE: &[&str] = &[
     "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday",
     "January", "February", "March", "April", "May", "June",
     "July", "August", "September", "October", "November", "December",
+    "Mr", "Mrs", "Ms", "Miss", "Dr", "Prof", "Sir", "Lord", "Lady",
+    "King", "Queen", "Prince", "Princess", "Captain", "General",
+    "Uncle", "Aunt", "Dear",
     "English", "French", "German", "Spanish", "American", "British",
     "God", "Oh", "Ah", "Well", "Now", "Here", "Right", "OK", "Okay",
     "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten",
@@ -448,8 +451,9 @@ pub fn detect_entities(state: tauri::State<'_, AppState>, min_count: Option<usiz
     let chapters = db::list_chapters(conn).map_err(|e| e.to_string())?;
     let known = build_known_set(&entities, &ignored);
 
-    // Count occurrences and track locations
-    let mut counts: HashMap<String, Vec<CandidateLocation>> = HashMap::new();
+    // Count occurrences and track locations (locations capped at 20 for memory, count is exact)
+    let mut locations_map: HashMap<String, Vec<CandidateLocation>> = HashMap::new();
+    let mut count_map: HashMap<String, usize> = HashMap::new();
 
     for chapter in &chapters {
         let plain = strip_html(&chapter.content);
@@ -512,7 +516,8 @@ pub fn detect_entities(state: tauri::State<'_, AppState>, min_count: Option<usiz
                     if !is_unknown_candidate(&candidate, &known) {
                         continue;
                     }
-                    let locations = counts.entry(candidate.clone()).or_default();
+                    *count_map.entry(candidate.clone()).or_insert(0) += 1;
+                    let locations = locations_map.entry(candidate.clone()).or_default();
                     if locations.len() < 20 {
                         // Build a wider context: ~20 words before and after
                         let mut ctx_start = word_start;
@@ -548,11 +553,11 @@ pub fn detect_entities(state: tauri::State<'_, AppState>, min_count: Option<usiz
         }
     }
 
-    let mut candidates: Vec<EntityCandidate> = counts
+    let mut candidates: Vec<EntityCandidate> = count_map
         .into_iter()
-        .filter(|(_, locs)| locs.len() >= min_count)
-        .map(|(text, locations)| {
-            let count = locations.len();
+        .filter(|(_, count)| *count >= min_count)
+        .map(|(text, count)| {
+            let locations = locations_map.remove(&text).unwrap_or_default();
             EntityCandidate { text, count, locations }
         })
         .collect();

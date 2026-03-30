@@ -42,7 +42,20 @@
       "WebFetch(domain:greatergood.berkeley.edu)",
       "WebFetch(domain:geediting.com)",
       "WebFetch(domain:urbanepics.com)",
-      "WebFetch(domain:jaapl.org)"
+      "WebFetch(domain:jaapl.org)",
+      "WebFetch(domain:onestopforwriters.com)",
+      "WebFetch(domain:oratoryclub.com)",
+      "WebFetch(domain:www.psychmechanics.com)",
+      "WebFetch(domain:therapistsinphiladelphia.com)",
+      "WebFetch(domain:emotiontypology.com)",
+      "WebFetch(domain:neurolaunch.com)",
+      "WebFetch(domain:aspergers101.com)",
+      "WebFetch(domain:www.sciencedaily.com)",
+      "WebFetch(domain:bodylanguageproject.com)",
+      "WebFetch(domain:en.wikipedia.org)",
+      "WebFetch(domain:anyflip.com)",
+      "WebFetch(domain:www.sciencedirect.com)",
+      "WebFetch(domain:link.springer.com)"
     ]
   }
 }

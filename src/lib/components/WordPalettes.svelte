@@ -620,23 +620,36 @@
   }
   .wp-empty-sec { font-size: 0.75rem; color: var(--iwe-text-faint); font-style: italic; }
 
-  .wp-pills { display: flex; flex-wrap: wrap; gap: 0.3rem; }
-  .wp-pill {
-    font-family: var(--iwe-font-ui); font-size: 0.8rem;
-    padding: 0.25rem 0.6rem; border-radius: 16px;
-    background: var(--iwe-bg-warm); border: 1px solid var(--iwe-border);
-    color: var(--iwe-text); display: inline-flex; align-items: center; gap: 0.3rem;
-    line-height: 1.3;
+  .wp-pills {
+    display: flex; flex-wrap: wrap;
+    gap: 0; line-height: 1.9;
   }
+  .wp-pill {
+    font-family: var(--iwe-font-prose); font-size: 0.88rem;
+    padding: 0; background: none; border: none;
+    color: var(--iwe-text-secondary);
+    display: inline-flex; align-items: baseline; gap: 0;
+    border-radius: 3px; transition: color 100ms;
+    position: relative;
+  }
+  .wp-pill::after {
+    content: '\b7';
+    color: var(--iwe-text-faint);
+    margin: 0 0.45rem;
+    font-weight: 300;
+  }
+  .wp-pill:last-child::after { content: ''; margin: 0; }
+  .wp-pill:hover { color: var(--iwe-accent); }
   .wp-pill-x {
     background: none; border: none; cursor: pointer;
-    color: var(--iwe-text-faint); font-size: 0.85rem; line-height: 1;
-    padding: 0; opacity: 0; transition: opacity 80ms;
+    color: var(--iwe-text-faint); font-size: 0.75rem; line-height: 1;
+    padding: 0 0.15rem; opacity: 0; transition: opacity 80ms;
+    vertical-align: super; font-family: var(--iwe-font-ui);
   }
   .wp-pill:hover .wp-pill-x { opacity: 1; }
   .wp-pill-x:hover { color: var(--iwe-danger); }
   .wp-pill-suggest { cursor: pointer; transition: all 100ms; }
-  .wp-pill-suggest:hover:not(:disabled) { background: var(--iwe-accent-light); border-color: var(--iwe-accent); color: var(--iwe-accent); }
+  .wp-pill-suggest:hover:not(:disabled) { color: var(--iwe-accent); }
   .wp-pill-suggest:disabled { opacity: 0.4; cursor: default; }
   .wp-word-group { margin-bottom: 0.75rem; }
 

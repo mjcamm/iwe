@@ -207,14 +207,9 @@
   async function runDetection() {
     detecting = true;
     try {
-      candidates = await detectEntities(1);
-      // Sort: multi-word first (more likely real entities), then by count
-      candidates.sort((a, b) => {
-        const aMulti = a.text.includes(' ') ? 1 : 0;
-        const bMulti = b.text.includes(' ') ? 1 : 0;
-        if (aMulti !== bMulti) return bMulti - aMulti;
-        return b.count - a.count;
-      });
+      candidates = await detectEntities(3);
+      // Sort by occurrence count, most common first
+      candidates.sort((a, b) => b.count - a.count);
     } catch (e) {
       console.warn('Detection failed:', e);
       candidates = [];
@@ -298,13 +293,23 @@
     editingEntity = { ...editingEntity, aliases: editingEntity.aliases.filter(a => a !== alias) };
   }
 
-  async function handleDelete() {
+  let showDeleteConfirm = $state(false);
+
+  function handleDelete() {
     if (!editingEntity) return;
-    if (confirm(`Delete "${editingEntity.name}"?`)) {
-      await ondelete(editingEntity.id);
-      editingEntity = null;
-      view = 'list';
-    }
+    showDeleteConfirm = true;
+  }
+
+  async function confirmDeleteEntity() {
+    if (!editingEntity) return;
+    showDeleteConfirm = false;
+    await ondelete(editingEntity.id);
+    editingEntity = null;
+    view = 'list';
+  }
+
+  function cancelDeleteEntity() {
+    showDeleteConfirm = false;
   }
 
   let filtered = $derived(() => {
@@ -573,7 +578,17 @@
       </label>
 
       <div class="form-actions">
-        <button class="btn-danger" onclick={handleDelete}>Delete Entity</button>
+        {#if showDeleteConfirm}
+          <div class="delete-confirm">
+            <p class="delete-confirm-msg">Delete <strong>"{editingEntity.name}"</strong>?</p>
+            <div class="delete-confirm-actions">
+              <button class="btn-danger" onclick={confirmDeleteEntity}>Delete</button>
+              <button class="btn-author btn-author-subtle btn-author-sm" onclick={cancelDeleteEntity}>Cancel</button>
+            </div>
+          </div>
+        {:else}
+          <button class="btn-danger" onclick={handleDelete}>Delete Entity</button>
+        {/if}
       </div>
     </div>
 
@@ -1026,6 +1041,23 @@
     background: none; color: var(--iwe-danger); transition: all 150ms;
   }
   .btn-danger:hover { background: var(--iwe-danger); color: white; }
+
+  .delete-confirm {
+    background: var(--iwe-danger-light); border: 1px solid var(--iwe-danger);
+    border-radius: var(--iwe-radius); padding: 0.6rem 0.8rem;
+    animation: deleteConfirmIn 0.15s ease;
+  }
+  @keyframes deleteConfirmIn {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .delete-confirm-msg {
+    font-family: var(--iwe-font-ui); font-size: 0.82rem;
+    color: var(--iwe-text); margin: 0 0 0.5rem;
+  }
+  .delete-confirm-actions {
+    display: flex; gap: 0.4rem;
+  }
 
   /* Color picker */
   .color-pick {

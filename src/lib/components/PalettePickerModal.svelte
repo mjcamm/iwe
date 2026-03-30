@@ -302,21 +302,27 @@
   .pp-section-count { font-size: 0.68rem; color: var(--iwe-text-faint); }
 
   .pp-pills {
-    display: flex; flex-wrap: wrap; gap: 0.35rem;
-    padding: 0.4rem 0 0.2rem 1.2rem;
+    display: flex; flex-wrap: wrap;
+    gap: 0; line-height: 1.9;
+    padding: 0.3rem 0 0.2rem 1.2rem;
   }
   .pp-pill {
-    font-family: var(--iwe-font-ui); font-size: 0.82rem; font-weight: 500;
-    padding: 0.35rem 0.7rem; border-radius: 18px;
+    font-family: var(--iwe-font-prose); font-size: 0.88rem;
+    padding: 0; border-radius: 3px;
     cursor: pointer;
-    border: 1px solid var(--iwe-border);
-    background: var(--iwe-bg); color: var(--iwe-text);
-    transition: all 120ms; line-height: 1.2;
+    border: none; background: none;
+    color: var(--iwe-text-secondary);
+    transition: color 100ms;
   }
+  .pp-pill::after {
+    content: '\b7';
+    color: var(--iwe-text-faint);
+    margin: 0 0.45rem;
+    font-weight: 300;
+  }
+  .pp-pill:last-child::after { content: ''; margin: 0; }
   .pp-pill:hover {
-    background: var(--iwe-accent-light); border-color: var(--iwe-accent);
-    color: var(--iwe-accent); transform: translateY(-1px);
-    box-shadow: 0 2px 6px rgba(0,0,0,0.06);
+    color: var(--iwe-accent);
   }
 
   .pp-empty {
