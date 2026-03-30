@@ -150,6 +150,25 @@ pub fn check_spelling(
     Ok(results)
 }
 
+/// Debug: check a single word against both dictionaries directly (for troubleshooting)
+#[tauri::command]
+pub fn debug_spell_check(
+    spell: tauri::State<'_, SpellState>,
+    word: String,
+) -> Result<String, String> {
+    let lower = word.to_lowercase();
+    let normalized = normalize_apostrophes(&lower);
+    let us_check = spell.en_us.check(&lower);
+    let gb_check = spell.en_gb.check(&lower);
+    let us_orig = spell.en_us.check(&word);
+    let gb_orig = spell.en_gb.check(&word);
+    let lang = spell.language.lock().unwrap_or_else(|e| e.into_inner());
+    Ok(format!(
+        "word={:?} lower={:?} normalized={:?} lang={} us_lower={} gb_lower={} us_orig={} gb_orig={}",
+        word, lower, normalized, *lang, us_check, gb_check, us_orig, gb_orig
+    ))
+}
+
 /// Get spelling suggestions for a single word (on-demand, called from right-click)
 #[tauri::command]
 pub fn get_spell_suggestions(
@@ -208,4 +227,88 @@ pub fn get_custom_words(
     let conn = guard.as_ref().ok_or("No project open")?;
     let rows = db::get_custom_words_full(conn).map_err(|e| e.to_string())?;
     Ok(rows.into_iter().map(|(id, word, source)| CustomWord { id, word, source }).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_spell() -> SpellState {
+        init_spellcheck()
+    }
+
+    #[test]
+    fn common_words_pass() {
+        let spell = make_spell();
+        let custom = HashSet::new();
+        let words = vec!["the", "one", "lived", "boy", "who", "hello", "world",
+                         "walked", "replied", "quickly", "after", "actually"];
+        for w in words {
+            assert!(is_correct(w, &spell, &custom), "Expected '{}' to be correct", w);
+        }
+    }
+
+    #[test]
+    fn allcaps_words_pass() {
+        let spell = make_spell();
+        let custom = HashSet::new();
+        let words = vec!["THE", "ONE", "LIVED", "BOY", "WHO", "CHAPTER"];
+        for w in words {
+            assert!(is_correct(w, &spell, &custom), "Expected '{}' to be correct", w);
+        }
+    }
+
+    #[test]
+    fn misspelled_words_fail() {
+        let spell = make_spell();
+        let custom = HashSet::new();
+        let words = vec!["asdfgh", "blorpx", "wonderous", "furios"];
+        for w in words {
+            assert!(!is_correct(w, &spell, &custom), "Expected '{}' to be misspelled", w);
+        }
+    }
+
+    #[test]
+    fn contractions_pass() {
+        let spell = make_spell();
+        let custom = HashSet::new();
+        // Curly apostrophes (what TipTap produces)
+        assert!(is_correct("she\u{2019}d", &spell, &custom));
+        assert!(is_correct("don\u{2019}t", &spell, &custom));
+        assert!(is_correct("won\u{2019}t", &spell, &custom));
+        // Straight apostrophes
+        assert!(is_correct("she'd", &spell, &custom));
+        assert!(is_correct("don't", &spell, &custom));
+    }
+
+    #[test]
+    fn custom_words_pass() {
+        let spell = make_spell();
+        let mut custom = HashSet::new();
+        custom.insert("hogwarts".to_string());
+        custom.insert("dumbledore".to_string());
+        assert!(is_correct("Hogwarts", &spell, &custom));
+        assert!(is_correct("dumbledore", &spell, &custom));
+    }
+
+    #[test]
+    fn gb_dictionary_works() {
+        let spell = make_spell();
+        let custom = HashSet::new();
+        // Switch to GB
+        *spell.language.lock().unwrap() = "en_GB".to_string();
+        assert!(is_correct("colour", &spell, &custom));
+        assert!(is_correct("neighbour", &spell, &custom));
+        assert!(!is_correct("color", &spell, &custom));
+    }
+
+    #[test]
+    fn us_dictionary_works() {
+        let spell = make_spell();
+        let custom = HashSet::new();
+        // Default is US
+        assert!(is_correct("color", &spell, &custom));
+        assert!(!is_correct("colour", &spell, &custom));
+        assert!(is_correct("neighbor", &spell, &custom));
+    }
 }

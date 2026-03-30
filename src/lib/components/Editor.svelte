@@ -252,25 +252,39 @@
     // Build entity char ranges to exclude (use sorted ranges instead of per-char Set)
     const entityRanges = entityMatches.map(m => [m.start, m.end]);
 
-    // Extract unique words with their positions
-    const wordRegex = /[a-zA-Z\u00C0-\u024F'\u2019]+/g;
-    let match;
+    // Extract words by walking the PM doc directly, not the concatenated text.
+    // buildTextMap's text has no block separators, so words at heading/paragraph
+    // boundaries merge (e.g. "ONETHE"). Walking text nodes avoids this.
     const uniqueWords = new Map(); // lowercase -> [{ word, start, end }]
-    while ((match = wordRegex.exec(text)) !== null) {
-      const w = match[0];
-      if (w.length < 2) continue;
-      const start = match.index;
-      const end = start + w.length;
+    if (editorRaw) {
+      editorRaw.state.doc.descendants((node, pos) => {
+        if (!node.isText) return;
+        const nodeText = node.text;
+        const wordRegex = /[a-zA-Z\u00C0-\u024F'\u2019]+/g;
+        let match;
+        while ((match = wordRegex.exec(nodeText)) !== null) {
+          const w = match[0];
+          if (w.length < 2) continue;
+          // PM doc position of this word
+          const from = pos + match.index;
+          const to = from + w.length;
+          // Convert to char indices in the posMap text for entity overlap check
+          // Find the char index where posMap[charIdx] == from
+          const charStart = posMap.indexOf(from);
+          if (charStart === -1) continue;
+          const charEnd = charStart + w.length;
 
-      // Skip entity-overlapping words (binary-ish check on sorted ranges)
-      if (entityRanges.some(([rs, re]) => start < re && end > rs)) continue;
+          // Skip entity-overlapping words
+          if (entityRanges.some(([rs, re]) => charStart < re && charEnd > rs)) continue;
 
-      const cleaned = w.replace(/^['\u2019]+|['\u2019]+$/g, '');
-      if (cleaned.length < 2) continue;
-      const lower = cleaned.toLowerCase();
+          const cleaned = w.replace(/^['\u2019]+|['\u2019]+$/g, '');
+          if (cleaned.length < 2) continue;
+          const lower = cleaned.toLowerCase();
 
-      if (!uniqueWords.has(lower)) uniqueWords.set(lower, []);
-      uniqueWords.get(lower).push({ word: cleaned, start, end });
+          if (!uniqueWords.has(lower)) uniqueWords.set(lower, []);
+          uniqueWords.get(lower).push({ word: cleaned, start: charStart, end: charEnd });
+        }
+      });
     }
 
     // Only send words we haven't cached yet

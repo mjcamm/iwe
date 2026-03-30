@@ -39,7 +39,9 @@
       "Bash(curl:*)",
       "WebSearch",
       "Bash(cargo build:*)",
-      "Bash(grep -n \"^</div>$\\\\|^<style>\" /c/Users/mitch/Documents/projects/writing-iwe/src/routes/project/[filename]/+page.svelte)"
+      "Bash(grep -n \"^</div>$\\\\|^<style>\" /c/Users/mitch/Documents/projects/writing-iwe/src/routes/project/[filename]/+page.svelte)",
+      "Bash(grep -c \"^the$\\\\|^the/\" /c/Users/mitch/Documents/projects/writing-iwe/src-tauri/resources/dictionaries/en_GB-large.dic)",
+      "Bash(grep \"^the$\" /c/Users/mitch/Documents/projects/writing-iwe/src-tauri/resources/dictionaries/en_GB-large.dic)"
     ]
   }
 }

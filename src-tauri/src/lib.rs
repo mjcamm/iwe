@@ -521,6 +521,7 @@ pub fn run() {
             scanner::chapter_analysis,
             spellcheck::check_spelling,
             spellcheck::get_spell_suggestions,
+            spellcheck::debug_spell_check,
             spellcheck::add_to_dictionary,
             spellcheck::remove_from_dictionary,
             spellcheck::get_custom_words,
