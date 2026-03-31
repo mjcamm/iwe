@@ -4,6 +4,7 @@ mod scanner;
 mod spellcheck;
 mod synonyms;
 mod wordlists;
+mod ydoc;
 
 use db::AppState;
 use rusqlite::Connection;
@@ -45,7 +46,7 @@ fn add_chapter(state: tauri::State<'_, AppState>, title: String) -> Result<i64, 
 }
 
 #[tauri::command]
-fn update_chapter_content(state: tauri::State<'_, AppState>, id: i64, content: String) -> Result<(), String> {
+fn update_chapter_content(state: tauri::State<'_, AppState>, id: i64, content: Vec<u8>) -> Result<(), String> {
     let guard = state.db.lock().map_err(|e| e.to_string())?;
     let conn = guard.as_ref().ok_or("No project open")?;
     db::update_chapter_content(conn, id, &content).map_err(|e| e.to_string())
@@ -274,28 +275,9 @@ fn truncate_nav_after(state: tauri::State<'_, AppState>, id: i64) -> Result<(), 
 
 // ---- PDF export ----
 
-fn strip_html_to_text(html: &str) -> String {
-    html.replace("<br>", "\n")
-        .replace("<br/>", "\n")
-        .replace("<br />", "\n")
-        .replace("</p>", "\n\n")
-        .replace("</h1>", "\n\n")
-        .replace("</h2>", "\n\n")
-        .replace("</h3>", "\n\n")
-        .replace("<hr>", "\n\n* * *\n\n")
-        .replace("<hr/>", "\n\n* * *\n\n")
-        .replace("</li>", "\n")
-        .replace("</blockquote>", "\n")
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&nbsp;", " ")
-        .split('<')
-        .map(|s| s.split_once('>').map(|(_, rest)| rest).unwrap_or(s))
-        .collect::<Vec<_>>()
-        .join("")
+fn chapter_to_text(chapter: &db::Chapter) -> Result<String, String> {
+    let doc = ydoc::load_doc(&chapter.content)?;
+    Ok(ydoc::extract_text_with_breaks(&doc))
 }
 
 #[tauri::command]
@@ -414,7 +396,7 @@ fn export_pdf(state: tauri::State<'_, AppState>, path: String, title: String, fo
         doc.push(genpdf::elements::Break::new(1.0));
 
         // Chapter content
-        let plain = strip_html_to_text(&chapter.content);
+        let plain = chapter_to_text(chapter).unwrap_or_default();
         for paragraph in plain.split("\n\n") {
             let trimmed = paragraph.trim();
             if trimmed.is_empty() { continue; }
@@ -435,6 +417,31 @@ fn export_pdf(state: tauri::State<'_, AppState>, path: String, title: String, fo
     doc.render_to_file(&path).map_err(|e| e.to_string())?;
 
     Ok(())
+}
+
+// ---- Chapter word count (from Y.Doc) ----
+
+#[tauri::command]
+fn get_chapter_word_count(state: tauri::State<'_, AppState>, id: i64) -> Result<usize, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    let chapter = db::get_chapter(conn, id).map_err(|e| e.to_string())?
+        .ok_or("Chapter not found")?;
+    let doc = ydoc::load_doc(&chapter.content)?;
+    Ok(ydoc::word_count(&doc))
+}
+
+#[tauri::command]
+fn get_all_chapter_word_counts(state: tauri::State<'_, AppState>) -> Result<Vec<(i64, usize)>, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    let chapters = db::list_chapters(conn).map_err(|e| e.to_string())?;
+    let mut counts = Vec::new();
+    for ch in &chapters {
+        let doc = ydoc::load_doc(&ch.content)?;
+        counts.push((ch.id, ydoc::word_count(&doc)));
+    }
+    Ok(counts)
 }
 
 // ---- Ignored words ----
@@ -503,6 +510,8 @@ pub fn run() {
             push_nav_entry,
             truncate_nav_after,
             export_pdf,
+            get_chapter_word_count,
+            get_all_chapter_word_counts,
             add_ignored_word,
             remove_ignored_word,
             remove_alias,

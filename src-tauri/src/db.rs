@@ -10,7 +10,7 @@ pub struct AppState {
 pub struct Chapter {
     pub id: i64,
     pub title: String,
-    pub content: String,
+    pub content: Vec<u8>,
     pub sort_order: i64,
     pub created_at: String,
     pub updated_at: String,
@@ -43,7 +43,7 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         CREATE TABLE IF NOT EXISTS chapters (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             title TEXT NOT NULL,
-            content TEXT NOT NULL DEFAULT '',
+            content BLOB NOT NULL DEFAULT x'',
             sort_order INTEGER NOT NULL,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -217,14 +217,15 @@ pub fn get_chapter(conn: &Connection, id: i64) -> rusqlite::Result<Option<Chapte
 pub fn add_chapter(conn: &Connection, title: &str) -> rusqlite::Result<i64> {
     let max_order: i64 = conn
         .query_row("SELECT COALESCE(MAX(sort_order), 0) FROM chapters", [], |row| row.get(0))?;
+    let empty: Vec<u8> = Vec::new();
     conn.execute(
-        "INSERT INTO chapters (title, content, sort_order) VALUES (?1, '', ?2)",
-        params![title, max_order + 1],
+        "INSERT INTO chapters (title, content, sort_order) VALUES (?1, ?2, ?3)",
+        params![title, empty, max_order + 1],
     )?;
     Ok(conn.last_insert_rowid())
 }
 
-pub fn update_chapter_content(conn: &Connection, id: i64, content: &str) -> rusqlite::Result<()> {
+pub fn update_chapter_content(conn: &Connection, id: i64, content: &[u8]) -> rusqlite::Result<()> {
     conn.execute(
         "UPDATE chapters SET content = ?1, updated_at = CURRENT_TIMESTAMP WHERE id = ?2",
         params![content, id],

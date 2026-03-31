@@ -1,5 +1,5 @@
 <script>
-  let { chapters, activeTabId, onselect, onadd, onrename, ondelete, wordCount, chapterCounts = {} } = $props();
+  let { chapters, activeTabId, onselect, onadd, onrename, ondelete, chapterCounts = {} } = $props();
 
   let editingId = $state(null);
   let editTitle = $state('');

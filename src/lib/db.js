@@ -106,7 +106,8 @@ export async function addChapter(title) {
 }
 
 export async function updateChapterContent(id, content) {
-  return invoke('update_chapter_content', { id, content });
+  // content is a Uint8Array (Y.Doc state) — convert to number array for Tauri IPC
+  return invoke('update_chapter_content', { id, content: Array.from(content) });
 }
 
 export async function renameChapter(id, title) {
@@ -149,8 +150,8 @@ export async function removeAlias(entityId, alias) {
 
 // --- Scanner ---
 
-export async function scanText(html) {
-  return invoke('scan_text', { html });
+export async function scanText(text) {
+  return invoke('scan_text', { text });
 }
 
 export async function scanAllChapters() {
@@ -425,4 +426,14 @@ export async function getActiveGroups() {
 
 export async function debugStrippedText(chapterId, start, length) {
   return invoke('debug_stripped_text', { chapterId, start, length });
+}
+
+// --- Word counts (from Y.Doc) ---
+
+export async function getChapterWordCount(id) {
+  return invoke('get_chapter_word_count', { id });
+}
+
+export async function getAllChapterWordCounts() {
+  return invoke('get_all_chapter_word_counts');
 }

@@ -5,6 +5,13 @@ use std::collections::{HashMap, HashSet};
 
 use crate::db::{self, AppState};
 use crate::wordlists;
+use crate::ydoc;
+
+/// Extract plain text from a chapter's Y.Doc content.
+fn chapter_plain_text(chapter: &db::Chapter) -> Result<String, String> {
+    let doc = ydoc::load_doc(&chapter.content)?;
+    Ok(ydoc::extract_plain_text(&doc))
+}
 
 struct SearchTerm {
     entity_id: i64,
@@ -75,64 +82,6 @@ pub struct EntityCount {
     pub count: usize,
 }
 
-fn strip_html(html: &str) -> String {
-    let mut plain = String::with_capacity(html.len());
-    let mut in_tag = false;
-    let mut in_entity = false;
-    let mut entity_buf = String::new();
-
-    for ch in html.chars() {
-        if ch == '<' {
-            // Trim trailing whitespace before opening a tag — ProseMirror
-            // trims trailing spaces from text nodes, so "text </p>" produces
-            // "text" not "text ". Without this, char positions drift.
-            while plain.ends_with(' ') || plain.ends_with('\t') {
-                plain.pop();
-            }
-            in_tag = true;
-        } else if ch == '>' {
-            in_tag = false;
-        } else if !in_tag {
-            if ch == '&' {
-                in_entity = true;
-                entity_buf.clear();
-                entity_buf.push(ch);
-            } else if in_entity {
-                entity_buf.push(ch);
-                if ch == ';' {
-                    let decoded = match entity_buf.as_str() {
-                        "&amp;" => "&",
-                        "&lt;" => "<",
-                        "&gt;" => ">",
-                        "&quot;" => "\"",
-                        "&#39;" | "&apos;" => "'",
-                        "&nbsp;" => " ",
-                        "&#x27;" => "'",
-                        "&#x2F;" => "/",
-                        _ => {
-                            plain.push_str(&entity_buf);
-                            in_entity = false;
-                            continue;
-                        }
-                    };
-                    plain.push_str(decoded);
-                    in_entity = false;
-                } else if entity_buf.len() > 10 {
-                    plain.push_str(&entity_buf);
-                    in_entity = false;
-                }
-            } else {
-                plain.push(ch);
-            }
-        }
-    }
-
-    if in_entity {
-        plain.push_str(&entity_buf);
-    }
-
-    plain
-}
 
 fn is_word_boundary(ch: char) -> bool {
     !ch.is_alphanumeric() && ch != '\''
@@ -272,25 +221,24 @@ fn scan_plain(plain: &str, terms: &[SearchTerm]) -> Vec<Match> {
 }
 
 #[tauri::command]
-pub fn scan_text(state: tauri::State<'_, AppState>, html: String) -> Result<Vec<Match>, String> {
+pub fn scan_text(state: tauri::State<'_, AppState>, text: String) -> Result<Vec<Match>, String> {
     let guard = state.db.lock().map_err(|e| e.to_string())?;
     let conn = guard.as_ref().ok_or("No project open")?;
 
     let entities = db::list_entities(conn).map_err(|e| e.to_string())?;
     let terms = build_terms(&entities);
-    let plain = strip_html(&html);
 
-    Ok(scan_plain(&plain, &terms))
+    Ok(scan_plain(&text, &terms))
 }
 
-/// Debug: dump a section of the Rust strip_html output for a chapter
+/// Debug: dump a section of the Y.Doc extracted text for a chapter
 #[tauri::command]
 pub fn debug_stripped_text(state: tauri::State<'_, AppState>, chapter_id: i64, start: usize, length: usize) -> Result<String, String> {
     let guard = state.db.lock().map_err(|e| e.to_string())?;
     let conn = guard.as_ref().ok_or("No project open")?;
     let chapter = db::get_chapter(conn, chapter_id).map_err(|e| e.to_string())?
         .ok_or("Chapter not found")?;
-    let plain = strip_html(&chapter.content);
+    let plain = chapter_plain_text(&chapter)?;
     let chars: Vec<char> = plain.chars().collect();
     let end = (start + length).min(chars.len());
     let total_len = chars.len();
@@ -319,7 +267,7 @@ pub fn scan_all_chapters(state: tauri::State<'_, AppState>) -> Result<Vec<Chapte
     let mut results = Vec::new();
 
     for chapter in &chapters {
-        let plain = strip_html(&chapter.content);
+        let plain = chapter_plain_text(chapter)?;
         let matches = scan_plain(&plain, &terms);
 
         let mut counts_map: std::collections::HashMap<i64, (String, String, usize)> =
@@ -518,7 +466,7 @@ pub fn detect_entities(state: tauri::State<'_, AppState>, min_count: Option<usiz
     let mut count_map: HashMap<String, usize> = HashMap::new();
 
     for chapter in &chapters {
-        let plain = strip_html(&chapter.content);
+        let plain = chapter_plain_text(chapter)?;
         let chars: Vec<char> = plain.chars().collect();
 
         // Run entity scan to get all matched ranges in this chapter
@@ -678,7 +626,7 @@ pub fn relationship_search(
     let context_padding: usize = 80;
 
     for chapter in &chapters {
-        let plain = strip_html(&chapter.content);
+        let plain = chapter_plain_text(chapter)?;
         let chars: Vec<char> = plain.chars().collect();
 
         let matches_a = scan_plain(&plain, &terms_a);
@@ -921,7 +869,7 @@ pub fn text_search(
     let context_radius: usize = 150;
 
     for chapter in &chapters {
-        let plain = strip_html(&chapter.content);
+        let plain = chapter_plain_text(chapter)?;
         let chars: Vec<char> = plain.chars().collect();
 
         // Find all matches
@@ -1052,7 +1000,7 @@ pub fn dialogue_search(
     let context_radius: usize = 80;
 
     for chapter in &chapters {
-        let plain = strip_html(&chapter.content);
+        let plain = chapter_plain_text(chapter)?;
         let chars: Vec<char> = plain.chars().collect();
 
         // Find all quoted passages
@@ -1160,7 +1108,7 @@ pub fn word_frequency(
     let mut global_counts: HashMap<String, Vec<(i64, String, Vec<WordInfo>)>> = HashMap::new();
 
     for chapter in &chapters {
-        let plain = strip_html(&chapter.content);
+        let plain = chapter_plain_text(chapter)?;
         let lower = plain.to_lowercase();
 
         let mut word_infos: HashMap<String, Vec<WordInfo>> = HashMap::new();
@@ -1212,7 +1160,7 @@ pub fn word_frequency(
 
                 let chapter = chapters.iter().find(|c| c.id == *chapter_id);
                 if chapter.is_none() { continue; }
-                let plain = strip_html(&chapter.unwrap().content);
+                let plain = chapter_plain_text(chapter.unwrap()).map_err(|e| e.to_string())?;
                 let chars: Vec<char> = plain.chars().collect();
 
                 // Sliding window by word index
@@ -1389,7 +1337,7 @@ pub fn find_similar_phrases(
     let mut sentences: Vec<Sentence> = Vec::new();
 
     for chapter in &chapters {
-        let plain = strip_html(&chapter.content);
+        let plain = chapter_plain_text(chapter)?;
         let chars: Vec<char> = plain.chars().collect();
 
         // Split on sentence terminators
@@ -1487,7 +1435,7 @@ pub fn find_similar_phrases(
 
     // Precompute chapter plain text cache
     let chapter_plains: HashMap<i64, Vec<char>> = chapters.iter()
-        .map(|c| (c.id, strip_html(&c.content).chars().collect()))
+        .filter_map(|c| chapter_plain_text(c).ok().map(|p| (c.id, p.chars().collect())))
         .collect();
 
     let mut groups: Vec<SimilarGroup> = Vec::new();
@@ -1622,7 +1570,7 @@ pub fn generate_heatmap(
     let mut total_sentences: usize = 0;
 
     for (ch_idx, chapter) in chapters.iter().enumerate() {
-        let plain = strip_html(&chapter.content);
+        let plain = chapter_plain_text(chapter)?;
         let chars: Vec<char> = plain.chars().collect();
 
         // Split into sentences
@@ -1734,7 +1682,7 @@ pub fn chapter_analysis(state: tauri::State<'_, AppState>) -> Result<Vec<Chapter
     let mut results = Vec::new();
 
     for chapter in &chapters {
-        let plain = strip_html(&chapter.content);
+        let plain = chapter_plain_text(chapter)?;
         if plain.trim().is_empty() {
             results.push(ChapterAnalysis {
                 chapter_id: chapter.id,
@@ -1785,12 +1733,16 @@ pub fn chapter_analysis(state: tauri::State<'_, AppState>) -> Result<Vec<Chapter
             sentences.iter().sum::<usize>() as f64 / sentence_count as f64
         } else { 0.0 };
 
-        // Paragraphs (split by double newlines or block boundaries — in stripped HTML, these become runs of text)
-        // Since we strip HTML, paragraphs are separated by where block tags were.
-        // Use the HTML content to count <p> tags
-        let paragraph_count = chapter.content.matches("<p>").count()
-            .max(chapter.content.matches("<p ").count())
-            .max(1);
+        // Count paragraphs from Y.Doc structure (top-level block elements)
+        let paragraph_count = {
+            use yrs::{Transact as _, XmlFragment as _, ReadTxn as _};
+            let ydoc = ydoc::load_doc(&chapter.content).unwrap_or_else(|_| yrs::Doc::new());
+            let txn = ydoc.transact();
+            match txn.get_xml_fragment("prosemirror") {
+                Some(frag) => frag.len(&txn) as usize,
+                None => 1,
+            }
+        }.max(1);
         let avg_paragraph_length = if paragraph_count > 0 {
             total_words as f64 / paragraph_count as f64
         } else { 0.0 };
@@ -1874,7 +1826,7 @@ pub fn find_references(state: tauri::State<'_, AppState>, entity_id: i64) -> Res
     let mut total = 0;
 
     for chapter in &chapters {
-        let plain = strip_html(&chapter.content);
+        let plain = chapter_plain_text(chapter)?;
         let chars: Vec<char> = plain.chars().collect();
         let matches = scan_plain(&plain, &terms);
 

@@ -41,7 +41,16 @@
       "Bash(cargo build:*)",
       "Bash(grep -n \"^</div>$\\\\|^<style>\" /c/Users/mitch/Documents/projects/writing-iwe/src/routes/project/[filename]/+page.svelte)",
       "Bash(grep -c \"^the$\\\\|^the/\" /c/Users/mitch/Documents/projects/writing-iwe/src-tauri/resources/dictionaries/en_GB-large.dic)",
-      "Bash(grep \"^the$\" /c/Users/mitch/Documents/projects/writing-iwe/src-tauri/resources/dictionaries/en_GB-large.dic)"
+      "Bash(grep \"^the$\" /c/Users/mitch/Documents/projects/writing-iwe/src-tauri/resources/dictionaries/en_GB-large.dic)",
+      "WebFetch(domain:docs.rs)",
+      "WebFetch(domain:www.bartoszsypytkowski.com)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:tiptap.dev)",
+      "WebFetch(domain:docs.yjs.dev)",
+      "Bash(cargo doc:*)",
+      "Bash(npx vite:*)",
+      "Bash(node -e \"const y = require\\(''y-prosemirror''\\); console.log\\(Object.keys\\(y\\).filter\\(k => k.includes\\(''JSON''\\) || k.includes\\(''sync''\\) || k.includes\\(''undo''\\) || k.includes\\(''Sync''\\) || k.includes\\(''Undo''\\)\\)\\)\")",
+      "Bash(node -e \"const t = require\\(''@tiptap/core''\\); console.log\\(typeof t.generateHTML\\)\")"
     ]
   }
 }

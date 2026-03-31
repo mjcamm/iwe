@@ -1,14 +1,16 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
-  import { Editor } from '@tiptap/core';
+  import { Editor, Extension } from '@tiptap/core';
   import StarterKit from '@tiptap/starter-kit';
   import Placeholder from '@tiptap/extension-placeholder';
   import TextAlign from '@tiptap/extension-text-align';
   import Superscript from '@tiptap/extension-superscript';
   import Subscript from '@tiptap/extension-subscript';
-  import { Extension } from '@tiptap/core';
+  import { ySyncPlugin, yUndoPlugin, undo, redo } from 'y-prosemirror';
+  import { keymap } from '@tiptap/pm/keymap';
   import { scanText, addIgnoredWord, checkSpelling, getSpellSuggestions, addToDictionary } from '$lib/db.js';
   import { createHighlightPlugin, createSpellCheckPlugin, buildTextMap, applyDecorations, applySpellDecorations, entityHighlightKey, spellCheckKey } from '$lib/entityHighlight.js';
+  import { createChapterDoc, encodeDoc, destroyDoc } from '$lib/ydoc.js';
   import WordModal from './WordModal.svelte';
   import PalettePickerModal from './PalettePickerModal.svelte';
 
@@ -212,11 +214,9 @@
     paletteModal = { ...paletteModal, show: false };
   }
 
-  function toHtml(content) {
-    if (!content) return '';
-    if (content.trim().startsWith('<')) return content;
-    return content.split(/\n\n+/).map(p => `<p>${p.replace(/\n/g, '<br>')}</p>`).join('');
-  }
+  // Y.Doc state for current chapter
+  let currentYDoc = null;
+  let currentXmlFragment = null;
 
   function doScan() {
     if (!editorRaw) {
@@ -376,12 +376,18 @@
     editorRaw.chain().setTextSelection(to).run();
   }
 
-  onMount(() => {
+  function createEditorInstance() {
+    // Create Y.Doc from chapter's stored state bytes
+    const { doc, xmlFragment } = createChapterDoc(chapter?.content);
+    currentYDoc = doc;
+    currentXmlFragment = xmlFragment;
+
     const ed = new Editor({
       element: element,
       extensions: [
         StarterKit.configure({
-          heading: { levels: [1, 2, 3] }
+          heading: { levels: [1, 2, 3] },
+          history: false, // Disable — using yUndoPlugin instead
         }),
         Placeholder.configure({
           placeholder: 'Begin writing...'
@@ -395,6 +401,13 @@
           name: 'entityHighlightBridge',
           addProseMirrorPlugins() {
             return [
+              ySyncPlugin(currentXmlFragment),
+              yUndoPlugin(),
+              keymap({
+                'Mod-z': undo,
+                'Mod-y': redo,
+                'Mod-Shift-z': redo,
+              }),
               createHighlightPlugin((entityId, entityName, isCtrl) => {
                 onentityclick?.(entityId, entityName, isCtrl);
               }),
@@ -403,7 +416,6 @@
           },
         }),
       ],
-      content: toHtml(chapter?.content),
       editorProps: {
         attributes: {
           class: 'prose-editor',
@@ -412,7 +424,7 @@
       },
       onUpdate: ({ editor: ed }) => {
         if (!updatingFromProp) {
-          onchange(ed.getHTML());
+          onchange(encodeDoc(currentYDoc));
         }
         // Debounced scan on content change
         clearTimeout(scanTimer);
@@ -430,6 +442,19 @@
     });
     editorRaw = ed;
     editorState = { editor: ed };
+  }
+
+  function destroyEditorInstance() {
+    editorState.editor?.destroy();
+    editorRaw = null;
+    editorState = { editor: null };
+    destroyDoc(currentYDoc);
+    currentYDoc = null;
+    currentXmlFragment = null;
+  }
+
+  onMount(() => {
+    createEditorInstance();
 
     // Initial scan
     setTimeout(doScan, 300);
@@ -445,22 +470,29 @@
   });
 
   onDestroy(() => {
-    editorState.editor?.destroy();
+    destroyEditorInstance();
   });
 
-  // Sync content when chapter changes (switching tabs)
+  // Track chapter ID to detect chapter switches
+  let lastChapterId = null;
+
+  // Recreate editor when chapter changes (switching tabs)
   $effect(() => {
-    if (!editorRaw || !chapter) return;
-    // Read chapter to track dependency
-    const ch = chapter;
-    const currentContent = editorRaw.getHTML();
-    const newContent = toHtml(ch.content);
-    if (newContent !== currentContent) {
-      updatingFromProp = true;
-      editorRaw.commands.setContent(newContent, false);
-      updatingFromProp = false;
-      setTimeout(doScan, 100);
-    }
+    if (!chapter || !element) return;
+    const chapterId = chapter.id;
+    if (chapterId === lastChapterId) return;
+    lastChapterId = chapterId;
+
+    // On first mount, editor is already created — skip
+    if (!editorRaw) return;
+
+    // Chapter switched — destroy old editor and create new one
+    destroyEditorInstance();
+    spellCache.clear();
+    lastSpellText = '';
+    initialScanDone = false;
+    createEditorInstance();
+    setTimeout(doScan, 100);
   });
 
   // Keep a non-reactive ref to the raw editor for decoration use

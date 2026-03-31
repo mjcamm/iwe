@@ -1,13 +1,20 @@
 <script>
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
-  import { getProjectsDir, getSettings, saveSettings, openProject, getChapters, getChapter, addChapter, updateChapterContent, renameChapter, deleteChapter, getEntities, createEntity, updateEntity, deleteEntity, setEntityVisible, addAlias, removeAlias, scanAllChapters, getNavHistory, pushNavEntry, truncateNavAfter, addEntityNote, logWritingActivity, setSpellLanguage } from '$lib/db.js';
+  import { getProjectsDir, getSettings, saveSettings, openProject, getChapters, getChapter, addChapter, updateChapterContent, renameChapter, deleteChapter, getEntities, createEntity, updateEntity, deleteEntity, setEntityVisible, addAlias, removeAlias, scanAllChapters, getNavHistory, pushNavEntry, truncateNavAfter, addEntityNote, logWritingActivity, setSpellLanguage, getAllChapterWordCounts } from '$lib/db.js';
   import ChapterNav from '$lib/components/ChapterNav.svelte';
   import Editor from '$lib/components/Editor.svelte';
   import EntityPanel from '$lib/components/EntityPanel.svelte';
   import PalettePickerModal from '$lib/components/PalettePickerModal.svelte';
   import Toasts from '$lib/components/Toasts.svelte';
   import { exportDocx, exportTxt, exportHtml, exportPdf } from '$lib/export.js';
+  import { generateHTML } from '@tiptap/core';
+  import StarterKit from '@tiptap/starter-kit';
+  import TextAlign from '@tiptap/extension-text-align';
+  import Superscript from '@tiptap/extension-superscript';
+  import Subscript from '@tiptap/extension-subscript';
+  import { createChapterDoc, destroyDoc } from '$lib/ydoc.js';
+  import { yDocToProsemirrorJSON } from 'y-prosemirror';
   import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
   import SearchPanel from '$lib/components/SearchPanel.svelte';
   import AnalysisPanel from '$lib/components/AnalysisPanel.svelte';
@@ -158,9 +165,17 @@
     entities = await getEntities();
     refreshChapterCounts();
 
-    // Initialize word count tracking
-    for (const ch of chapters) {
-      lastKnownWordCounts[ch.id] = wordCount(ch.content);
+    // Initialize word count tracking from Rust (Y.Doc)
+    try {
+      const counts = await getAllChapterWordCounts();
+      const wc = {};
+      for (const [id, count] of counts) {
+        lastKnownWordCounts[id] = count;
+        wc[id] = count;
+      }
+      wordCounts = wc;
+    } catch (e) {
+      console.warn('[stats] failed to load word counts:', e);
     }
 
     // Load nav history
@@ -227,15 +242,50 @@
 
   let showExportMenu = $state(false);
 
+  // Schema extensions for generating HTML from Y.Doc (matches editor config)
+  const exportExtensions = [
+    StarterKit.configure({ heading: { levels: [1, 2, 3] }, history: false }),
+    TextAlign.configure({ types: ['heading', 'paragraph'] }),
+    Superscript,
+    Subscript,
+  ];
+
+  /** Convert Y.Doc bytes to HTML using TipTap's schema */
+  function chapterToHtml(chapterContent) {
+    try {
+      const { doc, xmlFragment } = createChapterDoc(chapterContent);
+      const json = yDocToProsemirrorJSON(doc, 'prosemirror');
+      destroyDoc(doc);
+      return generateHTML(json, exportExtensions);
+    } catch (e) {
+      console.warn('[export] failed to generate HTML:', e);
+      return '';
+    }
+  }
+
+  /** Prepare chapters with HTML content for export functions */
+  function chaptersWithHtml() {
+    return chapters.map(ch => ({
+      ...ch,
+      content: chapterToHtml(ch.content),
+    }));
+  }
+
   async function handleExport(format) {
     showExportMenu = false;
     try {
       let path;
-      if (format === 'docx') path = await exportDocx(chapters, projectTitle);
-      else if (format === 'txt') path = await exportTxt(chapters, projectTitle);
-      else if (format === 'html') path = await exportHtml(chapters, projectTitle);
-      else if (format === 'pdf-a4') path = await exportPdf(chapters, projectTitle, 'a4');
-      else if (format === 'pdf-book') path = await exportPdf(chapters, projectTitle, 'book');
+      if (format === 'pdf-a4') {
+        path = await exportPdf(chapters, projectTitle, 'a4');
+      } else if (format === 'pdf-book') {
+        path = await exportPdf(chapters, projectTitle, 'book');
+      } else {
+        // DOCX/TXT/HTML need HTML content — generate from Y.Doc
+        const htmlChapters = chaptersWithHtml();
+        if (format === 'docx') path = await exportDocx(htmlChapters, projectTitle);
+        else if (format === 'txt') path = await exportTxt(htmlChapters, projectTitle);
+        else if (format === 'html') path = await exportHtml(htmlChapters, projectTitle);
+      }
       if (path) addToast(`Exported to ${path.split(/[/\\]/).pop()}`, 'success');
     } catch (e) {
       console.error('Export failed:', e);
@@ -545,6 +595,9 @@
     chapters = await getChapters();
   }
 
+  // Word count cache: chapterId -> count (updated on save and init)
+  let wordCounts = $state({});
+
   function handleContentChange(content) {
     if (!activeChapter) return;
     activeChapter = { ...activeChapter, content };
@@ -554,33 +607,29 @@
       updateChapterContent(activeChapter.id, content);
       refreshChapterCounts();
 
-      // Track writing activity
-      const currentWords = wordCount(content);
+      // Track writing activity — get word count from editor
+      const ed = editorRef?.getEditor();
+      const currentWords = ed ? countWordsFromDoc(ed.state.doc) : 0;
       const lastWords = lastKnownWordCounts[activeChapter.id] || 0;
       const delta = currentWords - lastWords;
       lastKnownWordCounts[activeChapter.id] = currentWords;
+      wordCounts = { ...wordCounts, [activeChapter.id]: currentWords };
 
       if (delta !== 0) {
-        const manuscriptTotal = chapters.reduce((sum, ch) => {
-          if (ch.id === activeChapter.id) return sum + currentWords;
-          return sum + wordCount(ch.content);
-        }, 0);
-        console.log(`[stats] logging: chapter=${activeChapter.id} words=${currentWords} manuscript=${manuscriptTotal} delta=${delta}`);
+        const manuscriptTotal = Object.values(wordCounts).reduce((a, b) => a + b, 0);
         logWritingActivity(activeChapter.id, currentWords, manuscriptTotal, delta).catch(e => console.error('[stats] log failed:', e));
       }
     }, 500);
   }
 
-  function wordCount(text) {
+  function countWordsFromDoc(doc) {
+    const text = doc.textContent;
     if (!text || !text.trim()) return 0;
-    const plain = text.replace(/<[^>]*>/g, ' ');
-    const trimmed = plain.trim();
-    if (!trimmed) return 0;
-    return trimmed.split(/\s+/).length;
+    return text.trim().split(/\s+/).length;
   }
 
-  let totalWords = $derived(chapters.reduce((sum, ch) => sum + wordCount(ch.content), 0));
-  let currentWords = $derived(activeChapter ? wordCount(activeChapter.content) : 0);
+  let totalWords = $derived(Object.values(wordCounts).reduce((a, b) => a + b, 0));
+  let currentWords = $derived(activeChapter ? (wordCounts[activeChapter.id] || 0) : 0);
 </script>
 
 {#if projectLoading || !editorReady}
@@ -648,7 +697,6 @@
         onadd={handleAddChapter}
         onrename={handleRenameChapter}
         ondelete={handleDeleteChapter}
-        {wordCount}
         {chapterCounts}
       />
     </div>

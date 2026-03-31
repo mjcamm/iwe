@@ -31,3 +31,4 @@ rusqlite = { version = "0.39.0", features = ["bundled"] }
 regex = "1.12.3"
 genpdf = "0.2.0"
 spellbook = "0.4.0"
+yrs = "0.21"

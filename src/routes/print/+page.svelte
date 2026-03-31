@@ -1,6 +1,31 @@
 <script>
   import { onMount } from 'svelte';
   import { getChapters } from '$lib/db.js';
+  import { generateHTML } from '@tiptap/core';
+  import StarterKit from '@tiptap/starter-kit';
+  import TextAlign from '@tiptap/extension-text-align';
+  import Superscript from '@tiptap/extension-superscript';
+  import Subscript from '@tiptap/extension-subscript';
+  import { createChapterDoc, destroyDoc } from '$lib/ydoc.js';
+  import { yDocToProsemirrorJSON } from 'y-prosemirror';
+
+  const exportExtensions = [
+    StarterKit.configure({ heading: { levels: [1, 2, 3] }, history: false }),
+    TextAlign.configure({ types: ['heading', 'paragraph'] }),
+    Superscript,
+    Subscript,
+  ];
+
+  function chapterToHtml(content) {
+    try {
+      const { doc, xmlFragment } = createChapterDoc(content);
+      const json = yDocToProsemirrorJSON(doc, 'prosemirror');
+      destroyDoc(doc);
+      return generateHTML(json, exportExtensions);
+    } catch (e) {
+      return '';
+    }
+  }
 
   let ready = $state(false);
 
@@ -102,7 +127,8 @@
 <div class="title-page"><h1>${projectTitle}</h1><div class="rule"></div></div>
 `;
     for (const ch of chapters) {
-      html += `<div class="chapter"><div class="chapter-title">${ch.title}</div>${ch.content}</div>\n`;
+      const content = chapterToHtml(ch.content);
+      html += `<div class="chapter"><div class="chapter-title">${ch.title}</div>${content}</div>\n`;
     }
     html += '</body></html>';
     return html;
