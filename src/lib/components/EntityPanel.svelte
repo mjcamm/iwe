@@ -350,23 +350,7 @@
   {#if view === 'list'}
     <!-- List View -->
     <div class="panel-header">
-      <span class="panel-label">Entities</span>
-      <button
-        class="detect-btn"
-        onclick={() => { view = 'detect'; runDetection(); }}
-        title="Scan manuscript for entity candidates"
-      >
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-        Detect
-      </button>
-      <button
-        class="add-btn"
-        class:has-selection={selectedText}
-        onclick={startCreate}
-        title={selectedText ? `Create entity from "${selectedText}"` : 'Create new entity'}
-      >
-        + {selectedText ? 'Add' : 'New'}
-      </button>
+
     </div>
 
     {#if selectedText}

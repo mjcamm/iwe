@@ -172,6 +172,18 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         );
     ")?;
 
+    // Comments / notes table
+    conn.execute_batch("
+        CREATE TABLE IF NOT EXISTS comments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chapter_id INTEGER NOT NULL,
+            note_text TEXT NOT NULL DEFAULT '',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_comments_chapter ON comments(chapter_id);
+    ")?;
+
     Ok(())
 }
 
@@ -804,5 +816,53 @@ pub fn truncate_nav_after(conn: &Connection, id: i64) -> rusqlite::Result<()> {
 
 pub fn clear_nav_history(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM nav_history", [])?;
+    Ok(())
+}
+
+// ---- Comments / notes ----
+
+#[derive(Serialize, Clone)]
+pub struct Comment {
+    pub id: i64,
+    pub chapter_id: i64,
+    pub note_text: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+pub fn get_chapter_comments(conn: &Connection, chapter_id: i64) -> rusqlite::Result<Vec<Comment>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, chapter_id, note_text, created_at, updated_at FROM comments WHERE chapter_id = ?1 ORDER BY created_at ASC"
+    )?;
+    let rows = stmt.query_map(params![chapter_id], |row| {
+        Ok(Comment {
+            id: row.get(0)?,
+            chapter_id: row.get(1)?,
+            note_text: row.get(2)?,
+            created_at: row.get(3)?,
+            updated_at: row.get(4)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn add_comment(conn: &Connection, chapter_id: i64, note_text: &str) -> rusqlite::Result<i64> {
+    conn.execute(
+        "INSERT INTO comments (chapter_id, note_text) VALUES (?1, ?2)",
+        params![chapter_id, note_text],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn update_comment(conn: &Connection, id: i64, note_text: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE comments SET note_text = ?1, updated_at = CURRENT_TIMESTAMP WHERE id = ?2",
+        params![note_text, id],
+    )?;
+    Ok(())
+}
+
+pub fn delete_comment(conn: &Connection, id: i64) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM comments WHERE id = ?1", params![id])?;
     Ok(())
 }

@@ -422,6 +422,24 @@ export async function getActiveGroups() {
   return invoke('get_active_groups');
 }
 
+// --- Comments / notes ---
+
+export async function getChapterComments(chapterId) {
+  return invoke('get_chapter_comments', { chapterId });
+}
+
+export async function addComment(chapterId, noteText = '') {
+  return invoke('add_comment', { chapterId, noteText });
+}
+
+export async function updateComment(id, noteText) {
+  return invoke('update_comment', { id, noteText });
+}
+
+export async function deleteComment(id) {
+  return invoke('delete_comment', { id });
+}
+
 // --- Debug ---
 
 export async function debugStrippedText(chapterId, start, length) {

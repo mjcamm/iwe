@@ -1,5 +1,5 @@
 <script>
-  let { chapters, activeTabId, onselect, onadd, onrename, ondelete, chapterCounts = {} } = $props();
+  let { chapters, activeTabId, onselect, onadd, onrename, ondelete = {} } = $props();
 
   let editingId = $state(null);
   let editTitle = $state('');
@@ -46,9 +46,6 @@
         {:else}
           <button class="chapter-btn" onclick={() => onselect(ch.id)}>
             <span class="ch-title">{ch.title}</span>
-            {#if chapterCounts[ch.id]}
-              <span class="ch-count" title="{chapterCounts[ch.id]} entity mentions">{chapterCounts[ch.id]}</span>
-            {/if}
           </button>
           <div class="ch-actions">
             <button class="ch-action" onclick={e => startRename(e, ch)} title="Rename">
@@ -76,14 +73,14 @@
     padding: 0 0.75rem; margin-bottom: 0.5rem;
   }
   .nav-label {
-    font-size: 0.7rem; font-weight: 600; text-transform: uppercase;
+    font-size: 1rem; font-weight: 600; text-transform: uppercase;
     letter-spacing: 0.08em; color: var(--iwe-text-muted);
   }
   .nav-add {
     background: none; border: 1px solid var(--iwe-border);
     border-radius: var(--iwe-radius-sm); cursor: pointer;
-    font-size: 0.95rem; color: var(--iwe-text-muted);
-    width: 22px; height: 22px; display: flex;
+    font-size: 1.3rem; color: var(--iwe-text-muted);
+    width: 25px; height: 25px; display: flex;
     align-items: center; justify-content: center;
     padding: 0; line-height: 1; transition: all 150ms;
   }
@@ -117,6 +114,7 @@
     color: var(--iwe-text-secondary); white-space: nowrap;
     overflow: hidden; text-overflow: ellipsis;
     transition: color 150ms;
+    font-size: 0.9rem;
   }
   .ch-count {
     font-size: 0.65rem; color: var(--iwe-text-faint);

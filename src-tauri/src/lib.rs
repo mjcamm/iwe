@@ -460,6 +460,36 @@ fn remove_ignored_word(state: tauri::State<'_, AppState>, word: String) -> Resul
     db::remove_ignored_word(conn, &word).map_err(|e| e.to_string())
 }
 
+// ---- Comments / notes ----
+
+#[tauri::command]
+fn get_chapter_comments(state: tauri::State<'_, AppState>, chapter_id: i64) -> Result<Vec<db::Comment>, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::get_chapter_comments(conn, chapter_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn add_comment(state: tauri::State<'_, AppState>, chapter_id: i64, note_text: String) -> Result<i64, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::add_comment(conn, chapter_id, &note_text).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn update_comment(state: tauri::State<'_, AppState>, id: i64, note_text: String) -> Result<(), String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::update_comment(conn, id, &note_text).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_comment(state: tauri::State<'_, AppState>, id: i64) -> Result<(), String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::delete_comment(conn, id).map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Initialize spell checker and synonym state at startup
@@ -515,6 +545,10 @@ pub fn run() {
             add_ignored_word,
             remove_ignored_word,
             remove_alias,
+            get_chapter_comments,
+            add_comment,
+            update_comment,
+            delete_comment,
             scanner::scan_text,
             scanner::scan_all_chapters,
             scanner::detect_entities,

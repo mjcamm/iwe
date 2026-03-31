@@ -1,10 +1,11 @@
 <script>
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
-  import { getProjectsDir, getSettings, saveSettings, openProject, getChapters, getChapter, addChapter, updateChapterContent, renameChapter, deleteChapter, getEntities, createEntity, updateEntity, deleteEntity, setEntityVisible, addAlias, removeAlias, scanAllChapters, getNavHistory, pushNavEntry, truncateNavAfter, addEntityNote, logWritingActivity, setSpellLanguage, getAllChapterWordCounts } from '$lib/db.js';
+  import { getProjectsDir, getSettings, saveSettings, openProject, getChapters, getChapter, addChapter, updateChapterContent, renameChapter, deleteChapter, getEntities, createEntity, updateEntity, deleteEntity, setEntityVisible, addAlias, removeAlias, scanAllChapters, getNavHistory, pushNavEntry, truncateNavAfter, addEntityNote, logWritingActivity, setSpellLanguage, getAllChapterWordCounts, getChapterComments, addComment, updateComment, deleteComment } from '$lib/db.js';
   import ChapterNav from '$lib/components/ChapterNav.svelte';
   import Editor from '$lib/components/Editor.svelte';
   import EntityPanel from '$lib/components/EntityPanel.svelte';
+  import NotesPanel from '$lib/components/NotesPanel.svelte';
   import PalettePickerModal from '$lib/components/PalettePickerModal.svelte';
   import Toasts from '$lib/components/Toasts.svelte';
   import { exportDocx, exportTxt, exportHtml, exportPdf } from '$lib/export.js';
@@ -236,7 +237,10 @@
 
   let focusEntityId = $state(null);
   let focusTrigger = $state(0);
-  let rightPanelTab = $state('entities'); // 'entities' | 'search' | 'analysis'
+  let rightPanelTab = $state('entities'); // 'entities' | 'search' | 'analysis' | 'notes'
+  let chapterComments = $state([]); // comments from DB for current chapter
+  let resolvedComments = $state([]); // comments with positions from editor
+  let activeNoteId = $state(null); // selected note in detail view
 
   let pendingEntityName = $state(null);
 
@@ -509,6 +513,93 @@
     triggerRescan();
   }
 
+  // ---- Comments / notes ----
+
+  async function loadComments() {
+    if (!activeChapter) { resolvedComments = []; return; }
+    try {
+      chapterComments = await getChapterComments(activeChapter.id);
+    } catch (e) {
+      console.warn('[comments] load failed:', e);
+      chapterComments = [];
+    }
+    refreshResolvedComments();
+  }
+
+  function refreshResolvedComments() {
+    const markers = editorRef?.getNoteMarkerPositions() || [];
+    const markerMap = new Map(markers.map(m => [m.commentId, m]));
+    resolvedComments = chapterComments
+      .map(c => ({
+        ...c,
+        pos: markerMap.get(c.id)?.pos ?? -1,
+        highlightLen: markerMap.get(c.id)?.highlightLen ?? 0,
+      }))
+      .sort((a, b) => {
+        // Sort by document position, orphaned (-1) at bottom
+        if (a.pos === -1 && b.pos === -1) return 0;
+        if (a.pos === -1) return 1;
+        if (b.pos === -1) return -1;
+        return a.pos - b.pos;
+      });
+  }
+
+  async function handleAddComment({ from, highlightLen }) {
+    if (!activeChapter) return;
+    try {
+      const id = await addComment(activeChapter.id, '');
+      editorRef?.insertNoteMarker(from, id, highlightLen);
+      await loadComments();
+      rightPanelTab = 'notes';
+      activeNoteId = id;
+    } catch (e) {
+      console.error('[comments] add failed:', e);
+    }
+  }
+
+  async function handleUpdateComment(id, noteText) {
+    try {
+      await updateComment(id, noteText);
+      // Update local state
+      chapterComments = chapterComments.map(c => c.id === id ? { ...c, note_text: noteText } : c);
+      refreshResolvedComments();
+    } catch (e) {
+      console.error('[comments] update failed:', e);
+    }
+  }
+
+  async function handleDeleteComment(id) {
+    try {
+      editorRef?.removeNoteMarker(id);
+      await deleteComment(id);
+      activeNoteId = null;
+      await loadComments();
+    } catch (e) {
+      console.error('[comments] delete failed:', e);
+    }
+  }
+
+  function handleCommentClick(commentId) {
+    rightPanelTab = 'notes';
+    activeNoteId = commentId;
+  }
+
+  function handleSelectNote(commentId) {
+    activeNoteId = commentId;
+    if (commentId != null) {
+      editorRef?.scrollToNoteMarker(commentId);
+    }
+  }
+
+  function handleUpdateHighlight(commentId) {
+    const ed = editorRef?.getEditor();
+    if (!ed) return;
+    const { from, to } = ed.state.selection;
+    const highlightLen = (from !== to) ? (to - from) : 0;
+    editorRef?.moveNoteMarker(commentId, from, highlightLen);
+    refreshResolvedComments();
+  }
+
   function persistWidths() {
     clearTimeout(saveWidthTimer);
     saveWidthTimer = setTimeout(async () => {
@@ -559,6 +650,8 @@
     }
     activeTabId = id;
     activeChapter = await getChapter(id);
+    // Load comments after a short delay to let editor mount
+    setTimeout(() => loadComments(), 300);
   }
 
   function closeTab(id) {
@@ -721,7 +814,9 @@
         onselectionchange={text => { selectedText = text; if (text.trim()) lastSelectedText = text; }}
         onentityclick={handleEntityClick}
         onquickadd={handleQuickAdd}
-        onready={() => { editorReady = true; }}
+        onready={() => { editorReady = true; loadComments(); }}
+        onaddcomment={handleAddComment}
+        oncommentclick={handleCommentClick}
         {viewedEntityIds}
       />
     </div>
@@ -744,6 +839,12 @@
         </button>
         <button class="panel-tab" class:active={rightPanelTab === 'analysis'} onclick={() => rightPanelTab = 'analysis'}>
           <i class="bi bi-bar-chart-line"></i> Analysis
+        </button>
+        <button class="panel-tab" class:active={rightPanelTab === 'notes'} onclick={() => rightPanelTab = 'notes'}>
+          <i class="bi bi-chat-left-text"></i> Notes
+          {#if resolvedComments.length > 0}
+            <span class="panel-tab-count">{resolvedComments.length}</span>
+          {/if}
         </button>
       </div>
 
@@ -773,6 +874,15 @@
         <AnalysisPanel
           {entities}
           ongotochapter={handleGoToChapter}
+        />
+      {:else if rightPanelTab === 'notes'}
+        <NotesPanel
+          comments={resolvedComments}
+          {activeNoteId}
+          ondelete={handleDeleteComment}
+          onupdate={handleUpdateComment}
+          onselectnote={handleSelectNote}
+          onupdatehighlight={handleUpdateHighlight}
         />
       {/if}
     </div>
@@ -926,6 +1036,7 @@
     background: none; border: none; border-bottom: 2px solid transparent;
     color: var(--iwe-text-muted); cursor: pointer;
     transition: all 150ms;
+    font-size: 0.9rem;
   }
   .panel-tab:hover { color: var(--iwe-text-secondary); background: var(--iwe-bg-hover); }
   .panel-tab.active {

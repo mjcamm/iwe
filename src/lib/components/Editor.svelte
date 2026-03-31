@@ -11,10 +11,11 @@
   import { scanText, addIgnoredWord, checkSpelling, getSpellSuggestions, addToDictionary } from '$lib/db.js';
   import { createHighlightPlugin, createSpellCheckPlugin, buildTextMap, applyDecorations, applySpellDecorations, entityHighlightKey, spellCheckKey } from '$lib/entityHighlight.js';
   import { createChapterDoc, encodeDoc, destroyDoc } from '$lib/ydoc.js';
+  import { NoteMarker } from '$lib/noteMarker.js';
   import WordModal from './WordModal.svelte';
   import PalettePickerModal from './PalettePickerModal.svelte';
 
-  let { openTabs, activeTabId, chapter, onselecttab, onclosetab, onchange, onselectionchange, onentityclick, onquickadd, onready, viewedEntityIds = new Set() } = $props();
+  let { openTabs, activeTabId, chapter, onselecttab, onclosetab, onchange, onselectionchange, onentityclick, onquickadd, onready, onaddcomment, oncommentclick, viewedEntityIds = new Set() } = $props();
 
   let element = $state();
   // Official Svelte 5 pattern: wrap editor in object so reassignment triggers reactivity
@@ -173,6 +174,13 @@
 
   function ctxCreateEntity() {
     onquickadd?.(ctxMenu.word);
+    closeCtxMenu();
+  }
+
+  function ctxAddNote() {
+    const { from, to } = ctxMenu;
+    const highlightLen = (from !== to) ? (to - from) : 0;
+    onaddcomment?.({ from, highlightLen });
     closeCtxMenu();
   }
 
@@ -376,6 +384,85 @@
     editorRaw.chain().setTextSelection(to).run();
   }
 
+  export function insertNoteMarker(pos, commentId, highlightLen = 0) {
+    if (!editorRaw) return;
+    editorRaw.chain()
+      .focus()
+      .insertContentAt(pos, {
+        type: 'noteMarker',
+        attrs: { commentId, highlightLen },
+      })
+      .run();
+  }
+
+  export function removeNoteMarker(commentId) {
+    if (!editorRaw) return;
+    const { doc, tr } = editorRaw.state;
+    doc.descendants((node, pos) => {
+      if (node.type.name === 'noteMarker' && node.attrs.commentId === commentId) {
+        tr.delete(pos, pos + 1);
+        return false;
+      }
+    });
+    editorRaw.view.dispatch(tr);
+  }
+
+  export function moveNoteMarker(commentId, newPos, highlightLen = 0) {
+    if (!editorRaw) return;
+    // Remove old marker
+    const { doc } = editorRaw.state;
+    let oldPos = null;
+    doc.descendants((node, pos) => {
+      if (node.type.name === 'noteMarker' && node.attrs.commentId === commentId) {
+        oldPos = pos;
+        return false;
+      }
+    });
+    if (oldPos != null) {
+      editorRaw.chain()
+        .focus()
+        .deleteRange({ from: oldPos, to: oldPos + 1 })
+        .insertContentAt(Math.min(newPos, editorRaw.state.doc.content.size), {
+          type: 'noteMarker',
+          attrs: { commentId, highlightLen },
+        })
+        .run();
+    }
+  }
+
+  export function getNoteMarkerPositions() {
+    if (!editorRaw) return [];
+    const markers = [];
+    editorRaw.state.doc.descendants((node, pos) => {
+      if (node.type.name === 'noteMarker') {
+        markers.push({
+          commentId: node.attrs.commentId,
+          highlightLen: node.attrs.highlightLen,
+          pos,
+        });
+      }
+    });
+    return markers;
+  }
+
+  export function scrollToNoteMarker(commentId) {
+    if (!editorRaw) return;
+    editorRaw.state.doc.descendants((node, pos) => {
+      if (node.type.name === 'noteMarker' && node.attrs.commentId === commentId) {
+        editorRaw.chain().focus().setTextSelection(pos).run();
+        setTimeout(() => {
+          const scrollEl = element.closest('.editor-scroll');
+          if (!scrollEl) return;
+          const coords = editorRaw.view.coordsAtPos(pos);
+          const rect = scrollEl.getBoundingClientRect();
+          const target = coords.top - rect.top + scrollEl.scrollTop - rect.height / 3;
+          scrollEl.scrollTo({ top: target, behavior: 'smooth' });
+        }, 50);
+        return false;
+      }
+    });
+  }
+
   function createEditorInstance() {
     // Create Y.Doc from chapter's stored state bytes
     const { doc, xmlFragment } = createChapterDoc(chapter?.content);
@@ -397,6 +484,7 @@
         }),
         Superscript,
         Subscript,
+        NoteMarker,
         Extension.create({
           name: 'entityHighlightBridge',
           addProseMirrorPlugins() {
@@ -459,6 +547,13 @@
     // Initial scan
     setTimeout(doScan, 300);
 
+    // Listen for note-marker-click custom events
+    const handleNoteClick = (e) => {
+      const { commentId } = e.detail;
+      if (commentId != null) oncommentclick?.(commentId);
+    };
+    element.addEventListener('note-marker-click', handleNoteClick);
+
     // Close dropdown on click outside
     const handleClick = (e) => {
       if (showStyleDropdown && !e.target.closest('.style-dropdown-wrap')) {
@@ -466,7 +561,10 @@
       }
     };
     document.addEventListener('click', handleClick);
-    return () => document.removeEventListener('click', handleClick);
+    return () => {
+      element.removeEventListener('note-marker-click', handleNoteClick);
+      document.removeEventListener('click', handleClick);
+    };
   });
 
   onDestroy(() => {
@@ -714,6 +812,11 @@
           <i class="bi bi-eye-slash ctx-icon"></i>
             Ignore "{ctxMenu.word}" for spell check
           </button>
+        <div class="ctx-divider"></div>
+        <button class="ctx-item" onclick={ctxAddNote}>
+          <i class="bi bi-chat-left-text ctx-icon"></i>
+          Add a note
+        </button>
       </div>
     </div>
   {/if}
@@ -754,7 +857,7 @@
   .tab {
     display: flex; align-items: center; gap: 0.4rem;
     padding: 0.4rem 0.75rem; cursor: pointer;
-    font-size: 0.8rem; color: var(--iwe-text-muted);
+    font-size: 1rem; color: var(--iwe-text-muted);
     border-bottom: 2px solid transparent;
     white-space: nowrap; flex-shrink: 0; transition: all 150ms;
   }
@@ -891,6 +994,37 @@
   @keyframes spellIn {
     from { text-decoration-color: transparent; }
     to { text-decoration-color: var(--iwe-danger, #b85450); }
+  }
+
+  /* Note marker icons */
+  .editor-page :global(.note-marker-icon) {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 14px;
+    height: 14px;
+    font-size: 9px;
+    color: var(--iwe-accent, #2d6a5e);
+    opacity: 0.55;
+    cursor: grab;
+    vertical-align: super;
+    user-select: none;
+    transition: opacity 0.15s, color 0.15s;
+    position: relative;
+    top: -1px;
+    margin: 0 1px;
+  }
+  .editor-page :global(.note-marker-icon:hover) {
+    opacity: 1;
+    color: var(--iwe-accent-dark, #1e4d44);
+  }
+  .editor-page :global(.note-marker-icon:active) {
+    cursor: grabbing;
+  }
+  .editor-page :global(.comment-hover-highlight) {
+    background-color: rgba(45, 106, 94, 0.1);
+    border-radius: 2px;
+    transition: background-color 0.2s;
   }
 
   /* Context menu */
