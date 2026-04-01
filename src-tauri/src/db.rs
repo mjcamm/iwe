@@ -184,6 +184,42 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_comments_chapter ON comments(chapter_id);
     ")?;
 
+    // Entity state tracking — markers (checkpoints) with child values
+    conn.execute_batch("
+        CREATE TABLE IF NOT EXISTS state_markers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entity_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+            chapter_id INTEGER NOT NULL,
+            note TEXT NOT NULL DEFAULT '',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_state_markers_entity ON state_markers(entity_id);
+        CREATE INDEX IF NOT EXISTS idx_state_markers_chapter ON state_markers(chapter_id);
+
+        CREATE TABLE IF NOT EXISTS state_marker_values (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            marker_id INTEGER NOT NULL REFERENCES state_markers(id) ON DELETE CASCADE,
+            value_type TEXT NOT NULL DEFAULT 'fact',
+            fact_key TEXT NOT NULL DEFAULT '',
+            fact_value TEXT NOT NULL DEFAULT '',
+            ref_entity_id INTEGER REFERENCES entities(id) ON DELETE SET NULL,
+            ref_active INTEGER NOT NULL DEFAULT 1
+        );
+        CREATE INDEX IF NOT EXISTS idx_state_marker_values_marker ON state_marker_values(marker_id);
+    ")?;
+
+    // Time section ordering (for non-linear narratives)
+    conn.execute_batch("
+        CREATE TABLE IF NOT EXISTS time_section_order (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chapter_id INTEGER NOT NULL,
+            section_index INTEGER NOT NULL DEFAULT 0,
+            label TEXT NOT NULL DEFAULT '',
+            story_order INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(chapter_id, section_index)
+        );
+    ")?;
+
     Ok(())
 }
 
@@ -865,4 +901,290 @@ pub fn update_comment(conn: &Connection, id: i64, note_text: &str) -> rusqlite::
 pub fn delete_comment(conn: &Connection, id: i64) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM comments WHERE id = ?1", params![id])?;
     Ok(())
+}
+
+// ---- Entity state tracking (checkpoint model) ----
+
+#[derive(Serialize, Clone)]
+pub struct StateMarker {
+    pub id: i64,
+    pub entity_id: i64,
+    pub chapter_id: i64,
+    pub note: String,
+    pub created_at: String,
+    pub values: Vec<StateMarkerValue>,
+}
+
+#[derive(Serialize, Clone)]
+pub struct StateMarkerValue {
+    pub id: i64,
+    pub marker_id: i64,
+    pub value_type: String,
+    pub fact_key: String,
+    pub fact_value: String,
+    pub ref_entity_id: Option<i64>,
+    pub ref_entity_name: Option<String>,
+    pub ref_active: bool,
+}
+
+pub fn get_entity_markers(conn: &Connection, entity_id: i64) -> rusqlite::Result<Vec<StateMarker>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, entity_id, chapter_id, note, created_at
+         FROM state_markers WHERE entity_id = ?1 ORDER BY created_at ASC"
+    )?;
+    let mut markers: Vec<StateMarker> = stmt.query_map(params![entity_id], |row| {
+        Ok(StateMarker {
+            id: row.get(0)?,
+            entity_id: row.get(1)?,
+            chapter_id: row.get(2)?,
+            note: row.get(3)?,
+            created_at: row.get(4)?,
+            values: Vec::new(),
+        })
+    })?.collect::<rusqlite::Result<Vec<_>>>()?;
+
+    // Batch load values
+    if !markers.is_empty() {
+        let ids: Vec<i64> = markers.iter().map(|m| m.id).collect();
+        let placeholders: Vec<String> = ids.iter().map(|_| "?".to_string()).collect();
+        let sql = format!(
+            "SELECT v.id, v.marker_id, v.value_type, v.fact_key, v.fact_value, v.ref_entity_id, e.name, v.ref_active
+             FROM state_marker_values v
+             LEFT JOIN entities e ON e.id = v.ref_entity_id
+             WHERE v.marker_id IN ({}) ORDER BY v.id ASC",
+            placeholders.join(",")
+        );
+        let mut val_stmt = conn.prepare(&sql)?;
+        let val_rows = val_stmt.query_map(rusqlite::params_from_iter(&ids), |row| {
+            let ref_active_val: i64 = row.get(7)?;
+            Ok(StateMarkerValue {
+                id: row.get(0)?,
+                marker_id: row.get(1)?,
+                value_type: row.get(2)?,
+                fact_key: row.get(3)?,
+                fact_value: row.get(4)?,
+                ref_entity_id: row.get(5)?,
+                ref_entity_name: row.get(6)?,
+                ref_active: ref_active_val != 0,
+            })
+        })?;
+
+        let mut val_map: std::collections::HashMap<i64, Vec<StateMarkerValue>> = std::collections::HashMap::new();
+        for row in val_rows {
+            let v = row?;
+            val_map.entry(v.marker_id).or_default().push(v);
+        }
+        for marker in &mut markers {
+            if let Some(vals) = val_map.remove(&marker.id) {
+                marker.values = vals;
+            }
+        }
+    }
+
+    Ok(markers)
+}
+
+pub fn add_state_marker(conn: &Connection, entity_id: i64, chapter_id: i64) -> rusqlite::Result<i64> {
+    conn.execute(
+        "INSERT INTO state_markers (entity_id, chapter_id) VALUES (?1, ?2)",
+        params![entity_id, chapter_id],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn update_state_marker_note(conn: &Connection, id: i64, note: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE state_markers SET note = ?1 WHERE id = ?2",
+        params![note, id],
+    )?;
+    Ok(())
+}
+
+pub fn delete_state_marker(conn: &Connection, id: i64) -> rusqlite::Result<()> {
+    // Cascade deletes child values
+    conn.execute("DELETE FROM state_markers WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+pub fn add_state_marker_value(conn: &Connection, marker_id: i64, fact_key: &str, fact_value: &str) -> rusqlite::Result<i64> {
+    conn.execute(
+        "INSERT INTO state_marker_values (marker_id, value_type, fact_key, fact_value) VALUES (?1, 'fact', ?2, ?3)",
+        params![marker_id, fact_key, fact_value],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn add_state_marker_entity_ref(conn: &Connection, marker_id: i64, ref_entity_id: i64, ref_active: bool) -> rusqlite::Result<i64> {
+    conn.execute(
+        "INSERT INTO state_marker_values (marker_id, value_type, ref_entity_id, ref_active) VALUES (?1, 'entity_ref', ?2, ?3)",
+        params![marker_id, ref_entity_id, ref_active as i64],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn update_state_marker_value(conn: &Connection, id: i64, fact_key: &str, fact_value: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE state_marker_values SET fact_key = ?1, fact_value = ?2 WHERE id = ?3",
+        params![fact_key, fact_value, id],
+    )?;
+    Ok(())
+}
+
+pub fn update_state_marker_entity_ref(conn: &Connection, id: i64, ref_active: bool) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE state_marker_values SET ref_active = ?1 WHERE id = ?2",
+        params![ref_active as i64, id],
+    )?;
+    Ok(())
+}
+
+pub fn delete_state_marker_value(conn: &Connection, id: i64) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM state_marker_values WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+pub fn get_state_marker(conn: &Connection, id: i64) -> rusqlite::Result<Option<StateMarker>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, entity_id, chapter_id, note, created_at FROM state_markers WHERE id = ?1"
+    )?;
+    let mut rows = stmt.query_map(params![id], |row| {
+        Ok(StateMarker {
+            id: row.get(0)?,
+            entity_id: row.get(1)?,
+            chapter_id: row.get(2)?,
+            note: row.get(3)?,
+            created_at: row.get(4)?,
+            values: Vec::new(),
+        })
+    })?;
+    match rows.next() {
+        Some(Ok(m)) => Ok(Some(m)),
+        _ => Ok(None),
+    }
+}
+
+pub fn get_distinct_state_keys(conn: &Connection) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT fact_key FROM state_marker_values WHERE value_type = 'fact' AND fact_key != '' ORDER BY fact_key ASC"
+    )?;
+    let rows = stmt.query_map([], |row| row.get(0))?;
+    rows.collect()
+}
+
+pub fn get_entity_state_keys(conn: &Connection, entity_id: i64) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT v.fact_key FROM state_marker_values v
+         JOIN state_markers m ON m.id = v.marker_id
+         WHERE m.entity_id = ?1 AND v.value_type = 'fact' AND v.fact_key != ''
+         ORDER BY v.fact_key ASC"
+    )?;
+    let rows = stmt.query_map(params![entity_id], |row| row.get(0))?;
+    rows.collect()
+}
+
+// ---- Time section ordering ----
+
+#[derive(Serialize, Clone)]
+pub struct TimeSectionOrder {
+    pub id: i64,
+    pub chapter_id: i64,
+    pub section_index: i64,
+    pub label: String,
+    pub story_order: i64,
+}
+
+pub fn get_time_section_order(conn: &Connection) -> rusqlite::Result<Vec<TimeSectionOrder>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, chapter_id, section_index, label, story_order
+         FROM time_section_order ORDER BY story_order ASC"
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(TimeSectionOrder {
+            id: row.get(0)?,
+            chapter_id: row.get(1)?,
+            section_index: row.get(2)?,
+            label: row.get(3)?,
+            story_order: row.get(4)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn save_time_section_order(
+    conn: &Connection,
+    entries: Vec<(i64, i64, String, i64)>, // (chapter_id, section_index, label, story_order)
+) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM time_section_order", [])?;
+    let mut stmt = conn.prepare(
+        "INSERT INTO time_section_order (chapter_id, section_index, label, story_order)
+         VALUES (?1, ?2, ?3, ?4)"
+    )?;
+    for (chapter_id, section_index, label, story_order) in &entries {
+        stmt.execute(params![chapter_id, section_index, label, story_order])?;
+    }
+    Ok(())
+}
+
+pub fn reset_time_section_order(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM time_section_order", [])?;
+    Ok(())
+}
+
+// ---- Story-time resolution ----
+
+#[derive(Serialize, Clone)]
+pub struct ResolvedFact {
+    pub key: String,
+    pub value: String,
+}
+
+#[derive(Serialize, Clone)]
+pub struct ResolvedEntityState {
+    pub facts: Vec<ResolvedFact>,
+}
+
+/// Resolve entity state at a given point in story time.
+/// Walks all markers for this entity in story-time order up to target_story_pos,
+/// accumulating key-value pairs (later values overwrite earlier ones for the same key).
+pub fn resolve_entity_state(
+    conn: &Connection,
+    entity_id: i64,
+    state_section_map: &std::collections::HashMap<i64, (i64, i64)>,
+    story_order_map: &std::collections::HashMap<(i64, i64), i64>,
+    target_story_pos: i64,
+) -> rusqlite::Result<ResolvedEntityState> {
+    let markers = get_entity_markers(conn, entity_id)?;
+
+    // Position each marker in story time
+    let mut positioned: Vec<(i64, &StateMarker)> = Vec::new();
+    for m in &markers {
+        let story_pos = if let Some((ch_id, sec_idx)) = state_section_map.get(&m.id) {
+            *story_order_map.get(&(*ch_id, *sec_idx)).unwrap_or(&0)
+        } else {
+            let sort_order: i64 = conn.query_row(
+                "SELECT sort_order FROM chapters WHERE id = ?1",
+                params![m.chapter_id],
+                |row| row.get(0),
+            ).unwrap_or(0);
+            sort_order * 1000
+        };
+
+        if story_pos <= target_story_pos {
+            positioned.push((story_pos, m));
+        }
+    }
+
+    positioned.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // Accumulate facts — later markers overwrite earlier values for the same key
+    let mut fact_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for (_, m) in &positioned {
+        for v in &m.values {
+            fact_map.insert(v.fact_key.clone(), v.fact_value.clone());
+        }
+    }
+
+    Ok(ResolvedEntityState {
+        facts: fact_map.into_iter().map(|(k, v)| ResolvedFact { key: k, value: v }).collect(),
+    })
 }

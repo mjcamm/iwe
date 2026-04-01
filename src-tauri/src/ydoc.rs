@@ -1,5 +1,5 @@
 use yrs::{Doc, GetString, ReadTxn, Transact, Update, StateVector, XmlFragment};
-use yrs::types::xml::{XmlFragmentRef, XmlOut};
+use yrs::types::xml::{XmlFragmentRef, XmlOut, Xml};
 use yrs::updates::decoder::Decode;
 
 /// Load a Y.Doc from encoded state bytes (from SQLite BLOB).
@@ -76,6 +76,145 @@ fn walk_xml_out<T: ReadTxn>(txn: &T, node: &XmlOut, out: &mut String) {
         XmlOut::Fragment(frag) => {
             walk_fragment(txn, frag, out);
         }
+    }
+}
+
+/// Extract time sections from a Y.Doc chapter.
+/// Walks top-level children of the prosemirror XmlFragment, splitting on timeBreak nodes.
+/// Returns a list of sections with their index, label, and preview text.
+#[derive(serde::Serialize, Clone)]
+pub struct TimeSection {
+    pub section_index: i64,
+    pub label: String,
+    pub is_flow: bool,
+    pub preview_text: String,
+    pub word_count: i64,
+}
+
+pub fn extract_time_sections(doc: &Doc) -> Vec<TimeSection> {
+    let txn = doc.transact();
+    let fragment = match txn.get_xml_fragment("prosemirror") {
+        Some(f) => f,
+        None => return vec![TimeSection {
+            section_index: 0,
+            label: String::new(),
+            is_flow: true,
+            preview_text: String::new(),
+            word_count: 0,
+        }],
+    };
+
+    let mut sections = Vec::new();
+    let mut current_text = String::new();
+    let mut current_index: i64 = 0;
+    let mut current_label = String::new();
+    let mut current_is_flow = true;
+
+    for child in fragment.children(&txn) {
+        match &child {
+            XmlOut::Element(el) => {
+                let tag = el.tag();
+                if tag.as_ref() == "timeBreak" {
+                    // Finalize current section
+                    let wc = current_text.split(|c: char| !c.is_alphanumeric() && c != '\'')
+                        .filter(|w| !w.is_empty()).count() as i64;
+                    let preview = current_text.chars().take(200).collect::<String>();
+                    sections.push(TimeSection {
+                        section_index: current_index,
+                        label: current_label.clone(),
+                        is_flow: current_is_flow,
+                        preview_text: preview.trim().to_string(),
+                        word_count: wc,
+                    });
+
+                    // Start new section
+                    current_index += 1;
+                    // Read label attribute from the timeBreak node
+                    current_label = el.get_attribute(&txn, "label").unwrap_or_default();
+                    current_is_flow = current_label.is_empty();
+                    current_text.clear();
+                } else {
+                    // Accumulate text from this block
+                    if !current_text.is_empty() {
+                        current_text.push(' ');
+                    }
+                    walk_xml_out(&txn, &child, &mut current_text);
+                }
+            }
+            _ => {
+                walk_xml_out(&txn, &child, &mut current_text);
+            }
+        }
+    }
+
+    // Finalize last section
+    let wc = current_text.split(|c: char| !c.is_alphanumeric() && c != '\'')
+        .filter(|w| !w.is_empty()).count() as i64;
+    let preview = current_text.chars().take(200).collect::<String>();
+    sections.push(TimeSection {
+        section_index: current_index,
+        label: current_label,
+        is_flow: current_is_flow,
+        preview_text: preview.trim().to_string(),
+        word_count: wc,
+    });
+
+    // If there's only one section and it has no time breaks, that's the whole chapter
+    sections
+}
+
+/// Map state marker IDs to their containing time section index.
+/// Walks top-level children, tracks section boundaries (timeBreak nodes),
+/// and for each stateMarker node found, records (stateId, section_index).
+pub fn locate_state_markers_in_sections(doc: &Doc) -> Vec<(i64, i64)> {
+    let txn = doc.transact();
+    let fragment = match txn.get_xml_fragment("prosemirror") {
+        Some(f) => f,
+        None => return Vec::new(),
+    };
+
+    let mut results = Vec::new();
+    let mut current_section: i64 = 0;
+
+    for child in fragment.children(&txn) {
+        match &child {
+            XmlOut::Element(el) => {
+                let tag = el.tag();
+                if tag.as_ref() == "timeBreak" {
+                    current_section += 1;
+                } else {
+                    // Walk descendants looking for stateMarker nodes
+                    find_state_markers_in(&txn, &child, current_section, &mut results);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    results
+}
+
+fn find_state_markers_in<T: ReadTxn>(txn: &T, node: &XmlOut, section: i64, out: &mut Vec<(i64, i64)>) {
+    match node {
+        XmlOut::Element(el) => {
+            let tag = el.tag();
+            if tag.as_ref() == "stateMarker" {
+                if let Some(id_str) = el.get_attribute(txn, "stateId") {
+                    if let Ok(id) = id_str.parse::<i64>() {
+                        out.push((id, section));
+                    }
+                }
+            }
+            for inner in el.children(txn) {
+                find_state_markers_in(txn, &inner, section, out);
+            }
+        }
+        XmlOut::Fragment(frag) => {
+            for inner in frag.children(txn) {
+                find_state_markers_in(txn, &inner, section, out);
+            }
+        }
+        _ => {}
     }
 }
 

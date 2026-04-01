@@ -1,5 +1,5 @@
 <script>
-  import { detectEntities, addIgnoredWord, findReferences, getEntityNotes, addEntityNote, deleteEntityNote, reorderEntityNotes, getEntityFreeNotes, addEntityFreeNote, updateEntityFreeNote, deleteEntityFreeNote, reorderEntityFreeNotes } from '$lib/db.js';
+  import { detectEntities, addIgnoredWord, findReferences, getEntityNotes, addEntityNote, deleteEntityNote, reorderEntityNotes, getEntityFreeNotes, addEntityFreeNote, updateEntityFreeNote, deleteEntityFreeNote, reorderEntityFreeNotes, getEntityMarkers, addStateMarkerValue, updateStateMarkerValue, deleteStateMarkerValue, deleteStateMarker, getDistinctStateKeys, getEntityStateKeys, addStateMarkerEntityRef, updateStateMarkerEntityRef } from '$lib/db.js';
   import { addToast } from '$lib/toast.js';
   import { dndzone } from 'svelte-dnd-action';
 
@@ -18,7 +18,14 @@
     focusTrigger = 0,
     activeChapterId = null,
     onctrlclickentity,
-    onclearselection
+    onclearselection,
+    ondeletestate,
+    chapters = [],
+    focusStateTab = 0,
+    focusStateId = null,
+    cursorMoveTrigger = 0,
+    cursorPos = 0,
+    getMarkerPositions = null, // function that returns [{stateId, pos}] from editor
   } = $props();
 
   let view = $state('list'); // 'list' | 'create' | 'detect' | 'references' | 'view'
@@ -64,6 +71,167 @@
     }
   });
 
+  // Switch to state tab when triggered from outside
+  $effect(() => {
+    const _t = focusStateTab;
+    if (_t > 0) {
+      viewTab = 'state';
+    }
+  });
+
+  // Build edit rows when activeMarkerId changes — only on initial open, not on data refreshes
+  let lastBuiltMarkerId = null;
+  $effect(() => {
+    const mid = activeMarkerId;
+    if (mid && mid !== lastBuiltMarkerId && viewEntity && viewMarkers.length > 0) {
+      lastBuiltMarkerId = mid;
+      buildEditRows(mid, viewEntity.id);
+    }
+    if (!mid) {
+      lastBuiltMarkerId = null;
+    }
+  });
+
+  // Resolve state up to a given doc position in a given chapter
+  function resolveUpTo(chapterId, docPos) {
+    const markerPositions = getMarkerPositions?.() || [];
+    const posMap = new Map();
+    for (const mp of markerPositions) {
+      posMap.set(mp.stateId, mp.pos);
+    }
+
+    const chSortOrder = chapters.find(c => c.id === chapterId)?.sort_order ?? 0;
+    const before = [];
+    for (const m of viewMarkers) {
+      const mSortOrder = chapters.find(c => c.id === m.chapter_id)?.sort_order ?? 0;
+      if (mSortOrder < chSortOrder) {
+        before.push({ marker: m, order: mSortOrder * 100000 });
+      } else if (m.chapter_id === chapterId) {
+        const mPos = posMap.get(m.id);
+        if (mPos !== undefined && mPos <= docPos) {
+          before.push({ marker: m, order: chSortOrder * 100000 + mPos });
+        }
+      }
+    }
+    before.sort((a, b) => a.order - b.order);
+
+    const facts = new Map();
+    const entityRefs = new Map();
+    for (const { marker } of before) {
+      for (const v of marker.values) {
+        if (v.value_type === 'entity_ref' && v.ref_entity_id) {
+          entityRefs.set(v.ref_entity_id, { name: v.ref_entity_name || 'Unknown', active: v.ref_active });
+        } else if (v.fact_key) {
+          facts.set(v.fact_key, v.fact_value);
+        }
+      }
+    }
+    return { facts, entityRefs };
+  }
+
+  async function buildEditRows(markerId, entityId) {
+    try {
+      const allKeys = await getEntityStateKeys(entityId);
+
+      const marker = viewMarkers.find(m => m.id === markerId);
+      const markerVals = marker ? marker.values : [];
+
+      // Resolve state up to just BEFORE this marker's position (so we see inherited state, not this marker's own values)
+      const markerPositions = getMarkerPositions?.() || [];
+      const markerDocPos = markerPositions.find(p => p.stateId === markerId)?.pos ?? 0;
+      const { facts: resolvedMap } = resolveUpTo(marker?.chapter_id || activeChapterId, markerDocPos - 1);
+
+      const rows = [];
+      const seen = new Set();
+
+      // Values this marker explicitly sets
+      for (const v of markerVals) {
+        if (v.value_type === 'entity_ref') {
+          rows.push({
+            type: 'entity_ref',
+            valueId: v.id,
+            refEntityId: v.ref_entity_id,
+            refEntityName: v.ref_entity_name || 'Unknown',
+            refActive: v.ref_active,
+            isSet: true,
+          });
+        } else {
+          rows.push({
+            type: 'fact',
+            key: v.fact_key,
+            value: v.fact_value,
+            valueId: v.id,
+            resolvedValue: resolvedMap.get(v.fact_key) ?? '',
+            isSet: true,
+          });
+          seen.add(v.fact_key);
+        }
+      }
+
+      // Fact keys from other checkpoints not set here
+      for (const key of allKeys) {
+        if (!seen.has(key)) {
+          rows.push({
+            type: 'fact',
+            key,
+            value: resolvedMap.get(key) ?? '',
+            valueId: null,
+            resolvedValue: resolvedMap.get(key) ?? '',
+            isSet: false,
+          });
+          seen.add(key);
+        }
+      }
+
+      // Also include entity refs from other markers that this one doesn't set
+      const allMarkerVals = viewMarkers.flatMap(m => m.values);
+      const thisRefIds = new Set(markerVals.filter(v => v.value_type === 'entity_ref').map(v => v.ref_entity_id));
+      const seenRefIds = new Set(thisRefIds);
+      for (const v of allMarkerVals) {
+        if (v.value_type === 'entity_ref' && v.ref_entity_id && !seenRefIds.has(v.ref_entity_id)) {
+          rows.push({
+            type: 'entity_ref',
+            valueId: null,
+            refEntityId: v.ref_entity_id,
+            refEntityName: v.ref_entity_name || 'Unknown',
+            refActive: false,
+            isSet: false,
+          });
+          seenRefIds.add(v.ref_entity_id);
+        }
+      }
+
+      rows.sort((a, b) => {
+        const aName = (a.type === 'fact' ? a.key : a.refEntityName) || '';
+        const bName = (b.type === 'fact' ? b.key : b.refEntityName) || '';
+        return aName.localeCompare(bName, undefined, { sensitivity: 'base' });
+      });
+      editRows = rows;
+      addingEntityRef = false;
+    } catch (e) {
+      console.error('[entity-state] buildEditRows failed:', e);
+      editRows = [];
+    }
+  }
+
+  // Resolve state locally when cursor moves, using marker positions from editor
+  $effect(() => {
+    const _cursor = cursorMoveTrigger;
+    const _pos = cursorPos;
+    if (viewTab === 'state' && viewEntity && !activeMarkerId) {
+      resolveStateAtCursor();
+    }
+  });
+
+  function resolveStateAtCursor() {
+    const { facts, entityRefs } = resolveUpTo(activeChapterId, cursorPos);
+    const factList = Array.from(facts.entries()).map(([key, value]) => ({ key, value }));
+    factList.sort((a, b) => a.key.localeCompare(b.key, undefined, { sensitivity: 'base' }));
+    const refList = Array.from(entityRefs.entries()).map(([id, data]) => ({ refEntityId: id, refEntityName: data.name, refActive: data.active }));
+    refList.sort((a, b) => a.refEntityName.localeCompare(b.refEntityName, undefined, { sensitivity: 'base' }));
+    resolvedState = { facts: factList, entityRefs: refList };
+  }
+
   // Detection state
   let candidates = $state([]);
   let detecting = $state(false);
@@ -81,8 +249,16 @@
   let viewNotes = $state([]);
   let viewFreeNotes = $state([]);
   let viewNotesLoading = $state(false);
-  let viewTab = $state('excerpts'); // 'excerpts' | 'notes'
+  let viewTab = $state('excerpts'); // 'excerpts' | 'notes' | 'state'
   let newNoteText = $state('');
+
+  // Entity state tracking (checkpoint model)
+  let viewMarkers = $state([]); // StateMarker[] with .values
+  let stateKeySuggestions = $state([]);
+  let activeMarkerId = $state(null); // which marker is being edited
+  let resolvedState = $state(null); // { facts: [] }
+  let editRows = $state([]); // merged rows for checkpoint editor
+  let addingEntityRef = $state(false);
 
   async function showEntityView(entity) {
     viewEntity = entity;
@@ -93,15 +269,106 @@
     newAlias = '';
     showDeleteConfirm = false;
     viewNotesLoading = true;
+    activeMarkerId = null;
     view = 'view';
     try {
       viewNotes = await getEntityNotes(entity.id);
       viewFreeNotes = await getEntityFreeNotes(entity.id);
-    } catch {
+      viewMarkers = await getEntityMarkers(entity.id);
+      stateKeySuggestions = await getDistinctStateKeys();
+    } catch (e) {
+      console.error('[entity] load failed:', e);
       viewNotes = [];
       viewFreeNotes = [];
+      viewMarkers = [];
     }
     viewNotesLoading = false;
+
+    // If a specific marker was requested, activate it now that data is loaded
+    if (focusStateId != null && viewMarkers.some(m => m.id === focusStateId)) {
+      activeMarkerId = focusStateId;
+    }
+  }
+
+  async function reloadMarkers() {
+    if (viewEntity) {
+      viewMarkers = await getEntityMarkers(viewEntity.id);
+      stateKeySuggestions = await getDistinctStateKeys();
+      resolveStateAtCursor();
+    }
+  }
+
+  // --- Checkpoint editing (all local until Save) ---
+
+  function handleAddFactRow() {
+    editRows = [...editRows, {
+      type: 'fact',
+      key: '',
+      value: '',
+      valueId: null,
+      resolvedValue: '',
+      isSet: true,
+      isNew: true,
+    }];
+  }
+
+  function handleAddEntityRef() {
+    addingEntityRef = true;
+  }
+
+  function handleConfirmEntityRefLocal(refEntityId) {
+    const entity = entities.find(e => e.id === refEntityId);
+    editRows = [...editRows, {
+      type: 'entity_ref',
+      valueId: null,
+      refEntityId,
+      refEntityName: entity?.name || 'Unknown',
+      refActive: true,
+      isSet: true,
+      isNew: true,
+    }];
+    addingEntityRef = false;
+  }
+
+  function handleRemoveEditRow(index) {
+    editRows = editRows.filter((_, i) => i !== index);
+  }
+
+  async function handleSaveCheckpoint() {
+    if (!activeMarkerId || !viewEntity) return;
+    const marker = viewMarkers.find(m => m.id === activeMarkerId);
+    if (!marker) return;
+
+    // Delete all existing values for this marker, then re-create from editRows
+    for (const existing of marker.values) {
+      await deleteStateMarkerValue(existing.id);
+    }
+
+    // Save only rows marked as set by this checkpoint
+    for (const row of editRows) {
+      if (!row.isSet) continue;
+      if (row.type === 'fact') {
+        if (!row.key && !row.value) continue;
+        await addStateMarkerValue(activeMarkerId, row.key, row.value);
+      } else if (row.type === 'entity_ref' && row.refEntityId) {
+        await addStateMarkerEntityRef(activeMarkerId, row.refEntityId, row.refActive);
+      }
+    }
+
+    activeMarkerId = null;
+    await reloadMarkers();
+  }
+
+  async function handleDeleteMarker(markerId) {
+    await deleteStateMarker(markerId);
+    ondeletestate?.(markerId);
+    activeMarkerId = null;
+    await reloadMarkers();
+  }
+
+  function getChapterName(chapterId) {
+    const ch = chapters.find(c => c.id === chapterId);
+    return ch ? ch.title : `Chapter ${chapterId}`;
   }
 
   async function pinSelectedText(entityId) {
@@ -678,6 +945,11 @@
           <i class="bi bi-journal-text"></i> Notes
           <span class="view-tab-count">{viewFreeNotes.length}</span>
         </button>
+        <button class="view-tab" class:active={viewTab === 'state'} onclick={() => viewTab = 'state'}>
+          <i class="bi bi-diamond"></i> State
+          <span class="view-tab-count">{viewMarkers.length}</span>
+
+        </button>
       </div>
 
       {#if viewTab === 'excerpts'}
@@ -750,6 +1022,143 @@
               {/each}
             </div>
           {/if}
+        </div>
+      {:else if viewTab === 'state'}
+        <div class="view-notes-list">
+          {#if activeMarkerId}
+            <!-- Editing a checkpoint: shows ALL entity variables with resolved values -->
+            {@const marker = viewMarkers.find(m => m.id === activeMarkerId)}
+            {#if marker}
+              <div class="state-marker-edit">
+                <div class="state-marker-edit-label">
+                  Editing checkpoint — {getChapterName(marker.chapter_id)}
+                </div>
+
+                {#each editRows as row, i}
+                  <div class="state-edit-item">
+                    <div class="state-edit-left">
+                      {#if row.type === 'fact'}
+                        {#if row.isNew}
+                          <input
+                            class="state-key-input"
+                            bind:value={row.key}
+                            placeholder="Variable name"
+                            list="state-key-suggestions"
+                          />
+                        {:else}
+                          <span class="state-edit-label">{row.key}</span>
+                        {/if}
+                      {:else if row.type === 'entity_ref'}
+                        <span class="state-edit-label">
+                          {row.refEntityName}
+                          <i class="bi bi-link-45deg state-ref-icon"></i>
+                        </span>
+                      {/if}
+                    </div>
+                    <div class="state-edit-right">
+                      {#if row.type === 'fact'}
+                        <input
+                          class="state-value-input"
+                          bind:value={row.value}
+                          oninput={() => { row.isSet = true; }}
+                          placeholder={row.resolvedValue || 'Not set'}
+                        />
+                      {:else if row.type === 'entity_ref'}
+                        <label class="state-ref-toggle">
+                          <input type="checkbox" bind:checked={row.refActive}
+                            onchange={() => { row.isSet = true; }}
+                          />
+                          <span class="state-ref-label">{row.refActive ? 'Active' : 'Inactive'}</span>
+                        </label>
+                      {/if}
+                      <button class="state-action-btn danger" onclick={() => handleRemoveEditRow(i)} title="Remove">
+                        <i class="bi bi-x-lg"></i>
+                      </button>
+                    </div>
+                  </div>
+                {/each}
+
+                {#if addingEntityRef}
+                  <div class="state-ref-add-row">
+                    <i class="bi bi-link-45deg state-ref-icon"></i>
+                    <select class="state-entity-select" onchange={e => { if (e.target.value) handleConfirmEntityRefLocal(parseInt(e.target.value)); }}>
+                      <option value="">Select entity...</option>
+                      {#each entities.filter(en => en.id !== viewEntity?.id) as en}
+                        <option value={en.id}>{en.name}</option>
+                      {/each}
+                    </select>
+                    <button class="state-action-btn" onclick={() => { addingEntityRef = false; }} title="Cancel">
+                      <i class="bi bi-x-lg"></i>
+                    </button>
+                  </div>
+                {/if}
+
+                <div class="state-add-buttons">
+                  <button class="state-add-val-btn" onclick={handleAddFactRow}>
+                    <i class="bi bi-plus"></i> Add variable
+                  </button>
+                  <button class="state-add-val-btn" onclick={handleAddEntityRef}>
+                    <i class="bi bi-link-45deg"></i> Add entity reference
+                  </button>
+                </div>
+
+                <div class="state-marker-edit-footer">
+                  <button class="state-done-btn" onclick={handleSaveCheckpoint}>
+                    <i class="bi bi-check-lg"></i> Save
+                  </button>
+                  <button class="btn-danger-subtle" onclick={() => handleDeleteMarker(marker.id)}>
+                    <i class="bi bi-trash"></i> Delete checkpoint
+                  </button>
+                </div>
+              </div>
+            {/if}
+          {:else}
+            <!-- Resolved state at cursor position -->
+            <div class="state-view-container">
+              {#if resolvedState?.facts?.length > 0 || resolvedState?.entityRefs?.length > 0}
+                <div class="state-view-header">
+                  <i class="bi bi-crosshair"></i> State at cursor
+                </div>
+                <div class="state-resolved-list">
+                  {#if resolvedState?.facts?.length > 0}
+                    {#each resolvedState.facts as f}
+                      <div class="state-resolved-row">
+                        <div class="state-resolved-key">{f.key}</div>
+                        <div class="state-resolved-value">{f.value}</div>
+                      </div>
+                    {/each}
+                  {/if}
+                  {#if resolvedState?.entityRefs?.length > 0}
+                    {#each resolvedState.entityRefs as r}
+                      <div class="state-resolved-row state-resolved-ref">
+                        <div class="state-resolved-key">
+                          <i class="bi bi-link-45deg" style="font-size: 0.75rem;"></i>
+                          {r.refEntityName}
+                        </div>
+                        <div class="state-resolved-value" class:state-ref-inactive={!r.refActive}>
+                          {r.refActive ? 'Active' : 'Inactive'}
+                        </div>
+                      </div>
+                    {/each}
+                  {/if}
+                </div>
+              {:else if viewMarkers.length > 0}
+                <div class="view-notes-empty">
+                  No state values at this position. Checkpoints exist but are placed after the cursor.
+                </div>
+              {:else}
+                <div class="view-notes-empty">
+                  No state set. Right-click an entity mention and select "Set state value" to place a checkpoint.
+                </div>
+              {/if}
+            </div>
+          {/if}
+
+          <datalist id="state-key-suggestions">
+            {#each stateKeySuggestions as key}
+              <option value={key} />
+            {/each}
+          </datalist>
         </div>
       {/if}
 
@@ -1379,4 +1788,332 @@
   }
   .free-note-edit:focus { border-color: var(--iwe-accent); background: var(--iwe-bg); }
   .free-note-card { }
+
+  /* State tab */
+  .state-entry {
+    padding: 0.5rem 0.6rem;
+    border-bottom: 1px solid var(--iwe-border-subtle, #eee);
+    position: relative;
+  }
+  .state-entry:hover .state-entry-actions { opacity: 1; }
+  .state-entry-header {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.78rem;
+    margin-bottom: 0.25rem;
+  }
+  .state-icon { font-size: 0.7rem; }
+  .fact-icon { color: #2d6a5e; }
+  .rel-icon { color: #6a4c2d; }
+  .state-type-label {
+    font-weight: 600;
+    color: var(--iwe-text-secondary);
+    text-transform: uppercase;
+    font-size: 0.65rem;
+    letter-spacing: 0.05em;
+  }
+  .state-chapter-ref {
+    margin-left: auto;
+    font-size: 0.7rem;
+    color: var(--iwe-text-faint);
+  }
+  .state-rel-entity {
+    font-weight: 600;
+    color: var(--iwe-text);
+  }
+  .state-key {
+    font-weight: 600;
+    color: var(--iwe-text);
+    font-family: var(--iwe-font-ui);
+  }
+  .state-eq {
+    color: var(--iwe-text-faint);
+    font-size: 0.8rem;
+  }
+  .state-value {
+    color: var(--iwe-text-secondary);
+    font-family: var(--iwe-font-prose);
+  }
+  .state-note {
+    font-size: 0.78rem;
+    color: var(--iwe-text-faint);
+    font-style: italic;
+    padding: 0.1rem 0 0.15rem;
+  }
+  .state-entry-actions {
+    position: absolute;
+    top: 0.4rem;
+    right: 0.4rem;
+    display: flex;
+    gap: 0.2rem;
+    opacity: 0;
+    transition: opacity 0.15s;
+  }
+  .state-action-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 0.15rem 0.3rem;
+    border-radius: var(--iwe-radius-sm);
+    color: var(--iwe-text-faint);
+    font-size: 0.75rem;
+  }
+  .state-action-btn:hover { background: var(--iwe-hover); color: var(--iwe-text); }
+  .state-action-btn.danger:hover { color: #c0392b; background: rgba(192, 57, 43, 0.08); }
+  .state-edit-form {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    padding: 0.25rem 0;
+  }
+  .state-edit-row {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+  }
+  .state-key-input, .state-value-input {
+    font-family: var(--iwe-font-ui);
+    font-size: 0.82rem;
+    padding: 0.15rem 0.4rem;
+    height: 1.6rem;
+    border: 1px solid var(--iwe-border, #ddd);
+    border-radius: var(--iwe-radius-sm);
+    background: var(--iwe-bg);
+    color: var(--iwe-text);
+    outline: none;
+    box-sizing: border-box;
+  }
+  .state-key-input { width: 100%; }
+  .state-value-input { flex: 1; min-width: 0; }
+  .state-key-input:focus, .state-value-input:focus { border-color: var(--iwe-accent); }
+  .state-note-input {
+    width: 100%;
+    font-family: var(--iwe-font-ui);
+    font-size: 0.8rem;
+    padding: 0.25rem 0.4rem;
+    border: 1px solid var(--iwe-border, #ddd);
+    border-radius: var(--iwe-radius-sm);
+    background: var(--iwe-bg);
+    color: var(--iwe-text);
+    outline: none;
+    resize: vertical;
+  }
+  .state-note-input:focus { border-color: var(--iwe-accent); }
+  .state-edit-actions {
+    display: flex;
+    gap: 0.3rem;
+  }
+  .state-done-btn {
+    font-family: var(--iwe-font-ui);
+    font-size: 0.8rem;
+    padding: 0.3rem 0.8rem;
+    border: 1px solid var(--iwe-accent, #2d6a5e);
+    border-radius: 4px;
+    background: var(--iwe-accent, #2d6a5e);
+    color: #fff;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    font-weight: 600;
+  }
+  .state-done-btn:hover { opacity: 0.9; }
+  .state-view-container {
+    padding: 0.5rem 0.75rem;
+  }
+  .state-view-header {
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--iwe-text-faint);
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    margin-bottom: 0.5rem;
+  }
+  .state-resolved-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+  }
+  .state-resolved-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    padding: 0.4rem 0.6rem;
+    background: var(--iwe-bg, #fffef9);
+    border: 1px solid var(--iwe-border-light, #eee);
+    border-radius: 6px;
+  }
+  .state-resolved-key {
+    font-family: var(--iwe-font-ui);
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--iwe-text);
+  }
+  .state-resolved-value {
+    font-family: var(--iwe-font-prose);
+    font-size: 0.82rem;
+    color: var(--iwe-accent, #2d6a5e);
+  }
+  .state-marker-edit {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    padding: 0.5rem 0.75rem;
+  }
+  .state-marker-edit-footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding-top: 0.6rem;
+    margin-top: 0.4rem;
+    border-top: 1px solid var(--iwe-border-light, #eee);
+  }
+  .state-marker-edit-label {
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--iwe-text-secondary);
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding-bottom: 0.2rem;
+    border-bottom: 1px solid var(--iwe-border-subtle, #eee);
+  }
+  .state-edit-item {
+    display: flex;
+    align-items: center;
+    height: 2.2rem;
+    padding: 0 0.5rem;
+    background: var(--iwe-bg, #fffef9);
+    border: 1px solid var(--iwe-border-light, #eee);
+    border-radius: 6px;
+    margin-bottom: 0.3rem;
+  }
+  .state-edit-left {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+  }
+  .state-edit-right {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    justify-content: flex-end;
+  }
+  .state-edit-label {
+    font-family: var(--iwe-font-ui);
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: var(--iwe-text);
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+  }
+  .state-val-row {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.15rem 0;
+  }
+  .state-add-val-btn {
+    background: none;
+    border: 1px dashed var(--iwe-border, #ddd);
+    border-radius: var(--iwe-radius-sm);
+    cursor: pointer;
+    font-size: 0.78rem;
+    color: var(--iwe-text-faint);
+    padding: 0.3rem 0.5rem;
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    margin-top: 0.2rem;
+  }
+  .state-add-buttons {
+    display: flex;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+    margin-top: 0.2rem;
+  }
+  .state-add-val-btn:hover { border-color: var(--iwe-accent); color: var(--iwe-accent); }
+  .state-ref-icon {
+    color: var(--iwe-text-faint);
+    font-size: 0.75rem;
+    flex-shrink: 0;
+  }
+  .state-ref-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    cursor: pointer;
+    font-size: 0.82rem;
+  }
+  .state-ref-label {
+    color: var(--iwe-text-secondary);
+    font-family: var(--iwe-font-ui);
+  }
+  .state-ref-add-row {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.3rem 0;
+  }
+  .state-entity-select {
+    flex: 1;
+    font-family: var(--iwe-font-ui);
+    font-size: 0.82rem;
+    padding: 0.25rem 0.4rem;
+    border: 1px solid var(--iwe-border, #ddd);
+    border-radius: var(--iwe-radius-sm);
+    background: var(--iwe-bg);
+    color: var(--iwe-text);
+    outline: none;
+  }
+  .state-entity-select:focus { border-color: var(--iwe-accent); }
+  .state-resolved-ref .state-resolved-key {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+  }
+  .state-ref-inactive {
+    color: var(--iwe-text-faint) !important;
+  }
+  .state-marker-list-label {
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: var(--iwe-text-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 0.3rem 0;
+  }
+  .state-val-count {
+    margin-left: auto;
+    font-size: 0.7rem;
+    color: var(--iwe-text-faint);
+  }
+  .state-marker-preview {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem;
+    padding: 0.2rem 0;
+  }
+  .state-preview-pill {
+    font-size: 0.72rem;
+    padding: 0.1rem 0.4rem;
+    border-radius: 3px;
+    background: rgba(45, 106, 94, 0.06);
+    color: var(--iwe-text-secondary);
+    font-family: var(--iwe-font-ui);
+  }
+  .state-preview-more {
+    font-size: 0.7rem;
+    color: var(--iwe-text-faint);
+    font-style: italic;
+  }
+
 </style>

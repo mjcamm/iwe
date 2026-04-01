@@ -12,10 +12,12 @@
   import { createHighlightPlugin, createSpellCheckPlugin, buildTextMap, applyDecorations, applySpellDecorations, entityHighlightKey, spellCheckKey } from '$lib/entityHighlight.js';
   import { createChapterDoc, encodeDoc, destroyDoc } from '$lib/ydoc.js';
   import { NoteMarker, applyCommentHighlights } from '$lib/noteMarker.js';
+  import { StateMarker } from '$lib/stateMarker.js';
+  import { TimeBreak } from '$lib/timeBreak.js';
   import WordModal from './WordModal.svelte';
   import PalettePickerModal from './PalettePickerModal.svelte';
 
-  let { openTabs, activeTabId, chapter, onselecttab, onclosetab, onchange, onselectionchange, onentityclick, onquickadd, onready, onaddcomment, oncommentclick, viewedEntityIds = new Set() } = $props();
+  let { openTabs, activeTabId, chapter, onselecttab, onclosetab, onchange, onselectionchange, onentityclick, onquickadd, onready, onaddcomment, oncommentclick, onaddstatefact, onstateclick, viewedEntityIds = new Set() } = $props();
 
   let element = $state();
   // Official Svelte 5 pattern: wrap editor in object so reassignment triggers reactivity
@@ -201,6 +203,12 @@
     onaddcomment?.({ from, highlightLen });
     closeCtxMenu();
   }
+
+  function ctxAddFact() {
+    onaddstatefact?.({ from: ctxMenu.from, entityId: ctxMenu.entityId, entityName: ctxMenu.entityName });
+    closeCtxMenu();
+  }
+
 
   async function ctxIgnore() {
     await addIgnoredWord(ctxMenu.word);
@@ -486,6 +494,69 @@
     });
   }
 
+  // ---- State marker functions ----
+
+  export function insertStateMarker(pos, stateId, stateType) {
+    if (!editorRaw) return;
+    editorRaw.chain()
+      .focus()
+      .insertContentAt(pos, {
+        type: 'stateMarker',
+        attrs: { stateId, stateType },
+      })
+      .run();
+  }
+
+  export function removeStateMarker(stateId) {
+    if (!editorRaw) return;
+    const { doc, tr } = editorRaw.state;
+    doc.descendants((node, pos) => {
+      if (node.type.name === 'stateMarker' && node.attrs.stateId === stateId) {
+        tr.delete(pos, pos + 1);
+        return false;
+      }
+    });
+    editorRaw.view.dispatch(tr);
+  }
+
+  export function moveStateMarker(stateId, newPos) {
+    if (!editorRaw) return;
+    const { doc } = editorRaw.state;
+    let oldPos = null;
+    doc.descendants((node, pos) => {
+      if (node.type.name === 'stateMarker' && node.attrs.stateId === stateId) {
+        oldPos = pos;
+        return false;
+      }
+    });
+    if (oldPos != null) {
+      const stateType = editorRaw.state.doc.nodeAt(oldPos)?.attrs.stateType || 'fact';
+      editorRaw.chain()
+        .focus()
+        .deleteRange({ from: oldPos, to: oldPos + 1 })
+        .insertContentAt(Math.min(newPos, editorRaw.state.doc.content.size), {
+          type: 'stateMarker',
+          attrs: { stateId, stateType },
+        })
+        .run();
+    }
+  }
+
+  export function getStateMarkerPositions() {
+    if (!editorRaw) return [];
+    const markers = [];
+    editorRaw.state.doc.descendants((node, pos) => {
+      if (node.type.name === 'stateMarker') {
+        markers.push({
+          stateId: node.attrs.stateId,
+          stateType: node.attrs.stateType,
+          pos,
+        });
+      }
+    });
+    return markers;
+  }
+
   function createEditorInstance() {
     // Create Y.Doc from chapter's stored state bytes
     const { doc, xmlFragment } = createChapterDoc(chapter?.content);
@@ -508,6 +579,8 @@
         Superscript,
         Subscript,
         NoteMarker,
+        StateMarker,
+        TimeBreak,
         Extension.create({
           name: 'entityHighlightBridge',
           addProseMirrorPlugins() {
@@ -547,7 +620,7 @@
           editorState = { editor };
           const { from, to } = editor.state.selection;
           const text = from !== to ? editor.state.doc.textBetween(from, to, ' ') : '';
-          onselectionchange?.(text);
+          onselectionchange?.(text, from);
         }
         // Update comment highlights when doc changes
         if (transaction.docChanged) {
@@ -581,6 +654,13 @@
     };
     element.addEventListener('comment-highlight-click', handleCommentHighlightClick);
 
+    // Listen for clicks on state markers
+    const handleStateMarkerClick = (e) => {
+      const { stateId, stateType } = e.detail;
+      if (stateId != null) onstateclick?.(stateId, stateType);
+    };
+    element.addEventListener('state-marker-click', handleStateMarkerClick);
+
     // Close dropdown on click outside
     const handleClick = (e) => {
       if (showStyleDropdown && !e.target.closest('.style-dropdown-wrap')) {
@@ -590,6 +670,7 @@
     document.addEventListener('click', handleClick);
     return () => {
       element.removeEventListener('comment-highlight-click', handleCommentHighlightClick);
+      element.removeEventListener('state-marker-click', handleStateMarkerClick);
       document.removeEventListener('click', handleClick);
     };
   });
@@ -776,6 +857,9 @@
         <button class="tb-btn" onclick={() => ed.chain().focus().setHorizontalRule().run()} title="Scene break ( * * * )">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="6" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="18" cy="12" r="1.5"/></svg>
         </button>
+        <button class="tb-btn" onclick={() => ed.chain().focus().insertTimeBreak({ label: '' }).run()} title="Time break">
+          <i class="bi bi-clock-history" style="font-size: 14px;"></i>
+        </button>
       </div>
     </div>
   {/if}
@@ -845,6 +929,12 @@
           <i class="bi bi-chat-left-text ctx-icon"></i>
           Add a note
         </button>
+        {#if ctxMenu.isEntity}
+          <button class="ctx-item" onclick={ctxAddFact}>
+            <i class="bi bi-diamond ctx-icon"></i>
+            Set state value for "{ctxMenu.entityName}"
+          </button>
+        {/if}
       </div>
     </div>
   {/if}
@@ -1047,6 +1137,65 @@
   .editor-page :global(.comment-highlight-active) {
     background-color: rgba(255, 185, 0, 0.35);
     border-bottom: 2px solid rgba(255, 165, 0, 0.6);
+  }
+
+  /* State markers */
+  .editor-page :global(.state-marker-anchor) {
+    display: inline;
+    user-select: none;
+    cursor: pointer;
+  }
+  .editor-page :global(.state-marker-icon) {
+    display: inline-block;
+    font-size: 10px;
+    color: #2d6a5e;
+    vertical-align: middle;
+    line-height: 1;
+    margin: 0 1px;
+    opacity: 0.7;
+    transition: opacity 0.2s;
+  }
+  .editor-page :global(.state-marker-anchor:hover .state-marker-icon) {
+    opacity: 1;
+  }
+
+  /* Time breaks */
+  .editor-page :global(.time-break) {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 28px 0;
+    user-select: none;
+    cursor: default;
+  }
+  .editor-page :global(.time-break-line) {
+    flex: 1;
+    height: 2px;
+    background: linear-gradient(to right, transparent, rgba(45, 106, 94, 0.25), transparent);
+  }
+  .editor-page :global(.time-break-label) {
+    font-family: 'Source Sans 3', sans-serif;
+    font-size: 13px;
+    color: #2d6a5e;
+    font-style: italic;
+    white-space: nowrap;
+    padding: 3px 10px;
+    border-radius: 4px;
+    background: rgba(45, 106, 94, 0.06);
+    border: 1px solid rgba(45, 106, 94, 0.12);
+    outline: none;
+    min-width: 80px;
+    text-align: center;
+    cursor: text;
+  }
+  .editor-page :global(.time-break-label:focus) {
+    background: rgba(45, 106, 94, 0.1);
+    border-color: rgba(45, 106, 94, 0.3);
+  }
+  .editor-page :global(.ProseMirror-selectednode.time-break) {
+    outline: 2px solid rgba(45, 106, 94, 0.4);
+    outline-offset: 4px;
+    border-radius: 4px;
   }
 
   /* Context menu */

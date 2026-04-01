@@ -1,7 +1,7 @@
 <script>
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
-  import { getProjectsDir, getSettings, saveSettings, openProject, getChapters, getChapter, addChapter, updateChapterContent, renameChapter, deleteChapter, getEntities, createEntity, updateEntity, deleteEntity, setEntityVisible, addAlias, removeAlias, scanAllChapters, getNavHistory, pushNavEntry, truncateNavAfter, addEntityNote, logWritingActivity, setSpellLanguage, getAllChapterWordCounts, getChapterComments, addComment, updateComment, deleteComment } from '$lib/db.js';
+  import { getProjectsDir, getSettings, saveSettings, openProject, getChapters, getChapter, addChapter, updateChapterContent, renameChapter, deleteChapter, getEntities, createEntity, updateEntity, deleteEntity, setEntityVisible, addAlias, removeAlias, scanAllChapters, getNavHistory, pushNavEntry, truncateNavAfter, addEntityNote, logWritingActivity, setSpellLanguage, getAllChapterWordCounts, getChapterComments, addComment, updateComment, deleteComment, addStateMarker, deleteStateMarker, getStateMarker } from '$lib/db.js';
   import ChapterNav from '$lib/components/ChapterNav.svelte';
   import Editor from '$lib/components/Editor.svelte';
   import EntityPanel from '$lib/components/EntityPanel.svelte';
@@ -237,6 +237,11 @@
 
   let focusEntityId = $state(null);
   let focusTrigger = $state(0);
+  let focusStateTab = $state(0);
+  let focusStateId = $state(null);
+  let cursorMoveTrigger = $state(0);
+  let cursorPos = $state(0);
+  let cursorMoveTimer = null;
   let rightPanelTab = $state('entities'); // 'entities' | 'search' | 'analysis' | 'notes'
   let chapterComments = $state([]); // comments from DB for current chapter
   let resolvedComments = $state([]); // comments with positions from editor
@@ -307,6 +312,18 @@
         resizable: true,
       });
     } catch (e) { console.error('Failed to open stats:', e); }
+  }
+
+  function launchTimeFlow() {
+    try {
+      new WebviewWindow('timeflow-' + Date.now(), {
+        url: '/timeflow',
+        title: 'Time Flow Manager',
+        width: 900,
+        height: 700,
+        resizable: true,
+      });
+    } catch (e) { console.error('Failed to open time flow:', e); }
   }
 
   function handleQuickAdd(word) {
@@ -603,6 +620,43 @@
     refreshResolvedComments();
   }
 
+  // ---- Entity state tracking ----
+
+  async function handleAddStateFact({ from, entityId, entityName }) {
+    if (!activeChapter) return;
+    try {
+      const id = await addStateMarker(entityId, activeChapter.id);
+      editorRef?.insertStateMarker(from, id, 'fact');
+      // Open entity panel to state tab with this marker selected for editing
+      // buildEditRows will show all existing entity keys with resolved values
+      focusEntityId = entityId;
+      focusTrigger++;
+      focusStateTab++;
+      focusStateId = id;
+      rightPanelTab = 'entities';
+    } catch (e) {
+      console.error('[entity-state] add marker failed:', e);
+    }
+  }
+
+  function handleDeleteState(stateId) {
+    editorRef?.removeStateMarker(stateId);
+  }
+
+  async function handleStateMarkerClick(stateId, stateType) {
+    try {
+      const marker = await getStateMarker(stateId);
+      if (!marker) return;
+      focusEntityId = marker.entity_id;
+      focusTrigger++;
+      focusStateTab++;
+      focusStateId = stateId;
+      rightPanelTab = 'entities';
+    } catch (e) {
+      console.error('[entity-state] marker click failed:', e);
+    }
+  }
+
   function persistWidths() {
     clearTimeout(saveWidthTimer);
     saveWidthTimer = setTimeout(async () => {
@@ -774,6 +828,9 @@
     <button class="stats-btn" onclick={launchWritingStats} title="Writing Stats">
       <i class="bi bi-graph-up"></i> Stats
     </button>
+    <button class="stats-btn" onclick={launchTimeFlow} title="Time Flow Manager">
+      <i class="bi bi-clock-history"></i> Time Flow
+    </button>
     <span class="toolbar-spacer"></span>
     <button class="nav-btn" disabled={!canGoBack} onclick={navBack} title="Go back">
       <i class="bi bi-chevron-left"></i>
@@ -814,12 +871,20 @@
         onselecttab={selectChapter}
         onclosetab={closeTab}
         onchange={handleContentChange}
-        onselectionchange={text => { selectedText = text; if (text.trim()) lastSelectedText = text; }}
+        onselectionchange={(text, from) => {
+          selectedText = text;
+          if (text.trim()) lastSelectedText = text;
+          clearTimeout(cursorMoveTimer);
+          cursorMoveTimer = setTimeout(() => { cursorMoveTrigger++; }, 300);
+          if (from !== undefined) cursorPos = from;
+        }}
         onentityclick={handleEntityClick}
         onquickadd={handleQuickAdd}
         onready={() => { editorReady = true; loadComments(); }}
         onaddcomment={handleAddComment}
         oncommentclick={handleCommentClick}
+        onaddstatefact={handleAddStateFact}
+        onstateclick={handleStateMarkerClick}
         {viewedEntityIds}
       />
     </div>
@@ -854,10 +919,16 @@
       {#if rightPanelTab === 'entities'}
         <EntityPanel
           {entities}
+          {chapters}
           selectedText={selectedText || lastSelectedText}
           {pendingEntityName}
           {focusEntityId}
           {focusTrigger}
+          {focusStateTab}
+          {focusStateId}
+          {cursorMoveTrigger}
+          {cursorPos}
+          getMarkerPositions={() => editorRef?.getStateMarkerPositions() || []}
           activeChapterId={activeChapter?.id}
           oncreate={async (name, type, desc, color) => { pendingEntityName = null; await handleCreateEntity(name, type, desc, color); }}
           onupdate={handleUpdateEntity}
@@ -867,6 +938,7 @@
           ontoggleview={toggleViewEntity}
           ongotochapter={handleGoToChapter}
           onclearselection={() => { selectedText = ''; lastSelectedText = ''; editorRef?.clearSelection(); }}
+          ondeletestate={handleDeleteState}
         />
       {:else if rightPanelTab === 'search'}
         <SearchPanel

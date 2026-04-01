@@ -440,6 +440,82 @@ export async function deleteComment(id) {
   return invoke('delete_comment', { id });
 }
 
+// --- Entity state tracking (checkpoint model) ---
+
+export async function getEntityMarkers(entityId) {
+  return invoke('get_entity_markers', { entityId });
+}
+
+export async function addStateMarker(entityId, chapterId) {
+  return invoke('add_state_marker', { entityId, chapterId });
+}
+
+export async function updateStateMarkerNote(id, note) {
+  return invoke('update_state_marker_note', { id, note: note || '' });
+}
+
+export async function deleteStateMarker(id) {
+  return invoke('delete_state_marker', { id });
+}
+
+export async function getStateMarker(id) {
+  return invoke('get_state_marker', { id });
+}
+
+export async function addStateMarkerValue(markerId, factKey, factValue) {
+  return invoke('add_state_marker_value', { markerId, factKey: factKey || '', factValue: factValue || '' });
+}
+
+export async function updateStateMarkerValue(id, factKey, factValue) {
+  return invoke('update_state_marker_value', { id, factKey: factKey || '', factValue: factValue || '' });
+}
+
+export async function deleteStateMarkerValue(id) {
+  return invoke('delete_state_marker_value', { id });
+}
+
+export async function addStateMarkerEntityRef(markerId, refEntityId, refActive) {
+  return invoke('add_state_marker_entity_ref', { markerId, refEntityId, refActive: refActive !== false });
+}
+
+export async function updateStateMarkerEntityRef(id, refActive) {
+  return invoke('update_state_marker_entity_ref', { id, refActive });
+}
+
+export async function getEntityStateKeys(entityId) {
+  return invoke('get_entity_state_keys', { entityId });
+}
+
+export async function getDistinctStateKeys() {
+  return invoke('get_distinct_state_keys');
+}
+
+// --- Time sections ---
+
+export async function getChapterTimeSections(chapterId) {
+  return invoke('get_chapter_time_sections', { chapterId });
+}
+
+export async function getAllTimeSections() {
+  return invoke('get_all_time_sections');
+}
+
+export async function getTimeSectionOrder() {
+  return invoke('get_time_section_order');
+}
+
+export async function saveTimeSectionOrder(entries) {
+  return invoke('save_time_section_order', { entries });
+}
+
+export async function resetTimeSectionOrder() {
+  return invoke('reset_time_section_order');
+}
+
+export async function resolveEntityStateAt(entityId, targetChapterId, targetSectionIndex = 0) {
+  return invoke('resolve_entity_state_at', { entityId, targetChapterId, targetSectionIndex });
+}
+
 // --- Debug ---
 
 export async function debugStrippedText(chapterId, start, length) {

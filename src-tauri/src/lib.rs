@@ -490,6 +490,209 @@ fn delete_comment(state: tauri::State<'_, AppState>, id: i64) -> Result<(), Stri
     db::delete_comment(conn, id).map_err(|e| e.to_string())
 }
 
+// ---- Entity state tracking (checkpoint model) ----
+
+#[tauri::command]
+fn get_entity_markers(state: tauri::State<'_, AppState>, entity_id: i64) -> Result<Vec<db::StateMarker>, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::get_entity_markers(conn, entity_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn add_state_marker(state: tauri::State<'_, AppState>, entity_id: i64, chapter_id: i64) -> Result<i64, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::add_state_marker(conn, entity_id, chapter_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn update_state_marker_note(state: tauri::State<'_, AppState>, id: i64, note: String) -> Result<(), String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::update_state_marker_note(conn, id, &note).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_state_marker(state: tauri::State<'_, AppState>, id: i64) -> Result<(), String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::delete_state_marker(conn, id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn add_state_marker_value(state: tauri::State<'_, AppState>, marker_id: i64, fact_key: String, fact_value: String) -> Result<i64, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::add_state_marker_value(conn, marker_id, &fact_key, &fact_value).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn update_state_marker_value(state: tauri::State<'_, AppState>, id: i64, fact_key: String, fact_value: String) -> Result<(), String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::update_state_marker_value(conn, id, &fact_key, &fact_value).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_state_marker_value(state: tauri::State<'_, AppState>, id: i64) -> Result<(), String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::delete_state_marker_value(conn, id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn add_state_marker_entity_ref(state: tauri::State<'_, AppState>, marker_id: i64, ref_entity_id: i64, ref_active: bool) -> Result<i64, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::add_state_marker_entity_ref(conn, marker_id, ref_entity_id, ref_active).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn update_state_marker_entity_ref(state: tauri::State<'_, AppState>, id: i64, ref_active: bool) -> Result<(), String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::update_state_marker_entity_ref(conn, id, ref_active).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_state_marker(state: tauri::State<'_, AppState>, id: i64) -> Result<Option<db::StateMarker>, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::get_state_marker(conn, id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_entity_state_keys(state: tauri::State<'_, AppState>, entity_id: i64) -> Result<Vec<String>, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::get_entity_state_keys(conn, entity_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_distinct_state_keys(state: tauri::State<'_, AppState>) -> Result<Vec<String>, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::get_distinct_state_keys(conn).map_err(|e| e.to_string())
+}
+
+// ---- Time sections ----
+
+#[tauri::command]
+fn get_chapter_time_sections(state: tauri::State<'_, AppState>, chapter_id: i64) -> Result<Vec<ydoc::TimeSection>, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    let chapter = db::get_chapter(conn, chapter_id).map_err(|e| e.to_string())?
+        .ok_or("Chapter not found")?;
+    let doc = ydoc::load_doc(&chapter.content)?;
+    Ok(ydoc::extract_time_sections(&doc))
+}
+
+#[tauri::command]
+fn get_all_time_sections(state: tauri::State<'_, AppState>) -> Result<Vec<serde_json::Value>, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    let chapters = db::list_chapters(conn).map_err(|e| e.to_string())?;
+    let mut result = Vec::new();
+    for ch in &chapters {
+        let doc = ydoc::load_doc(&ch.content)?;
+        let sections = ydoc::extract_time_sections(&doc);
+        result.push(serde_json::json!({
+            "chapter_id": ch.id,
+            "chapter_title": ch.title,
+            "sort_order": ch.sort_order,
+            "sections": sections,
+        }));
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+fn get_time_section_order(state: tauri::State<'_, AppState>) -> Result<Vec<db::TimeSectionOrder>, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::get_time_section_order(conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn save_time_section_order(
+    state: tauri::State<'_, AppState>,
+    entries: Vec<(i64, i64, String, i64)>,
+) -> Result<(), String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::save_time_section_order(conn, entries).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn reset_time_section_order(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::reset_time_section_order(conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn resolve_entity_state_at(
+    state: tauri::State<'_, AppState>,
+    entity_id: i64,
+    target_chapter_id: i64,
+    target_section_index: i64,
+) -> Result<db::ResolvedEntityState, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+
+    // 1. Build story_order_map from DB or default
+    let saved_order = db::get_time_section_order(conn).map_err(|e| e.to_string())?;
+    let chapters = db::list_chapters(conn).map_err(|e| e.to_string())?;
+
+    let mut story_order_map: std::collections::HashMap<(i64, i64), i64> = std::collections::HashMap::new();
+
+    if saved_order.is_empty() {
+        // Default: chapter sort_order * 1000 + section_index
+        for ch in &chapters {
+            let doc = ydoc::load_doc(&ch.content)?;
+            let sections = ydoc::extract_time_sections(&doc);
+            for sec in &sections {
+                story_order_map.insert(
+                    (ch.id, sec.section_index),
+                    ch.sort_order * 1000 + sec.section_index,
+                );
+            }
+        }
+    } else {
+        for entry in &saved_order {
+            story_order_map.insert(
+                (entry.chapter_id, entry.section_index),
+                entry.story_order,
+            );
+        }
+    }
+
+    // 2. Build state_section_map by loading Y.Docs for chapters that have state markers
+    let all_markers = db::get_entity_markers(conn, entity_id).map_err(|e| e.to_string())?;
+    let chapter_ids: std::collections::HashSet<i64> = all_markers.iter().map(|m| m.chapter_id).collect();
+
+    let mut state_section_map: std::collections::HashMap<i64, (i64, i64)> = std::collections::HashMap::new();
+    for ch_id in &chapter_ids {
+        if let Some(ch) = chapters.iter().find(|c| c.id == *ch_id) {
+            let doc = ydoc::load_doc(&ch.content)?;
+            let markers = ydoc::locate_state_markers_in_sections(&doc);
+            for (state_id, section_idx) in markers {
+                state_section_map.insert(state_id, (*ch_id, section_idx));
+            }
+        }
+    }
+
+    // 3. Determine target story position
+    let target_story_pos = *story_order_map
+        .get(&(target_chapter_id, target_section_index))
+        .unwrap_or(&(target_chapter_id * 1000));
+
+    // 4. Resolve
+    db::resolve_entity_state(conn, entity_id, &state_section_map, &story_order_map, target_story_pos)
+        .map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Initialize spell checker and synonym state at startup
@@ -549,6 +752,24 @@ pub fn run() {
             add_comment,
             update_comment,
             delete_comment,
+            get_entity_markers,
+            add_state_marker,
+            update_state_marker_note,
+            delete_state_marker,
+            get_state_marker,
+            add_state_marker_value,
+            update_state_marker_value,
+            delete_state_marker_value,
+            add_state_marker_entity_ref,
+            update_state_marker_entity_ref,
+            get_entity_state_keys,
+            get_distinct_state_keys,
+            get_chapter_time_sections,
+            get_all_time_sections,
+            get_time_section_order,
+            save_time_section_order,
+            reset_time_section_order,
+            resolve_entity_state_at,
             scanner::scan_text,
             scanner::scan_all_chapters,
             scanner::detect_entities,
