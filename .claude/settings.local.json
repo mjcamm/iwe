@@ -50,7 +50,8 @@
       "Bash(cargo doc:*)",
       "Bash(npx vite:*)",
       "Bash(node -e \"const y = require\\(''y-prosemirror''\\); console.log\\(Object.keys\\(y\\).filter\\(k => k.includes\\(''JSON''\\) || k.includes\\(''sync''\\) || k.includes\\(''undo''\\) || k.includes\\(''Sync''\\) || k.includes\\(''Undo''\\)\\)\\)\")",
-      "Bash(node -e \"const t = require\\(''@tiptap/core''\\); console.log\\(typeof t.generateHTML\\)\")"
+      "Bash(node -e \"const t = require\\(''@tiptap/core''\\); console.log\\(typeof t.generateHTML\\)\")",
+      "WebFetch(domain:discuss.prosemirror.net)"
     ]
   }
 }

@@ -1,13 +1,15 @@
 <script>
-  let { comments = [], activeNoteId = null, ondelete, onupdate, onselectnote, onupdatehighlight } = $props();
+  let { comments = [], activeNoteId = null, hasEditorSelection = false, ondelete, onupdate, onselectnote, onupdatehighlight } = $props();
 
   let editText = $state('');
   let textareaEl = $state(null);
+  let confirmingDelete = $state(false);
 
-  // When activeNoteId changes, load that note's text
+  // When activeNoteId changes, load that note's text and reset delete confirm
   $effect(() => {
     const note = activeNoteId != null ? comments.find(c => c.id === activeNoteId) : null;
     editText = note?.note_text ?? '';
+    confirmingDelete = false;
   });
 
   let activeNote = $derived(activeNoteId != null ? comments.find(c => c.id === activeNoteId) : null);
@@ -19,9 +21,16 @@
   }
 
   function handleDelete() {
-    if (activeNoteId != null && confirm('Delete this note?')) {
+    if (confirmingDelete && activeNoteId != null) {
       ondelete?.(activeNoteId);
+      confirmingDelete = false;
+    } else {
+      confirmingDelete = true;
     }
+  }
+
+  function cancelDelete() {
+    confirmingDelete = false;
   }
 
   function formatDate(dateStr) {
@@ -46,16 +55,6 @@
         <span class="note-detail-date">{formatDate(activeNote.created_at)}</span>
       </div>
 
-      {#if activeNote.highlightLen > 0}
-        <div class="note-detail-status">
-          <i class="bi bi-link-45deg"></i> Anchored to text
-        </div>
-      {:else}
-        <div class="note-detail-status">
-          <i class="bi bi-pin-angle"></i> Pinned at position
-        </div>
-      {/if}
-
       <div class="note-detail-body">
         <textarea
           bind:this={textareaEl}
@@ -64,17 +63,28 @@
           onblur={saveNote}
           placeholder="Write your note here..."
         ></textarea>
-      </div>
-
-      <div class="note-detail-actions">
-        <button class="note-action" onclick={() => onupdatehighlight?.(activeNoteId)} title="Select text in editor, then click to anchor note to selection">
-          <i class="bi bi-cursor-text"></i>
-          Update highlight
-        </button>
-        <button class="note-action note-action-delete" onclick={handleDelete} title="Delete note">
-          <i class="bi bi-trash"></i>
-          Delete
-        </button>
+        <div class="note-detail-actions">
+          {#if confirmingDelete}
+            <button class="note-action-btn note-action-confirm-delete" onclick={handleDelete}>
+              <i class="bi bi-trash"></i>
+              Confirm delete
+            </button>
+            <button class="note-action-btn" onclick={cancelDelete}>
+              Cancel
+            </button>
+          {:else}
+            <button class="note-action-btn note-action-delete" onclick={handleDelete} title="Delete note">
+              <i class="bi bi-trash"></i>
+              Delete
+            </button>
+          {/if}
+          {#if hasEditorSelection}
+            <button class="note-action-btn" onclick={() => onupdatehighlight?.(activeNoteId)} title="Update which text this note highlights to the current selection">
+              <i class="bi bi-cursor-text"></i>
+              Update highlight
+            </button>
+          {/if}
+        </div>
       </div>
     </div>
 
@@ -95,7 +105,7 @@
       <div class="notes-list">
         {#each comments as comment (comment.id)}
           <button class="note-item" onclick={() => onselectnote?.(comment.id)}>
-            <i class="bi bi-chat-left-text-fill note-item-icon"></i>
+            <div class="note-item-color"></div>
             <div class="note-item-content">
               {#if comment.note_text}
                 <span class="note-item-text">{comment.note_text.length > 80 ? comment.note_text.slice(0, 80) + '...' : comment.note_text}</span>
@@ -104,11 +114,6 @@
               {/if}
               <span class="note-item-date">{formatDate(comment.created_at)}</span>
             </div>
-            {#if comment.highlightLen > 0}
-              <i class="bi bi-link-45deg note-item-badge" title="Anchored"></i>
-            {:else}
-              <i class="bi bi-pin-angle note-item-badge" title="Pinned"></i>
-            {/if}
           </button>
         {/each}
       </div>
@@ -184,9 +189,11 @@
     background: var(--iwe-bg-hover, #f5f3f0);
   }
 
-  .note-item-icon {
-    font-size: 0.75rem;
-    color: var(--iwe-accent, #2d6a5e);
+  .note-item-color {
+    width: 3px;
+    align-self: stretch;
+    border-radius: 2px;
+    background: rgba(255, 185, 0, 0.5);
     flex-shrink: 0;
   }
   .note-item-content {
@@ -197,7 +204,7 @@
     gap: 1px;
   }
   .note-item-text {
-    font-size: 0.8rem;
+    font-size: 0.9rem;
     line-height: 1.4;
     color: var(--iwe-text);
     white-space: nowrap;
@@ -205,7 +212,7 @@
     text-overflow: ellipsis;
   }
   .note-item-empty {
-    font-size: 0.8rem;
+    font-size: 0.9rem;
     color: var(--iwe-text-faint);
     font-style: italic;
   }
@@ -213,12 +220,6 @@
     font-size: 0.65rem;
     color: var(--iwe-text-faint);
   }
-  .note-item-badge {
-    font-size: 0.65rem;
-    color: var(--iwe-text-faint);
-    flex-shrink: 0;
-  }
-
   /* ---- Detail view ---- */
   .note-detail {
     display: flex;
@@ -265,29 +266,19 @@
     color: var(--iwe-text-faint);
   }
 
-  .note-detail-status {
-    padding: 0.3rem 0.6rem;
-    font-size: 0.7rem;
-    color: var(--iwe-text-faint);
-    display: flex;
-    align-items: center;
-    gap: 0.3rem;
-  }
-
   .note-detail-body {
     flex: 1;
     padding: 0.5rem;
   }
   .note-detail-textarea {
     width: 100%;
-    height: 100%;
-    min-height: 120px;
-    font-size: 0.85rem;
+    min-height: 90px;
+    font-size: 1rem;
     line-height: 1.6;
     font-family: var(--iwe-font-ui);
     border: 1px solid var(--iwe-border, #e5e1da);
     border-radius: var(--iwe-radius-sm, 4px);
-    padding: 0.5rem;
+    padding: 0.4rem;
     resize: vertical;
     outline: none;
     background: var(--iwe-bg);
@@ -301,32 +292,39 @@
   .note-detail-actions {
     display: flex;
     align-items: center;
-    gap: 0.3rem;
-    padding: 0.4rem 0.5rem;
-    border-top: 1px solid var(--iwe-border, #e5e1da);
+    gap: 0.4rem;
+    padding-top: 0.4rem;
   }
-  .note-action {
-    background: none;
-    border: none;
-    font-size: 0.72rem;
-    color: var(--iwe-text-faint);
+  .note-action-btn {
+    background: var(--iwe-bg-hover, #f5f3f0);
+    border: 1px solid var(--iwe-border, #e5e1da);
+    font-size: 0.8rem;
+    color: var(--iwe-text-secondary);
     cursor: pointer;
-    padding: 3px 8px;
-    border-radius: 3px;
+    padding: 6px 12px;
+    border-radius: var(--iwe-radius-sm, 4px);
     display: flex;
     align-items: center;
-    gap: 0.25rem;
+    gap: 0.35rem;
     transition: all 0.15s;
     font-family: var(--iwe-font-ui);
   }
-  .note-action:hover {
-    background: var(--iwe-bg-hover);
-    color: var(--iwe-text-secondary);
-  }
-  .note-action-delete {
-    margin-left: auto;
+  .note-action-btn:hover {
+    background: var(--iwe-bg-active, #ebe8e3);
+    color: var(--iwe-text);
   }
   .note-action-delete:hover {
+    border-color: var(--iwe-danger, #b85450);
     color: var(--iwe-danger, #b85450);
+  }
+  .note-action-confirm-delete {
+    background: var(--iwe-danger, #b85450);
+    border-color: var(--iwe-danger, #b85450);
+    color: #fff;
+  }
+  .note-action-confirm-delete:hover {
+    background: #a04040;
+    border-color: #a04040;
+    color: #fff;
   }
 </style>

@@ -524,6 +524,8 @@
       chapterComments = [];
     }
     refreshResolvedComments();
+    // Apply highlight decorations in the editor
+    editorRef?.setActiveComment(activeNoteId);
   }
 
   function refreshResolvedComments() {
@@ -536,7 +538,6 @@
         highlightLen: markerMap.get(c.id)?.highlightLen ?? 0,
       }))
       .sort((a, b) => {
-        // Sort by document position, orphaned (-1) at bottom
         if (a.pos === -1 && b.pos === -1) return 0;
         if (a.pos === -1) return 1;
         if (b.pos === -1) return -1;
@@ -582,10 +583,12 @@
   function handleCommentClick(commentId) {
     rightPanelTab = 'notes';
     activeNoteId = commentId;
+    editorRef?.setActiveComment(commentId);
   }
 
   function handleSelectNote(commentId) {
     activeNoteId = commentId;
+    editorRef?.setActiveComment(commentId);
     if (commentId != null) {
       editorRef?.scrollToNoteMarker(commentId);
     }
@@ -879,6 +882,7 @@
         <NotesPanel
           comments={resolvedComments}
           {activeNoteId}
+          hasEditorSelection={!!selectedText?.trim()}
           ondelete={handleDeleteComment}
           onupdate={handleUpdateComment}
           onselectnote={handleSelectNote}

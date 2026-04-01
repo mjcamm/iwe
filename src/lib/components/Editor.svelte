@@ -11,7 +11,7 @@
   import { scanText, addIgnoredWord, checkSpelling, getSpellSuggestions, addToDictionary } from '$lib/db.js';
   import { createHighlightPlugin, createSpellCheckPlugin, buildTextMap, applyDecorations, applySpellDecorations, entityHighlightKey, spellCheckKey } from '$lib/entityHighlight.js';
   import { createChapterDoc, encodeDoc, destroyDoc } from '$lib/ydoc.js';
-  import { NoteMarker } from '$lib/noteMarker.js';
+  import { NoteMarker, applyCommentHighlights } from '$lib/noteMarker.js';
   import WordModal from './WordModal.svelte';
   import PalettePickerModal from './PalettePickerModal.svelte';
 
@@ -35,6 +35,24 @@
   let spellCache = new Map(); // word -> true (correct) or 'misspelled'
   let lastSpellText = '';
   let initialScanDone = false;
+
+  // Comment highlight state
+  let activeCommentId = $state(null);
+  let commentHighlightTimer = null;
+
+  function refreshCommentHighlights() {
+    clearTimeout(commentHighlightTimer);
+    commentHighlightTimer = setTimeout(() => {
+      if (editorRaw) {
+        applyCommentHighlights(editorRaw, activeCommentId);
+      }
+    }, 50);
+  }
+
+  export function setActiveComment(commentId) {
+    activeCommentId = commentId;
+    refreshCommentHighlights();
+  }
 
   // Context menu state
   let ctxMenu = $state({ show: false, x: 0, y: 0, word: '', from: 0, to: 0, isEntity: false, entityId: null, entityName: null, isMisspelled: false, suggestions: [] });
@@ -447,13 +465,18 @@
 
   export function scrollToNoteMarker(commentId) {
     if (!editorRaw) return;
+    // Set active comment to brighten the highlight
+    activeCommentId = commentId;
+    refreshCommentHighlights();
+
     editorRaw.state.doc.descendants((node, pos) => {
       if (node.type.name === 'noteMarker' && node.attrs.commentId === commentId) {
-        editorRaw.chain().focus().setTextSelection(pos).run();
+        const highlightFrom = pos + 1;
+        editorRaw.chain().focus().setTextSelection(highlightFrom).run();
         setTimeout(() => {
           const scrollEl = element.closest('.editor-scroll');
           if (!scrollEl) return;
-          const coords = editorRaw.view.coordsAtPos(pos);
+          const coords = editorRaw.view.coordsAtPos(highlightFrom);
           const rect = scrollEl.getBoundingClientRect();
           const target = coords.top - rect.top + scrollEl.scrollTop - rect.height / 3;
           scrollEl.scrollTo({ top: target, behavior: 'smooth' });
@@ -518,13 +541,17 @@
         clearTimeout(scanTimer);
         scanTimer = setTimeout(doScan, 400);
       },
-      onTransaction: ({ editor }) => {
+      onTransaction: ({ editor, transaction }) => {
         // Don't trigger Svelte reactivity for decoration-only transactions
         if (!applyingDecorations) {
           editorState = { editor };
           const { from, to } = editor.state.selection;
           const text = from !== to ? editor.state.doc.textBetween(from, to, ' ') : '';
           onselectionchange?.(text);
+        }
+        // Update comment highlights when doc changes
+        if (transaction.docChanged) {
+          refreshCommentHighlights();
         }
       },
     });
@@ -547,12 +574,12 @@
     // Initial scan
     setTimeout(doScan, 300);
 
-    // Listen for note-marker-click custom events
-    const handleNoteClick = (e) => {
+    // Listen for clicks on comment highlights
+    const handleCommentHighlightClick = (e) => {
       const { commentId } = e.detail;
       if (commentId != null) oncommentclick?.(commentId);
     };
-    element.addEventListener('note-marker-click', handleNoteClick);
+    element.addEventListener('comment-highlight-click', handleCommentHighlightClick);
 
     // Close dropdown on click outside
     const handleClick = (e) => {
@@ -562,7 +589,7 @@
     };
     document.addEventListener('click', handleClick);
     return () => {
-      element.removeEventListener('note-marker-click', handleNoteClick);
+      element.removeEventListener('comment-highlight-click', handleCommentHighlightClick);
       document.removeEventListener('click', handleClick);
     };
   });
@@ -591,6 +618,7 @@
     initialScanDone = false;
     createEditorInstance();
     setTimeout(doScan, 100);
+    setTimeout(refreshCommentHighlights, 200);
   });
 
   // Keep a non-reactive ref to the raw editor for decoration use
@@ -996,35 +1024,29 @@
     to { text-decoration-color: var(--iwe-danger, #b85450); }
   }
 
-  /* Note marker icons */
-  .editor-page :global(.note-marker-icon) {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 14px;
-    height: 14px;
-    font-size: 9px;
-    color: var(--iwe-accent, #2d6a5e);
-    opacity: 0.55;
-    cursor: grab;
-    vertical-align: super;
-    user-select: none;
-    transition: opacity 0.15s, color 0.15s;
-    position: relative;
-    top: -1px;
-    margin: 0 1px;
+  /* Note marker anchor — zero-width invisible inline element */
+  .editor-page :global(.note-marker-anchor) {
+    display: inline;
+    width: 0;
+    height: 0;
+    overflow: hidden;
+    font-size: 0;
+    line-height: 0;
   }
-  .editor-page :global(.note-marker-icon:hover) {
-    opacity: 1;
-    color: var(--iwe-accent-dark, #1e4d44);
+
+  /* Comment highlights */
+  .editor-page :global(.comment-highlight) {
+    background-color: rgba(255, 212, 80, 0.12);
+    border-bottom: 1px solid rgba(255, 185, 0, 0.2);
+    cursor: pointer;
+    transition: background-color 0.2s, border-color 0.2s;
   }
-  .editor-page :global(.note-marker-icon:active) {
-    cursor: grabbing;
+  .editor-page :global(.comment-highlight:hover) {
+    background-color: rgba(255, 212, 80, 0.25);
   }
-  .editor-page :global(.comment-hover-highlight) {
-    background-color: rgba(45, 106, 94, 0.1);
-    border-radius: 2px;
-    transition: background-color 0.2s;
+  .editor-page :global(.comment-highlight-active) {
+    background-color: rgba(255, 185, 0, 0.35);
+    border-bottom: 2px solid rgba(255, 165, 0, 0.6);
   }
 
   /* Context menu */

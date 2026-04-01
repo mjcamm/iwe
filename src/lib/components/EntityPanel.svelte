@@ -348,10 +348,6 @@
 
 <div class="entity-panel">
   {#if view === 'list'}
-    <!-- List View -->
-    <div class="panel-header">
-
-    </div>
 
     {#if selectedText}
       <div class="selection-hint">
@@ -360,7 +356,27 @@
     {/if}
 
     <div class="panel-filters">
-      <input class="filter-input" bind:value={filterText} placeholder="Filter entities..." />
+      <div style="display: flex; gap: 2px; margin-bottom:5px;">
+        <input class="filter-input" bind:value={filterText} placeholder="Filter entities..." />
+        <button
+                class="detect-btn"
+                onclick={() => { view = 'detect'; runDetection(); }}
+                title="Scan manuscript for entity candidates"
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          Detect
+        </button>
+        <button
+                class="add-btn"
+                class:has-selection={selectedText}
+                onclick={startCreate}
+                title={selectedText ? `Create entity from "${selectedText}"` : 'Create new entity'}
+        >
+          + {selectedText ? 'Add' : 'New'}
+        </button>
+      </div>
+
+
       <div class="type-tabs">
         <button class="type-tab" class:active={filterType === 'all'} onclick={() => filterType = 'all'}>All</button>
         <button class="type-tab" class:active={filterType === 'character'} onclick={() => filterType = 'character'}>Characters</button>
@@ -553,13 +569,13 @@
     <!-- References View -->
     <div class="panel-header">
       <button class="back-btn" onclick={() => view = 'list'}>&larr;</button>
-      <span class="panel-label">References</span>
+      <span class="panel-label">List</span>
     </div>
 
     {#if refsEntity}
       <div class="refs-entity-header">
         <span class="refs-color" style="background: {refsEntity.color}"></span>
-        <span class="refs-name">{refsEntity.name}</span>
+        <span class="refs-name">List</span>
         {#if refsData}
           <span class="refs-total">{refsData.total} mention{refsData.total !== 1 ? 's' : ''}</span>
         {/if}
@@ -598,7 +614,7 @@
     <!-- Combined Entity View + Edit -->
     <div class="panel-header">
       <button class="back-btn" onclick={() => view = 'list'}>&larr;</button>
-      <span class="panel-label">{editName || 'Entity'}</span>
+      <span class="panel-label">List</span>
       <div class="view-header-actions">
         <button class="entity-action-btn" onclick={() => showReferences(viewEntity)} title="Find references">
           <i class="bi bi-search" style="font-size: 0.85rem;"></i>
@@ -759,6 +775,7 @@
   .entity-panel {
     display: flex; flex-direction: column; height: 100%;
     font-family: var(--iwe-font-ui);
+    font-size: 0.9rem;
   }
 
   .panel-header {
@@ -797,12 +814,22 @@
   .back-btn:hover { background: var(--iwe-bg-hover); color: var(--iwe-text); }
 
   /* Filters */
-  .panel-filters { padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--iwe-border-light); }
+  .panel-filters {
+    padding: 0.4rem 0.6rem;
+    border-bottom: 1px solid var(--iwe-border-light);
+
+  }
+  .panel-filters button {
+    font-size:0.9rem;
+  }
   .filter-input {
-    width: 100%; padding: 0.35rem 0.5rem; font-size: 0.8rem;
+    /*width: 100%; */
+    padding: 0.35rem 0.5rem;
+    font-size: 0.9rem;
     border: 1px solid var(--iwe-border); border-radius: var(--iwe-radius-sm);
     background: var(--iwe-bg); color: var(--iwe-text);
-    font-family: var(--iwe-font-ui); outline: none; margin-bottom: 0.4rem;
+    font-family: var(--iwe-font-ui); outline: none;
+    /*margin-bottom: 0.4rem;*/
   }
   .filter-input:focus { border-color: var(--iwe-accent); }
   .filter-input::placeholder { color: var(--iwe-text-faint); }
@@ -822,15 +849,17 @@
 
   .entity-group { margin-bottom: 0.25rem; }
   .group-header {
-    display: flex; align-items: center; gap: 0.4rem;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
     padding: 0.35rem 0.75rem;
   }
   .group-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
   .group-label {
-    font-size: 0.65rem; font-weight: 600; text-transform: uppercase;
+    font-size: 0.8rem; font-weight: 600; text-transform: uppercase;
     letter-spacing: 0.06em; color: var(--iwe-text-faint);
   }
-  .group-count { font-size: 0.6rem; color: var(--iwe-text-faint); }
+  .group-count { font-size: 0.7rem; color: var(--iwe-text-faint); }
 
   .entity-item {
     display: flex; align-items: center; gap: 0.5rem;
@@ -851,7 +880,10 @@
   .entity-info {
     display: flex; flex-direction: column; gap: 0.1rem; min-width: 0; flex: 1;
   }
-  .entity-name { font-size: 0.85rem; color: var(--iwe-text); }
+  .entity-name {
+    font-size: 0.9rem;
+    color: var(--iwe-text);
+  }
   .entity-aliases {
     font-size: 0.7rem; color: var(--iwe-text-faint); font-style: italic;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
