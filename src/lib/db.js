@@ -482,6 +482,10 @@ export async function updateStateMarkerEntityRef(id, refActive) {
   return invoke('update_state_marker_entity_ref', { id, refActive });
 }
 
+export async function getIncomingEntityRefs(entityId) {
+  return invoke('get_incoming_entity_refs', { entityId });
+}
+
 export async function getEntityStateKeys(entityId) {
   return invoke('get_entity_state_keys', { entityId });
 }

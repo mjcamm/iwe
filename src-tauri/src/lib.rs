@@ -563,6 +563,13 @@ fn get_state_marker(state: tauri::State<'_, AppState>, id: i64) -> Result<Option
 }
 
 #[tauri::command]
+fn get_incoming_entity_refs(state: tauri::State<'_, AppState>, entity_id: i64) -> Result<Vec<(i64, String, bool, i64, i64)>, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::get_incoming_entity_refs(conn, entity_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn get_entity_state_keys(state: tauri::State<'_, AppState>, entity_id: i64) -> Result<Vec<String>, String> {
     let guard = state.db.lock().map_err(|e| e.to_string())?;
     let conn = guard.as_ref().ok_or("No project open")?;
@@ -762,6 +769,7 @@ pub fn run() {
             delete_state_marker_value,
             add_state_marker_entity_ref,
             update_state_marker_entity_ref,
+            get_incoming_entity_refs,
             get_entity_state_keys,
             get_distinct_state_keys,
             get_chapter_time_sections,

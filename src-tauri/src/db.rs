@@ -1071,6 +1071,23 @@ pub fn get_distinct_state_keys(conn: &Connection) -> rusqlite::Result<Vec<String
     rows.collect()
 }
 
+pub fn get_incoming_entity_refs(conn: &Connection, entity_id: i64) -> rusqlite::Result<Vec<(i64, String, bool, i64, i64)>> {
+    // Returns (source_entity_id, source_entity_name, ref_active, chapter_id, marker_id)
+    let mut stmt = conn.prepare(
+        "SELECT m.entity_id, e.name, v.ref_active, m.chapter_id, m.id
+         FROM state_marker_values v
+         JOIN state_markers m ON m.id = v.marker_id
+         JOIN entities e ON e.id = m.entity_id
+         WHERE v.value_type = 'entity_ref' AND v.ref_entity_id = ?1
+         ORDER BY e.name ASC, m.chapter_id ASC"
+    )?;
+    let rows = stmt.query_map(params![entity_id], |row| {
+        let active: i64 = row.get(2)?;
+        Ok((row.get(0)?, row.get(1)?, active != 0, row.get(3)?, row.get(4)?))
+    })?;
+    rows.collect()
+}
+
 pub fn get_entity_state_keys(conn: &Connection, entity_id: i64) -> rusqlite::Result<Vec<String>> {
     let mut stmt = conn.prepare(
         "SELECT DISTINCT v.fact_key FROM state_marker_values v

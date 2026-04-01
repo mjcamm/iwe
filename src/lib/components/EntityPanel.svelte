@@ -1,5 +1,5 @@
 <script>
-  import { detectEntities, addIgnoredWord, findReferences, getEntityNotes, addEntityNote, deleteEntityNote, reorderEntityNotes, getEntityFreeNotes, addEntityFreeNote, updateEntityFreeNote, deleteEntityFreeNote, reorderEntityFreeNotes, getEntityMarkers, addStateMarkerValue, updateStateMarkerValue, deleteStateMarkerValue, deleteStateMarker, getDistinctStateKeys, getEntityStateKeys, addStateMarkerEntityRef, updateStateMarkerEntityRef } from '$lib/db.js';
+  import { detectEntities, addIgnoredWord, findReferences, getEntityNotes, addEntityNote, deleteEntityNote, reorderEntityNotes, getEntityFreeNotes, addEntityFreeNote, updateEntityFreeNote, deleteEntityFreeNote, reorderEntityFreeNotes, getEntityMarkers, addStateMarkerValue, updateStateMarkerValue, deleteStateMarkerValue, deleteStateMarker, getDistinctStateKeys, getEntityStateKeys, addStateMarkerEntityRef, updateStateMarkerEntityRef, getIncomingEntityRefs } from '$lib/db.js';
   import { addToast } from '$lib/toast.js';
   import { dndzone } from 'svelte-dnd-action';
 
@@ -139,7 +139,7 @@
       // Resolve state up to just BEFORE this marker's position (so we see inherited state, not this marker's own values)
       const markerPositions = getMarkerPositions?.() || [];
       const markerDocPos = markerPositions.find(p => p.stateId === markerId)?.pos ?? 0;
-      const { facts: resolvedMap } = resolveUpTo(marker?.chapter_id || activeChapterId, markerDocPos - 1);
+      const { facts: resolvedMap, entityRefs: resolvedRefs } = resolveUpTo(marker?.chapter_id || activeChapterId, markerDocPos - 1);
 
       const rows = [];
       const seen = new Set();
@@ -189,12 +189,13 @@
       const seenRefIds = new Set(thisRefIds);
       for (const v of allMarkerVals) {
         if (v.value_type === 'entity_ref' && v.ref_entity_id && !seenRefIds.has(v.ref_entity_id)) {
+          const resolved = resolvedRefs.get(v.ref_entity_id);
           rows.push({
             type: 'entity_ref',
             valueId: null,
             refEntityId: v.ref_entity_id,
             refEntityName: v.ref_entity_name || 'Unknown',
-            refActive: false,
+            refActive: resolved ? resolved.active : false,
             isSet: false,
           });
           seenRefIds.add(v.ref_entity_id);
@@ -230,6 +231,37 @@
     const refList = Array.from(entityRefs.entries()).map(([id, data]) => ({ refEntityId: id, refEntityName: data.name, refActive: data.active }));
     refList.sort((a, b) => a.refEntityName.localeCompare(b.refEntityName, undefined, { sensitivity: 'base' }));
     resolvedState = { facts: factList, entityRefs: refList };
+
+    // Resolve incoming refs at cursor position
+    const markerPositions = getMarkerPositions?.() || [];
+    const posMap = new Map();
+    for (const mp of markerPositions) posMap.set(mp.stateId, mp.pos);
+    const currentChSortOrder = chapters.find(c => c.id === activeChapterId)?.sort_order ?? 0;
+
+    // Group incoming refs by source entity — take latest before cursor per source
+    const incomingMap = new Map(); // srcId -> { name, active }
+    // Sort raw refs by position (chapter order, then marker doc position)
+    const sorted = [...incomingRefsRaw].map(([srcId, srcName, active, chId, markerId]) => {
+      const chSort = chapters.find(c => c.id === chId)?.sort_order ?? 0;
+      const docPos = posMap.get(markerId);
+      return { srcId, srcName, active, chId, markerId, chSort, docPos };
+    }).sort((a, b) => {
+      if (a.chSort !== b.chSort) return a.chSort - b.chSort;
+      return (a.docPos ?? 0) - (b.docPos ?? 0);
+    });
+
+    for (const ref of sorted) {
+      // Only include if before cursor
+      if (ref.chSort < currentChSortOrder) {
+        incomingMap.set(ref.srcId, { name: ref.srcName, active: ref.active });
+      } else if (ref.chId === activeChapterId && ref.docPos !== undefined && ref.docPos <= cursorPos) {
+        incomingMap.set(ref.srcId, { name: ref.srcName, active: ref.active });
+      }
+    }
+
+    resolvedIncoming = Array.from(incomingMap.entries())
+      .map(([id, data]) => ({ srcId: id, srcName: data.name, active: data.active }))
+      .sort((a, b) => a.srcName.localeCompare(b.srcName, undefined, { sensitivity: 'base' }));
   }
 
   // Detection state
@@ -259,6 +291,10 @@
   let resolvedState = $state(null); // { facts: [] }
   let editRows = $state([]); // merged rows for checkpoint editor
   let addingEntityRef = $state(false);
+  let incomingRefsRaw = $state([]); // all incoming refs from DB: [srcId, srcName, active, chId, markerId]
+  let resolvedIncoming = $state([]); // cursor-position-resolved incoming refs
+  let stateFilterKey = $state('');
+  let stateFilterValue = $state('');
 
   async function showEntityView(entity) {
     viewEntity = entity;
@@ -276,11 +312,13 @@
       viewFreeNotes = await getEntityFreeNotes(entity.id);
       viewMarkers = await getEntityMarkers(entity.id);
       stateKeySuggestions = await getDistinctStateKeys();
+      incomingRefsRaw = await getIncomingEntityRefs(entity.id);
     } catch (e) {
       console.error('[entity] load failed:', e);
       viewNotes = [];
       viewFreeNotes = [];
       viewMarkers = [];
+      incomingRefsRaw = [];
     }
     viewNotesLoading = false;
 
@@ -1103,9 +1141,14 @@
                 </div>
 
                 <div class="state-marker-edit-footer">
-                  <button class="state-done-btn" onclick={handleSaveCheckpoint}>
-                    <i class="bi bi-check-lg"></i> Save
-                  </button>
+                  <div class="state-footer-left">
+                    <button class="state-done-btn" onclick={handleSaveCheckpoint}>
+                      <i class="bi bi-check-lg"></i> Save
+                    </button>
+                    <button class="state-cancel-btn" onclick={() => { activeMarkerId = null; }}>
+                      Cancel
+                    </button>
+                  </div>
                   <button class="btn-danger-subtle" onclick={() => handleDeleteMarker(marker.id)}>
                     <i class="bi bi-trash"></i> Delete checkpoint
                   </button>
@@ -1119,9 +1162,17 @@
                 <div class="state-view-header">
                   <i class="bi bi-crosshair"></i> State at cursor
                 </div>
+                <div class="state-filter-row">
+                  <input class="state-filter-input" bind:value={stateFilterKey} placeholder="Filter name..." />
+                  <input class="state-filter-input" bind:value={stateFilterValue} placeholder="Filter value..." />
+                </div>
                 <div class="state-resolved-list">
                   {#if resolvedState?.facts?.length > 0}
-                    {#each resolvedState.facts as f}
+                    {#each resolvedState.facts.filter(f => {
+                      const kMatch = !stateFilterKey || f.key.toLowerCase().includes(stateFilterKey.toLowerCase());
+                      const vMatch = !stateFilterValue || f.value.toLowerCase().includes(stateFilterValue.toLowerCase());
+                      return kMatch && vMatch;
+                    }) as f}
                       <div class="state-resolved-row">
                         <div class="state-resolved-key">{f.key}</div>
                         <div class="state-resolved-value">{f.value}</div>
@@ -1129,7 +1180,11 @@
                     {/each}
                   {/if}
                   {#if resolvedState?.entityRefs?.length > 0}
-                    {#each resolvedState.entityRefs as r}
+                    {#each resolvedState.entityRefs.filter(r => {
+                      const kMatch = !stateFilterKey || r.refEntityName.toLowerCase().includes(stateFilterKey.toLowerCase());
+                      const vMatch = !stateFilterValue || (r.refActive ? 'active' : 'inactive').includes(stateFilterValue.toLowerCase());
+                      return kMatch && vMatch;
+                    }) as r}
                       <div class="state-resolved-row state-resolved-ref">
                         <div class="state-resolved-key">
                           <i class="bi bi-link-45deg" style="font-size: 0.75rem;"></i>
@@ -1149,6 +1204,22 @@
               {:else}
                 <div class="view-notes-empty">
                   No state set. Right-click an entity mention and select "Set state value" to place a checkpoint.
+                </div>
+              {/if}
+
+              {#if resolvedIncoming.length > 0}
+                <div class="state-incoming-section">
+                  <div class="state-incoming-header">
+                    <i class="bi bi-box-arrow-in-left"></i> Referenced by
+                  </div>
+                  {#each resolvedIncoming as ref}
+                    <div class="state-incoming-row">
+                      <div class="state-incoming-name">{ref.srcName}</div>
+                      <div class="state-incoming-status" class:state-ref-inactive={!ref.active}>
+                        {ref.active ? 'Active' : 'Inactive'}
+                      </div>
+                    </div>
+                  {/each}
                 </div>
               {/if}
             </div>
@@ -1919,6 +1990,22 @@
     font-weight: 600;
   }
   .state-done-btn:hover { opacity: 0.9; }
+  .state-footer-left {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+  .state-cancel-btn {
+    font-family: var(--iwe-font-ui);
+    font-size: 0.8rem;
+    padding: 0.3rem 0.8rem;
+    border: 1px solid var(--iwe-border, #ddd);
+    border-radius: 4px;
+    background: none;
+    color: var(--iwe-text-secondary);
+    cursor: pointer;
+  }
+  .state-cancel-btn:hover { background: var(--iwe-bg-hover); }
   .state-view-container {
     padding: 0.5rem 0.75rem;
   }
@@ -1933,6 +2020,24 @@
     gap: 0.3rem;
     margin-bottom: 0.5rem;
   }
+  .state-filter-row {
+    display: flex;
+    gap: 0.3rem;
+    margin-bottom: 0.5rem;
+  }
+  .state-filter-input {
+    flex: 1;
+    font-family: var(--iwe-font-ui);
+    font-size: 0.78rem;
+    padding: 0.2rem 0.4rem;
+    border: 1px solid var(--iwe-border, #ddd);
+    border-radius: var(--iwe-radius-sm);
+    background: var(--iwe-bg);
+    color: var(--iwe-text);
+    outline: none;
+  }
+  .state-filter-input:focus { border-color: var(--iwe-accent); }
+  .state-filter-input::placeholder { color: var(--iwe-text-faint); }
   .state-resolved-list {
     display: flex;
     flex-direction: column;
@@ -2082,6 +2187,44 @@
   }
   .state-ref-inactive {
     color: var(--iwe-text-faint) !important;
+  }
+  .state-incoming-section {
+    margin-top: 1rem;
+    padding-top: 0.6rem;
+    border-top: 1px solid var(--iwe-border-light, #eee);
+  }
+  .state-incoming-header {
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--iwe-text-faint);
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    margin-bottom: 0.4rem;
+  }
+  .state-incoming-row {
+    display: flex;
+    align-items: center;
+    height: 2.2rem;
+    padding: 0 0.5rem;
+    background: var(--iwe-bg, #fffef9);
+    border: 1px solid var(--iwe-border-light, #eee);
+    border-radius: 6px;
+    margin-bottom: 0.3rem;
+  }
+  .state-incoming-name {
+    flex: 1;
+    font-family: var(--iwe-font-ui);
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: var(--iwe-text);
+  }
+  .state-incoming-status {
+    font-family: var(--iwe-font-ui);
+    font-size: 0.82rem;
+    color: var(--iwe-accent, #2d6a5e);
   }
   .state-marker-list-label {
     font-size: 0.72rem;
