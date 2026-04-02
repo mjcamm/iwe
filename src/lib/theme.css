@@ -108,3 +108,12 @@ a:hover { color: var(--iwe-accent-hover); }
   background: rgba(45, 106, 94, 0.15);
   border-bottom: 2px solid #2d6a5e;
 }
+.debug-highlight-quote {
+  background: rgba(45, 106, 94, 0.55);
+  border-bottom: 2px solid #2d6a5e;
+  font-weight: 600;
+}
+.debug-highlight-inner {
+  background: rgba(45, 106, 94, 0.2);
+  border-bottom: 1px solid rgba(45, 106, 94, 0.4);
+}

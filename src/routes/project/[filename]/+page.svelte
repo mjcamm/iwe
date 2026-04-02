@@ -87,9 +87,14 @@
           if (validClosers.has(text[j])) {
             // Ensure there's actual content
             if (j - i > 2) {
-              const from = posMap[i];
-              const to = posMap[j] + 1;
-              ranges.push({ from, to });
+              // Opening quote mark — dark highlight
+              ranges.push({ from: posMap[i], to: posMap[i] + 1, class: 'debug-highlight-quote' });
+              // Inner dialogue text — light highlight
+              if (i + 1 < j) {
+                ranges.push({ from: posMap[i + 1], to: posMap[j - 1] + 1, class: 'debug-highlight-inner' });
+              }
+              // Closing quote mark — dark highlight
+              ranges.push({ from: posMap[j], to: posMap[j] + 1, class: 'debug-highlight-quote' });
             }
             i = j + 1;
             found = true;
@@ -260,11 +265,7 @@
     // Listen for cross-window navigation events (from popup analysis windows)
     listen('navigate-to-position', (event) => {
       const p = event.payload;
-      if (p.charStart !== undefined) {
-        handleGoToChapter(p.chapterId, '', { charStart: p.charStart, charEnd: p.charEnd });
-      } else {
-        handleGoToChapter(p.chapterId, p.searchText, p.charPosition);
-      }
+      handleGoToChapter(p.chapterId, p.searchText, p.charPosition || 0);
     });
 
     // Set up scroll listener for auto-checkpointing
@@ -413,11 +414,61 @@
   /**
    * Universal jump-to-position. Used by EVERYTHING.
    *
+   * Position resolution uses buildTextMap as the single source of truth.
+   * Rust char_position values are used only as proximity hints for disambiguation,
+   * never as direct indices into posMap.
+   *
    * @param chapterId - which chapter to open
-   * @param searchText - the word/phrase to highlight (used to determine highlight length)
-   * @param position - char_position (number) from Rust, or PM position (number) when negative hack, or {pmFrom, pmTo} for pre-resolved positions
+   * @param searchText - the word/phrase to find and highlight
+   * @param positionHint - Rust char_position (number) as proximity hint for disambiguation,
+   *                       or {pmFrom, pmTo} for pre-resolved PM positions (entity notes)
    */
-  async function handleGoToChapter(chapterId, searchText, position) {
+  /**
+   * Find all occurrences of needle in text, return the one closest to hintCharPos.
+   * Returns { start, end } char indices in the buildTextMap text, or null.
+   */
+  function findTextNearHint(text, needle, hintCharPos) {
+    if (!needle || !text) return null;
+
+    // Try case-sensitive first, then case-insensitive
+    const lowerText = text.toLowerCase();
+    const lowerNeedle = needle.toLowerCase();
+    const searches = [
+      { haystack: text, needle: needle },          // exact case
+      { haystack: lowerText, needle: lowerNeedle }, // case insensitive
+    ];
+
+    for (const { haystack, needle: n } of searches) {
+      // Find all occurrences
+      const occurrences = [];
+      let pos = 0;
+      while (true) {
+        const idx = haystack.indexOf(n, pos);
+        if (idx === -1) break;
+        occurrences.push(idx);
+        pos = idx + 1;
+      }
+
+      if (occurrences.length === 0) continue;
+
+      // Pick the occurrence nearest to the hint position
+      let best = occurrences[0];
+      let bestDist = Math.abs(best - hintCharPos);
+      for (const occ of occurrences) {
+        const dist = Math.abs(occ - hintCharPos);
+        if (dist < bestDist) {
+          best = occ;
+          bestDist = dist;
+        }
+      }
+
+      return { start: best, end: best + needle.length };
+    }
+
+    return null;
+  }
+
+  async function handleGoToChapter(chapterId, searchText, positionHint) {
     await pushNavCheckpoint(true);
     await selectChapter(chapterId);
     setTimeout(() => {
@@ -427,33 +478,21 @@
       let pmFrom = null;
       let pmTo = null;
 
-      if (position && typeof position === 'object' && 'pmFrom' in position) {
-        // Pre-resolved PM positions (from Y.Doc relative positions)
-        pmFrom = position.pmFrom;
-        pmTo = position.pmTo;
-      } else if (position && typeof position === 'object' && 'charStart' in position) {
-        // Char offset range from Rust
-        const { posMap } = buildTextMap(ed.state.doc);
-        if (position.charStart < posMap.length) {
-          pmFrom = posMap[position.charStart];
-          const end = Math.min(position.charEnd, posMap.length) - 1;
-          pmTo = posMap[end] + 1;
-        }
-      } else if (typeof position === 'number') {
-        // Char offset from Rust — convert via buildTextMap
-        const { posMap } = buildTextMap(ed.state.doc);
-        if (position < posMap.length) {
-          pmFrom = posMap[position];
-          if (searchText) {
-            const endCharPos = position + searchText.length;
-            if (endCharPos <= posMap.length) {
-              pmTo = posMap[endCharPos - 1] + 1;
-            } else {
-              pmTo = posMap[posMap.length - 1] + 1;
-            }
-          } else {
-            pmTo = pmFrom + 1;
-          }
+      if (positionHint && typeof positionHint === 'object' && 'pmFrom' in positionHint) {
+        // Pre-resolved PM positions (from Y.Doc relative positions — entity notes)
+        pmFrom = positionHint.pmFrom;
+        pmTo = positionHint.pmTo;
+
+      } else if (searchText) {
+        // Find searchText in buildTextMap text — the single source of truth.
+        // Rust char_position is used only as a proximity hint for disambiguation.
+        const { text, posMap } = buildTextMap(ed.state.doc);
+        const hint = typeof positionHint === 'number' ? positionHint : 0;
+        const found = findTextNearHint(text, searchText, hint);
+
+        if (found !== null) {
+          pmFrom = posMap[found.start];
+          pmTo = posMap[found.end - 1] + 1;
         }
       }
 

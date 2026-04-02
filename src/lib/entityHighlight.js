@@ -29,13 +29,13 @@ export function createDebugPlugin() {
 /**
  * Apply debug decorations to the editor.
  * @param {Editor} editor - TipTap editor instance
- * @param {Array<{from: number, to: number}>} ranges - PM position ranges to highlight
+ * @param {Array<{from: number, to: number, class?: string}>} ranges - PM position ranges to highlight
  */
 export function applyDebugDecorations(editor, ranges) {
   if (!editor || !editor.view) return;
   const doc = editor.state.doc;
   const decos = ranges.map(r =>
-    Decoration.inline(r.from, r.to, { class: 'debug-highlight' })
+    Decoration.inline(r.from, r.to, { class: r.class || 'debug-highlight' })
   );
   const set = DecorationSet.create(doc, decos);
   editor.view.dispatch(editor.state.tr.setMeta(debugDecoKey, set));

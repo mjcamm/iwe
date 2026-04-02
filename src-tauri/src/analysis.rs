@@ -676,8 +676,9 @@ pub fn chapter_analysis(state: tauri::State<'_, AppState>) -> Result<Vec<Chapter
 pub struct PacingChapter {
     pub chapter_id: i64,
     pub chapter_title: String,
-    pub sentence_lengths: Vec<usize>, // word count per sentence, in order
-    pub sentence_starts: Vec<usize>,  // char offset of each sentence start
+    pub sentence_lengths: Vec<usize>,  // word count per sentence, in order
+    pub sentence_starts: Vec<usize>,   // char offset hint for disambiguation
+    pub sentence_texts: Vec<String>,   // first ~60 chars of each sentence for JS-side matching
 }
 
 #[tauri::command]
@@ -694,12 +695,16 @@ pub fn pacing_analysis(state: tauri::State<'_, AppState>) -> Result<Vec<PacingCh
 
         let sentence_lengths = extracted.iter().map(|s| s.word_count).collect();
         let sentence_starts = extracted.iter().map(|s| s.char_start).collect();
+        let sentence_texts = extracted.iter().map(|s| {
+            if s.text.len() > 60 { s.text[..60].to_string() } else { s.text.clone() }
+        }).collect();
 
         results.push(PacingChapter {
             chapter_id: chapter.id,
             chapter_title: chapter.title.clone(),
             sentence_lengths,
             sentence_starts,
+            sentence_texts,
         });
     }
 

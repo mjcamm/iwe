@@ -473,7 +473,7 @@
                 {#each item.clusters as cluster}
                   <button
                     class="rep-cluster"
-                    onclick={() => ongotochapter?.(cluster.chapter_id, item.word, { charStart: cluster.char_start, charEnd: cluster.char_end })}
+                    onclick={() => ongotochapter?.(cluster.chapter_id, item.word, cluster.char_start)}
                     title="Jump to this cluster"
                   >
                     <span class="rep-cluster-badge">{cluster.count}&times; within {cluster.window_words} words — {cluster.chapter_title}</span>

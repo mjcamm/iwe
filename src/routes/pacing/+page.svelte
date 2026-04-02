@@ -266,16 +266,13 @@
     const dist = Math.sqrt((mouseX - x) ** 2 + (mouseY - y) ** 2);
     if (dist > 30) return;
 
-    const charPos = meta.chapter.sentence_starts[idx];
+    const sentenceText = meta.chapter.sentence_texts?.[idx] || '';
+    const hintPos = meta.chapter.sentence_starts[idx];
     try {
-      const nextStart = idx + 1 < meta.chapter.sentence_starts.length
-        ? meta.chapter.sentence_starts[idx + 1]
-        : charPos + 1;
-
       await emitTo('main', 'navigate-to-position', {
         chapterId: meta.chapter.chapter_id,
-        charStart: charPos,
-        charEnd: nextStart,
+        searchText: sentenceText,
+        charPosition: hintPos,
       });
       await getCurrentWindow().minimize();
     } catch (err) {
