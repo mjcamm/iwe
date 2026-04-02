@@ -1,5 +1,5 @@
 <script>
-  import { detectEntities, addIgnoredWord, findReferences, getEntityNotes, addEntityNote, deleteEntityNote, reorderEntityNotes, getEntityFreeNotes, addEntityFreeNote, updateEntityFreeNote, deleteEntityFreeNote, reorderEntityFreeNotes, getEntityMarkers, addStateMarkerValue, updateStateMarkerValue, deleteStateMarkerValue, deleteStateMarker, getDistinctStateKeys, getEntityStateKeys, addStateMarkerEntityRef, updateStateMarkerEntityRef, getIncomingEntityRefs } from '$lib/db.js';
+  import { detectEntities, addIgnoredWord, findReferences, getEntityNotes, addEntityNote, deleteEntityNote, reorderEntityNotes, getEntityFreeNotes, addEntityFreeNote, updateEntityFreeNote, deleteEntityFreeNote, reorderEntityFreeNotes, getEntityMarkers, addStateMarkerValue, updateStateMarkerValue, deleteStateMarkerValue, deleteStateMarker, getDistinctStateKeys, getEntityStateKeys, addStateMarkerEntityRef, updateStateMarkerEntityRef, getIncomingEntityRefs, getTimeSectionOrder } from '$lib/db.js';
   import { addToast } from '$lib/toast.js';
   import { dndzone } from 'svelte-dnd-action';
 
@@ -27,6 +27,7 @@
     cursorMoveTrigger = 0,
     cursorPos = 0,
     getMarkerPositions = null, // function that returns [{stateId, pos}] from editor
+    getTimeSectionForPos = null, // function(chapterId, docPos) => {chapterId, sectionIndex}
   } = $props();
 
   let view = $state('list'); // 'list' | 'create' | 'detect' | 'references' | 'view'
@@ -95,7 +96,26 @@
     }
   });
 
-  // Resolve state up to a given doc position in a given chapter
+  // Build a story-order map: (chapterId, sectionIndex) => storyOrder
+  function buildStoryOrderMap() {
+    const map = new Map(); // "chId-secIdx" => storyOrder
+    if (timeSectionOrder.length > 0) {
+      for (const entry of timeSectionOrder) {
+        map.set(`${entry.chapter_id}-${entry.section_index}`, entry.story_order);
+      }
+    }
+    // Fallback for chapters/sections not in the map: chapter sort_order * 1000 + section_index
+    return map;
+  }
+
+  function getStoryOrder(storyMap, chapterId, sectionIndex) {
+    const key = `${chapterId}-${sectionIndex}`;
+    if (storyMap.has(key)) return storyMap.get(key);
+    const ch = chapters.find(c => c.id === chapterId);
+    return (ch?.sort_order ?? 0) * 1000 + sectionIndex;
+  }
+
+  // Resolve state up to a given doc position in a given chapter, using story-time ordering
   function resolveUpTo(chapterId, docPos) {
     const markerPositions = getMarkerPositions?.() || [];
     const posMap = new Map();
@@ -103,16 +123,38 @@
       posMap.set(mp.stateId, mp.pos);
     }
 
-    const chSortOrder = chapters.find(c => c.id === chapterId)?.sort_order ?? 0;
+    const storyMap = buildStoryOrderMap();
+
+    // Determine the target's story-time position
+    const targetSection = getTimeSectionForPos?.(chapterId, docPos) ?? { chapterId, sectionIndex: 0 };
+    const targetStoryOrder = getStoryOrder(storyMap, targetSection.chapterId, targetSection.sectionIndex);
+
     const before = [];
     for (const m of viewMarkers) {
-      const mSortOrder = chapters.find(c => c.id === m.chapter_id)?.sort_order ?? 0;
-      if (mSortOrder < chSortOrder) {
-        before.push({ marker: m, order: mSortOrder * 100000 });
-      } else if (m.chapter_id === chapterId) {
+      // For markers in the current chapter, we know their doc position
+      if (m.chapter_id === chapterId) {
         const mPos = posMap.get(m.id);
-        if (mPos !== undefined && mPos <= docPos) {
-          before.push({ marker: m, order: chSortOrder * 100000 + mPos });
+        if (mPos === undefined) continue;
+
+        // Determine which section this marker is in
+        const mSection = getTimeSectionForPos?.(chapterId, mPos) ?? { chapterId, sectionIndex: 0 };
+        const mStoryOrder = getStoryOrder(storyMap, mSection.chapterId, mSection.sectionIndex);
+
+        // Include if: earlier in story time, OR same section and earlier doc position
+        if (mStoryOrder < targetStoryOrder) {
+          before.push({ marker: m, order: mStoryOrder * 100000 + mPos });
+        } else if (mStoryOrder === targetStoryOrder && mPos <= docPos) {
+          before.push({ marker: m, order: mStoryOrder * 100000 + mPos });
+        }
+      } else {
+        // Marker in a different chapter — use its chapter's default section 0
+        // (we don't have doc positions for markers in other chapters)
+        const mStoryOrder = getStoryOrder(storyMap, m.chapter_id, 0);
+        if (mStoryOrder < targetStoryOrder) {
+          before.push({ marker: m, order: mStoryOrder * 100000 });
+        } else if (mStoryOrder === targetStoryOrder) {
+          // Same story order but different chapter — include (it's at the same story time)
+          before.push({ marker: m, order: mStoryOrder * 100000 });
         }
       }
     }
@@ -298,6 +340,7 @@
   let resolvedIncoming = $state([]); // cursor-position-resolved incoming refs
   let stateFilterKey = $state('');
   let stateFilterValue = $state('');
+  let timeSectionOrder = $state([]); // from DB, for story-time ordering
   let showDeleteMarkerConfirm = $state(false);
   let stateSubView = $state('cursor'); // 'cursor' | 'all'
 
@@ -318,12 +361,14 @@
       viewMarkers = await getEntityMarkers(entity.id);
       stateKeySuggestions = await getDistinctStateKeys();
       incomingRefsRaw = await getIncomingEntityRefs(entity.id);
+      timeSectionOrder = await getTimeSectionOrder();
     } catch (e) {
       console.error('[entity] load failed:', e);
       viewNotes = [];
       viewFreeNotes = [];
       viewMarkers = [];
       incomingRefsRaw = [];
+      timeSectionOrder = [];
     }
     viewNotesLoading = false;
 
@@ -337,6 +382,7 @@
     if (viewEntity) {
       viewMarkers = await getEntityMarkers(viewEntity.id);
       stateKeySuggestions = await getDistinctStateKeys();
+      timeSectionOrder = await getTimeSectionOrder();
       resolveStateAtCursor();
     }
   }

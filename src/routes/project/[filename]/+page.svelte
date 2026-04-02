@@ -639,6 +639,56 @@
     }
   }
 
+  function getTimeSectionForPos(chapterId, docPos) {
+    // Only works for the currently open chapter
+    if (chapterId !== activeChapter?.id) return { chapterId, sectionIndex: 0 };
+    const ed = editorRef?.getEditor();
+    if (!ed) return { chapterId, sectionIndex: 0 };
+
+    // Walk top-level nodes to build sections matching Rust extract_time_sections:
+    // Flow blocks accumulate into a flow section. A timeBreak wrapper is its own section.
+    // Section indices: flow(0), timeBreak(1), flow(2), timeBreak(3), flow(4)...
+    const doc = ed.state.doc;
+    let sectionIndex = 0;
+    let hasFlowInCurrentSection = false;
+    let result = { chapterId, sectionIndex: 0 };
+    let found = false;
+
+    doc.forEach((node, offset) => {
+      if (found) return;
+      const nodeEnd = offset + node.nodeSize;
+
+      if (node.type.name === 'timeBreak') {
+        // Finalize preceding flow section if it had content
+        if (hasFlowInCurrentSection) {
+          sectionIndex++;
+          hasFlowInCurrentSection = false;
+        } else if (sectionIndex === 0) {
+          // Empty flow before first timeBreak still counts as section 0
+          sectionIndex++;
+        }
+
+        // Check if pos is inside this timeBreak
+        if (docPos >= offset && docPos < nodeEnd) {
+          result = { chapterId, sectionIndex };
+          found = true;
+          return;
+        }
+        sectionIndex++;
+      } else {
+        // Flow block
+        hasFlowInCurrentSection = true;
+        if (docPos >= offset && docPos < nodeEnd) {
+          result = { chapterId, sectionIndex };
+          found = true;
+          return;
+        }
+      }
+    });
+
+    return result;
+  }
+
   function handleDeleteState(stateId) {
     editorRef?.removeStateMarker(stateId);
   }
@@ -954,6 +1004,7 @@
           {cursorMoveTrigger}
           {cursorPos}
           getMarkerPositions={() => editorRef?.getStateMarkerPositions() || []}
+          {getTimeSectionForPos}
           activeChapterId={activeChapter?.id}
           oncreate={async (name, type, desc, color) => { pendingEntityName = null; await handleCreateEntity(name, type, desc, color); }}
           onupdate={handleUpdateEntity}
