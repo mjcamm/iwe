@@ -45,7 +45,9 @@ Chapter content is stored as **Yjs binary state** (BLOB), not HTML strings. Both
 
 **Undo/Redo:** StarterKit's `history` plugin is disabled (`history: false`). Undo/redo uses `yUndoPlugin` from `y-prosemirror` with `undo`/`redo` commands bound to `Mod-z`/`Mod-y`/`Mod-Shift-z`.
 
-**Text extraction:** `ydoc::extract_plain_text()` walks the Y.Doc's `XmlFragment` depth-first, concatenating text from `XmlText` nodes with NO separators between blocks — matching `buildTextMap()` exactly. `extract_text_with_breaks()` inserts `\n\n` between top-level blocks (used for PDF export).
+**Text extraction:** `ydoc::extract_plain_text()` walks the Y.Doc's `XmlFragment` depth-first, concatenating text from `XmlText` nodes with NO separators between blocks. `extract_text_with_breaks()` inserts `\n\n` between top-level blocks (used for PDF export and dialogue detection with paragraph boundaries).
+
+**IMPORTANT — yrs vs PM text drift:** `extract_plain_text()` (Rust/yrs) and `buildTextMap()` (JS/PM) can produce slightly different text when the document contains formatting marks (bold, italic) or atom nodes (noteMarker, stateMarker). `buildTextMap` is the authoritative source for position mapping. Rust char offsets should only be used as proximity hints for disambiguation, never as direct indices into `posMap`. See Navigation section.
 
 **Word counts:** Since chapter content is binary, word counting uses a Rust command `get_all_chapter_word_counts` that loads each chapter's Y.Doc and counts words. The frontend caches these in a `wordCounts` state object.
 
@@ -147,31 +149,38 @@ Handles flashbacks, flash-forwards, and time jumps. Writers wrap text in **time 
 - `src/lib/timeBreak.js` — `TimeBreak` wrapping TipTap node
 - `src/routes/timeflow/+page.js` + `+page.svelte` — Time Flow Manager popup
 - `src-tauri/src/ydoc.rs` — `extract_time_sections()`, `locate_state_markers_in_sections()`
-- `src-tauri/capabilities/default.json` — includes `"timeflow*"`
+- `src-tauri/capabilities/default.json` — includes `"timeflow*"`, `"pacing*"`
 
 ### Navigation / Jump-to-Position (CRITICAL — read this carefully)
 
-`handleGoToChapter(chapterId, searchText, anchorOrPosition)` in the project page is the **ONE central function** for ALL click-to-navigate-and-highlight across the entire app. Every feature that lets the user click a result and jump to a position in the editor MUST use this function. Do not create alternative navigation paths.
+`handleGoToChapter(chapterId, searchText, positionHint)` in the project page is the **ONE central function** for ALL click-to-navigate-and-highlight across the entire app. Every feature that lets the user click a result and jump to a position in the editor MUST use this function. Do not create alternative navigation paths.
 
-**Used by:** find-all-references, text search, dialogue search, relationship search, similar phrasing, word frequency browser, cluster finder, entity detection go-to, pinned excerpt clicks, chapter analysis.
+**Used by:** find-all-references, text search, dialogue search, relationship search, similar phrasing, word frequency browser, cluster finder, entity detection go-to, pinned excerpt clicks, pacing analysis, adverb analysis.
 
-**How it works (two strategies):**
+**CRITICAL — `buildTextMap` is the single source of truth:**
 
-1. **Preferred — `char_position` (number):** When `anchorOrPosition` is a number, it's a char offset from the Rust scanner's plain text. `buildTextMap()` converts it to a ProseMirror doc position via a position map. This is exact and reliable — both Rust and JS extract text from the same Y.Doc, so char offsets are guaranteed identical.
+`buildTextMap(doc)` walks the ProseMirror doc and builds `text` (plain string) and `posMap` (array where `posMap[charIndex]` = PM doc position). ALL position resolution goes through this. Rust `char_position` values from `extract_plain_text()` (yrs) can drift from `buildTextMap` positions due to formatting marks (bold/italic) and atom nodes (noteMarker, stateMarker). **Never use Rust char positions as direct indices into `posMap`.**
 
-2. **Fallback — word-sequence search (string):** When `anchorOrPosition` is a string (anchor text), the function extracts alphanumeric words from it, builds a word list from the PM doc, and finds the matching word sequence. This avoids issues with quotes, dashes, and special characters.
+**How it works:**
+
+1. **Primary — text search with hint:** `searchText` is found in `buildTextMap`'s text using `findTextNearHint()`, which locates all occurrences and picks the one nearest to the Rust `positionHint`. The hint is only for disambiguation when `searchText` appears multiple times — it is never used as a direct position.
+
+2. **Entity notes — pre-resolved PM positions:** When `positionHint` is `{pmFrom, pmTo}`, these are Y.Doc relative positions already resolved to PM positions via `y-prosemirror`. Used only for entity pinned excerpts.
 
 **When adding new features that navigate:**
-- If the Rust result has a `char_position` field, pass it as the third argument (number)
-- If you only have text context, pass it as a string — the word-sequence search will handle quotes/punctuation
+- Pass `searchText` (the text to highlight) and a Rust `char_position` as a proximity hint (number)
+- The hint does NOT need to be exact — it just disambiguates which occurrence to jump to
 - ALWAYS call `handleGoToChapter()` — never implement your own text search or position mapping
-- The function also handles: opening the chapter tab, scroll-to-center, and the yellow flash highlight box
+- NEVER index directly into `posMap` with a Rust char offset — always use `findTextNearHint()`
+- The function also handles: opening the chapter tab, scroll-to-center, and the yellow flash highlight
 
-**Position mapping detail:** `buildTextMap(doc)` walks the PM doc and builds two things: `text` (plain string) and `posMap` (array where `posMap[charIndex]` = PM doc position). When a `char_position` comes from Rust, `posMap[char_position]` gives the exact PM position for `setTextSelection`.
+**Cross-window navigation:** Popup windows (pacing, etc.) emit `navigate-to-position` events via `emitTo('main', ...)` from `@tauri-apps/api/event`. The main window listens and calls `handleGoToChapter`.
 
 ### Multi-window architecture
 
-Pop-up windows (heatmap, chapter analysis, stats, time flow manager) are separate SvelteKit routes opened via `WebviewWindow` from `@tauri-apps/api/webviewWindow`. They read data directly from the database — no data passing between windows. Each window needs its route in `src/routes/` and its label pattern in `src-tauri/capabilities/default.json`.
+Pop-up windows (heatmap, chapter analysis, stats, time flow manager, pacing analysis) are separate SvelteKit routes opened via `WebviewWindow` from `@tauri-apps/api/webviewWindow`. They read data directly from the database — no data passing between windows. Each window needs its route in `src/routes/` and its label pattern in `src-tauri/capabilities/default.json`.
+
+**Cross-window events:** Popup windows can navigate the main editor via `emitTo('main', 'navigate-to-position', payload)` from `@tauri-apps/api/event`. The main window listens for this event and calls `handleGoToChapter`. Payload: `{ chapterId, searchText, charPosition }`.
 
 The print preview window converts Y.Doc bytes to HTML via `yDocToProsemirrorJSON()` + `generateHTML()` before rendering.
 
@@ -186,10 +195,11 @@ src/
 │   ├── chapters/                 # Chapter analysis (popup window)
 │   ├── stats/                    # Writing stats (popup window)
 │   ├── timeflow/                 # Time Flow Manager (popup window)
+│   ├── pacing/                   # Pacing analysis — sentence length waveforms (popup window)
 │   └── print/                    # Print preview (popup window)
 ├── lib/
 │   ├── db.js                     # ALL Tauri command wrappers
-│   ├── entityHighlight.js        # ProseMirror decoration plugin (entities + spellcheck)
+│   ├── entityHighlight.js        # ProseMirror decoration plugins (entities + spellcheck + debug)
 │   ├── noteMarker.js             # NoteMarker TipTap node + comment highlight decorations
 │   ├── stateMarker.js            # StateMarker TipTap node (entity state checkpoints)
 │   ├── timeBreak.js              # TimeBreak TipTap wrapping node (time jump regions)
@@ -204,7 +214,7 @@ src/
 │       ├── NotesPanel.svelte     # Comments/notes list + detail view
 │       ├── ChapterNav.svelte     # Chapter sidebar
 │       ├── SearchPanel.svelte    # Text/dialogue/relationship search
-│       ├── AnalysisPanel.svelte  # Frequency/clusters/similar/heatmap
+│       ├── AnalysisPanel.svelte  # Analysis tools (frequency/clusters/similar/adverbs/dialogue detection/heatmap/pacing/chapters)
 │       └── Toasts.svelte         # Toast renderer
 
 src-tauri/
@@ -212,7 +222,9 @@ src-tauri/
 │   ├── main.rs                   # Entry point
 │   ├── lib.rs                    # Tauri commands + PDF export
 │   ├── db.rs                     # Database schema + all queries
-│   ├── scanner.rs                # Aho-Corasick scanner + commands
+│   ├── scanner.rs                # Aho-Corasick scanner + entity/search commands
+│   ├── analysis.rs               # Analysis tools (frequency, clusters, similar, pacing, adverbs, heatmap, chapter analysis)
+│   ├── text_utils.rs             # Shared text utilities (dialogue extraction, sentence extraction, word counting)
 │   ├── ydoc.rs                   # Y.Doc load/encode/text extraction (yrs)
 │   ├── spellcheck.rs             # Hunspell dictionary + spell checking + custom words
 │   ├── synonyms.rs               # Moby Thesaurus lookup (in-memory)
@@ -234,7 +246,7 @@ src-tauri/
 - **entity_fields** — key-value custom fields (schema exists, UI not built)
 - **ignored_words** — words excluded from entity detection
 - **custom_words** — spell checker custom dictionary (word, source: 'user' or 'entity')
-- **entity_notes** — pinned text excerpts from chapters, with sort_order
+- **entity_notes** — pinned text ranges from chapters stored as Y.Doc relative positions (y_start BLOB, y_end BLOB), with sort_order. Text is resolved live from the Y.Doc — ranges expand if text is inserted within them.
 - **entity_free_notes** — free-form note cards per entity, with sort_order
 - **comments** — chapter_id, note_text, timestamps (position lives in the Y.Doc as a noteMarker node)
 - **state_markers** — entity_id, chapter_id, note, timestamps (position lives in Y.Doc as a stateMarker node)
@@ -282,14 +294,26 @@ State markers are inline atom nodes in the Y.Doc — they have permanent identit
 ### State resolution is story-time-aware
 The `resolveUpTo()` function in EntityPanel doesn't use document order. It loads `time_section_order` from the DB, determines each marker's time section via `getTimeSectionForPos()`, and orders markers by their section's `story_order`. This means a state checkpoint inside a flashback that's been positioned before Chapter 1 in the Time Flow Manager will be resolved before Chapter 1's checkpoints. Fallback when no time flow ordering exists: chapter sort_order × 1000 + section_index.
 
+### Never mutate the document for visual effects
+Debug overlays, analysis highlights, and any temporary visual decoration MUST use ProseMirror decoration plugins (via PluginKey + setMeta pattern), never TipTap mark/node mutations. Applying bold/italic/etc. as a "highlight" modifies the Y.Doc, gets auto-saved, and corrupts the author's text. Use `debugDecoKey` plugin or create a new PluginKey for new visual overlays.
+
 ### Time breaks are wrapping nodes, not dividers
 A time break is a **wrapping** block node (like blockquote), not a single divider. It has a start divider (with editable label), content area, and end divider. Content inside the wrapper is the time-jumped text. This clearly delineates the region and prevents ambiguity about where the time jump ends. Nesting is prevented by checking parent nodes in `insertTimeBreak`.
 
 ### Right-click context menu
 The editor has a custom context menu (`handleContextMenu` in Editor.svelte) that adapts based on what was right-clicked: entity words get "Go to definition", "Find references", and "Set state value" (creates a state checkpoint); misspelled words get "Spelling & Synonyms..." and "Add to dictionary"; all words get "Synonyms..." and entity creation options; "Add a note" is always available. The WordModal component is a large modal with flowing pill grids for both spelling suggestions and synonyms.
 
-### Decoration coexistence (four independent plugin systems)
-Four separate ProseMirror plugins manage decorations/interactions independently: `entityHighlightKey` for entity highlights, `spellCheckKey` for red squiggly underlines, `commentDecoKey` for comment highlights, and `stateMarkerDecoKey` for state marker click handling. The `applyingDecorations` flag prevents entity/spell decorations from triggering infinite loops. Each plugin has its own PluginKey and state management.
+### Decoration coexistence (five independent plugin systems)
+Five separate ProseMirror plugins manage decorations/interactions independently: `entityHighlightKey` for entity highlights, `spellCheckKey` for red squiggly underlines, `commentDecoKey` for comment highlights, `stateMarkerDecoKey` for state marker click handling, and `debugDecoKey` for debug/analysis overlays (dialogue detection highlighting). The `applyingDecorations` flag prevents entity/spell decorations from triggering infinite loops. Each plugin has its own PluginKey and state management. Debug decorations are applied via `applyDebugDecorations()` and cleared by passing an empty array.
+
+### Entity notes use Y.Doc relative positions
+Entity notes (pinned excerpts) store Y.Doc relative positions (`y_start BLOB`, `y_end BLOB`) instead of text. These positions are created via `absolutePositionToRelativePosition()` from `y-prosemirror` and survive document edits — if text is inserted within a pinned range, the range expands to include it. Text is resolved live at display time via `relativePositionToAbsolutePosition()`. Notes for chapters not currently open show "Open chapter to view". Editor.svelte exposes `createRelativePositions()`, `resolveRelativePositions()`, and `getTextBetween()` for this.
+
+### Dialogue detection (live highlighting)
+The "Dialogue Detection" tool in AnalysisPanel highlights all detected dialogue in the editor using the `debugDecoKey` ProseMirror plugin. Detection runs entirely in JS using `buildTextMap` text — no Rust round-trip, positions are guaranteed correct. Quote marks get a darker highlight, inner dialogue text gets a lighter highlight. The highlighting recalculates live on edit (300ms debounce) so authors can fix mismatched quotes and see the detection update in real-time.
+
+### Charts use Canvas 2D (no library)
+All charts across the app (chapter analysis, heatmap, pacing waveforms) use raw `canvas.getContext('2d')` calls. No chart library. The design system uses: `#faf8f5` background, `#2d6a5e` teal for primary data, `#d97706` amber for secondary, `#6b6560` for labels, Libre Baskerville for titles, Source Sans 3 for UI text.
 
 ### Writing stats tracking
 On every content save (500ms debounce), the project page computes word count delta and calls `logWritingActivity()`. The Rust side updates `daily_stats` atomically. Active time is computed from gaps between consecutive activities (capped at session_gap_minutes).
@@ -299,9 +323,35 @@ App-level settings (projects folder, panel widths) are stored in `settings.json`
 
 ## Common Patterns
 
+### Shared text utilities (`text_utils.rs`) — CRITICAL
+
+All text analysis that needs dialogue or sentence boundaries MUST use the shared functions in `text_utils.rs`. Do not implement your own splitting logic.
+
+**`extract_dialogue(plain) → Vec<DialogueSpan>`** — Finds all dialogue spans in plain text. Handles straight quotes, curly quotes, guillemets, CJK brackets, and mixed quote styles. Uses heuristics to disambiguate straight `"` as opener vs closer (checks if next char is a letter). Caps at 500 chars per span to prevent runaway mismatched quotes. Used by: dialogue search, chapter analysis (dialogue/narrative split), adverb analysis.
+
+**`extract_sentences(plain) → Vec<Sentence>`** — Robust sentence extraction. Handles abbreviations (Mr. Mrs. Dr. etc.), ellipsis, decimal numbers, initials (J.K.), multiple punctuation (!! ??), closing quotes after punctuation. Returns text, char_start, char_end, word_count per sentence. Used by: chapter analysis, pacing analysis, similar phrasing, heatmap.
+
+**`count_words(text) → usize`** — Word counting utility.
+
+### Analysis tools (`analysis.rs`)
+
+All analysis commands live in `analysis.rs`, separate from the core entity scanner. This keeps the scanner focused on Aho-Corasick matching.
+
+**Inline tools** (results in the right panel, clickable to navigate):
+- `word_frequency` — word repetition counts with per-chapter breakdown
+- `find_similar_phrases` — sentence similarity detection via Jaccard + LCS
+- `adverb_analysis` — finds adverbs in dialogue attribution near speech verbs
+
+**Popup window tools** (launch separate windows):
+- `chapter_analysis` — word counts, dialogue/narrative split, sentence stats, vocabulary density
+- `generate_heatmap` — entity mention grids (chapter-level and sentence-level)
+- `pacing_analysis` — sentence length waveforms per chapter with navigation
+
+**Analysis tool selector** in AnalysisPanel uses a grouped dropdown menu (not tabs) to scale to many tools. Groups: Repetition, Style, Overview. To add a new tool: add an entry to the `analysisTools` array, add the `{:else if subTab === 'mytool'}` view, and add the Rust command if needed.
+
 ### Adding a new Tauri command
 
-1. Add the function to `src-tauri/src/db.rs` (or `scanner.rs`, `ydoc.rs`)
+1. Add the function to the appropriate Rust file: `db.rs` (data), `scanner.rs` (entity scanning), `analysis.rs` (analysis tools), `text_utils.rs` (shared text utilities), `ydoc.rs` (Y.Doc operations)
 2. Add the `#[tauri::command]` wrapper in `src-tauri/src/lib.rs`
 3. Register it in the `invoke_handler![]` macro in `lib.rs`
 4. Add the JS wrapper in `src/lib/db.js`
@@ -316,12 +366,14 @@ App-level settings (projects folder, panel widths) are stored in `settings.json`
 5. Add `:global(html), :global(body) { overflow: auto !important; height: auto !important; }` to enable scrolling
 6. If the window reads chapter content, convert Y.Doc bytes to HTML via `yDocToProsemirrorJSON()` + `generateHTML()`
 
-### Adding a new analysis sub-tab
+### Adding a new analysis tool
 
-1. Add state variables in `AnalysisPanel.svelte`
-2. Add the sub-tab button in the `analysis-sub-tabs` div
-3. Add the `{:else if subTab === 'mytab'}` view
-4. If it needs Rust processing, add the command following the pattern above
+1. Add the tool entry to the `analysisTools` array in `AnalysisPanel.svelte` (grouped by category)
+2. Add state variables for the tool in the `<script>` section
+3. Add the `{:else if subTab === 'mytool'}` view in the template
+4. If it needs Rust processing, add the command to `analysis.rs` and register it
+5. For popup tools: create a route in `src/routes/`, add window label to `capabilities/default.json`
+6. For inline tools with navigation: pass `ongotochapter(chapterId, searchText, charPositionHint)`
 
 ### Adding a new right panel tab
 

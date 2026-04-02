@@ -45,33 +45,22 @@
   // Dialogue detection highlight state
   let dialogueHighlightActive = $state(false);
 
-  function toggleDialogueHighlight() {
-    const ed = editorRef?.getEditor();
-    if (!ed || !activeChapter) return;
+  const DIALOGUE_OPENERS = new Set(['"', '\u201C', '\u201E', '\u00AB', '\u300C']);
+  const DIALOGUE_CLOSER_MAP = {
+    '"': new Set(['"']),
+    '\u201C': new Set(['\u201D', '"']),
+    '\u201E': new Set(['\u201D', '\u201C']),
+    '\u00AB': new Set(['\u00BB']),
+    '\u300C': new Set(['\u300D']),
+  };
 
-    if (dialogueHighlightActive) {
-      editorRef?.setDebugDecorations([]);
-      dialogueHighlightActive = false;
-      return;
-    }
-
-    // Detect dialogue directly from PM doc text — positions are guaranteed correct
+  function computeDialogueRanges(ed) {
     const { text, posMap } = buildTextMap(ed.state.doc);
-    const openers = new Set(['"', '\u201C', '\u201E', '\u00AB', '\u300C']);
-    const closerMap = {
-      '"': new Set(['"']),
-      '\u201C': new Set(['\u201D', '"']),
-      '\u201E': new Set(['\u201D', '\u201C']),
-      '\u00AB': new Set(['\u00BB']),
-      '\u300C': new Set(['\u300D']),
-    };
-
     const ranges = [];
     let i = 0;
     while (i < text.length) {
       const ch = text[i];
-      if (openers.has(ch)) {
-        // For straight quotes: check next char is a letter (opening heuristic)
+      if (DIALOGUE_OPENERS.has(ch)) {
         if (ch === '"') {
           const next = i + 1 < text.length ? text[i + 1] : ' ';
           if (!/[a-zA-Z\u00C0-\u024F\u2014'\u2018\u2019]/.test(next)) {
@@ -79,21 +68,16 @@
             continue;
           }
         }
-
-        const validClosers = closerMap[ch];
+        const validClosers = DIALOGUE_CLOSER_MAP[ch];
         let j = i + 1;
         let found = false;
         while (j < text.length && j - i < 500) {
           if (validClosers.has(text[j])) {
-            // Ensure there's actual content
             if (j - i > 2) {
-              // Opening quote mark — dark highlight
               ranges.push({ from: posMap[i], to: posMap[i] + 1, class: 'debug-highlight-quote' });
-              // Inner dialogue text — light highlight
               if (i + 1 < j) {
                 ranges.push({ from: posMap[i + 1], to: posMap[j - 1] + 1, class: 'debug-highlight-inner' });
               }
-              // Closing quote mark — dark highlight
               ranges.push({ from: posMap[j], to: posMap[j] + 1, class: 'debug-highlight-quote' });
             }
             i = j + 1;
@@ -106,8 +90,27 @@
       }
       i++;
     }
+    return ranges;
+  }
 
-    editorRef?.setDebugDecorations(ranges);
+  function refreshDialogueHighlight() {
+    if (!dialogueHighlightActive) return;
+    const ed = editorRef?.getEditor();
+    if (!ed) return;
+    editorRef?.setDebugDecorations(computeDialogueRanges(ed));
+  }
+
+  function toggleDialogueHighlight() {
+    const ed = editorRef?.getEditor();
+    if (!ed || !activeChapter) return;
+
+    if (dialogueHighlightActive) {
+      editorRef?.setDebugDecorations([]);
+      dialogueHighlightActive = false;
+      return;
+    }
+
+    editorRef?.setDebugDecorations(computeDialogueRanges(ed));
     dialogueHighlightActive = true;
   }
 
@@ -885,10 +888,19 @@
   // Word count cache: chapterId -> count (updated on save and init)
   let wordCounts = $state({});
 
+  let dialogueRefreshTimer = null;
+
   function handleContentChange(content) {
     if (!activeChapter) return;
     activeChapter = { ...activeChapter, content };
     openTabs = openTabs.map(t => t.id === activeChapter.id ? { ...t, content } : t);
+
+    // Refresh dialogue highlighting on edit (debounced)
+    if (dialogueHighlightActive) {
+      clearTimeout(dialogueRefreshTimer);
+      dialogueRefreshTimer = setTimeout(refreshDialogueHighlight, 300);
+    }
+
     clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
       updateChapterContent(activeChapter.id, content);
