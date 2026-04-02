@@ -1167,11 +1167,17 @@
   }
 
   /* Time breaks */
-  .editor-page :global(.time-break) {
+  /* Time break wrapper (region) */
+  .editor-page :global(.time-break-wrapper) {
+    margin: 16px 0;
+    border-left: 3px solid rgba(45, 106, 94, 0.2);
+    padding-left: 0;
+  }
+  .editor-page :global(.time-break-divider) {
     display: flex;
     align-items: center;
     gap: 12px;
-    margin: 28px 0;
+    padding: 6px 0;
     user-select: none;
     cursor: default;
   }
@@ -1199,7 +1205,19 @@
     background: rgba(45, 106, 94, 0.1);
     border-color: rgba(45, 106, 94, 0.3);
   }
-  .editor-page :global(.ProseMirror-selectednode.time-break) {
+  .editor-page :global(.time-break-end-label) {
+    font-family: 'Source Sans 3', sans-serif;
+    font-size: 11px;
+    color: rgba(45, 106, 94, 0.5);
+    font-style: italic;
+    white-space: nowrap;
+    padding: 2px 8px;
+  }
+  .editor-page :global(.time-break-content) {
+    padding: 4px 12px;
+    min-height: 1.5em;
+  }
+  .editor-page :global(.ProseMirror-selectednode.time-break-wrapper) {
     outline: 2px solid rgba(45, 106, 94, 0.4);
     outline-offset: 4px;
     border-radius: 4px;

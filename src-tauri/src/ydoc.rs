@@ -105,61 +105,78 @@ pub fn extract_time_sections(doc: &Doc) -> Vec<TimeSection> {
     };
 
     let mut sections = Vec::new();
-    let mut current_text = String::new();
-    let mut current_index: i64 = 0;
-    let mut current_label = String::new();
-    let mut current_is_flow = true;
+    let mut flow_text = String::new();
+    let mut section_index: i64 = 0;
 
+    // Walk top-level children. timeBreak is now a wrapping node:
+    // - Regular blocks (paragraphs, headings) are flow text
+    // - timeBreak nodes contain the time-jumped text as children
     for child in fragment.children(&txn) {
         match &child {
             XmlOut::Element(el) => {
                 let tag = el.tag();
                 if tag.as_ref() == "timeBreak" {
-                    // Finalize current section
-                    let wc = current_text.split(|c: char| !c.is_alphanumeric() && c != '\'')
+                    // Finalize flow text accumulated so far as a flow section
+                    if !flow_text.is_empty() || section_index == 0 {
+                        let wc = flow_text.split(|c: char| !c.is_alphanumeric() && c != '\'')
+                            .filter(|w| !w.is_empty()).count() as i64;
+                        let preview = flow_text.chars().take(200).collect::<String>();
+                        sections.push(TimeSection {
+                            section_index,
+                            label: String::new(),
+                            is_flow: true,
+                            preview_text: preview.trim().to_string(),
+                            word_count: wc,
+                        });
+                        section_index += 1;
+                        flow_text.clear();
+                    }
+
+                    // Extract the timeBreak's content as a time-jumped section
+                    let label = el.get_attribute(&txn, "label").unwrap_or_default();
+                    let mut tb_text = String::new();
+                    for inner in el.children(&txn) {
+                        walk_xml_out(&txn, &inner, &mut tb_text);
+                    }
+                    let wc = tb_text.split(|c: char| !c.is_alphanumeric() && c != '\'')
                         .filter(|w| !w.is_empty()).count() as i64;
-                    let preview = current_text.chars().take(200).collect::<String>();
+                    let preview = tb_text.chars().take(200).collect::<String>();
                     sections.push(TimeSection {
-                        section_index: current_index,
-                        label: current_label.clone(),
-                        is_flow: current_is_flow,
+                        section_index,
+                        label,
+                        is_flow: false,
                         preview_text: preview.trim().to_string(),
                         word_count: wc,
                     });
-
-                    // Start new section
-                    current_index += 1;
-                    // Read label attribute from the timeBreak node
-                    current_label = el.get_attribute(&txn, "label").unwrap_or_default();
-                    current_is_flow = current_label.is_empty();
-                    current_text.clear();
+                    section_index += 1;
                 } else {
-                    // Accumulate text from this block
-                    if !current_text.is_empty() {
-                        current_text.push(' ');
+                    // Accumulate flow text
+                    if !flow_text.is_empty() {
+                        flow_text.push(' ');
                     }
-                    walk_xml_out(&txn, &child, &mut current_text);
+                    walk_xml_out(&txn, &child, &mut flow_text);
                 }
             }
             _ => {
-                walk_xml_out(&txn, &child, &mut current_text);
+                walk_xml_out(&txn, &child, &mut flow_text);
             }
         }
     }
 
-    // Finalize last section
-    let wc = current_text.split(|c: char| !c.is_alphanumeric() && c != '\'')
-        .filter(|w| !w.is_empty()).count() as i64;
-    let preview = current_text.chars().take(200).collect::<String>();
-    sections.push(TimeSection {
-        section_index: current_index,
-        label: current_label,
-        is_flow: current_is_flow,
-        preview_text: preview.trim().to_string(),
-        word_count: wc,
-    });
+    // Finalize remaining flow text
+    if !flow_text.is_empty() || sections.is_empty() {
+        let wc = flow_text.split(|c: char| !c.is_alphanumeric() && c != '\'')
+            .filter(|w| !w.is_empty()).count() as i64;
+        let preview = flow_text.chars().take(200).collect::<String>();
+        sections.push(TimeSection {
+            section_index,
+            label: String::new(),
+            is_flow: true,
+            preview_text: preview.trim().to_string(),
+            word_count: wc,
+        });
+    }
 
-    // If there's only one section and it has no time breaks, that's the whole chapter
     sections
 }
 
