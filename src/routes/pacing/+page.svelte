@@ -1,11 +1,17 @@
 <script>
   import { onMount } from 'svelte';
   import { pacingAnalysis } from '$lib/db.js';
+  import { emitTo } from '@tauri-apps/api/event';
+  import { getCurrentWindow } from '@tauri-apps/api/window';
 
   let data = $state(null);
   let loading = $state(true);
   let canvases = $state({});
+  let overlays = $state({});
   let smoothing = $state(3); // rolling average window
+
+  // Per-chart metadata for mouse interaction
+  let chartMeta = {};
 
   onMount(async () => {
     try {
@@ -45,13 +51,22 @@
     const ctx = canvas.getContext('2d');
     const dpr = window.devicePixelRatio || 1;
     const containerW = canvas.parentElement?.clientWidth || 700;
-    const logicalW = Math.max(containerW - 16, 400);
+    const logicalW = Math.max(containerW, 400);
     const chartH = 140;
     const padTop = 25;
     const padBottom = 30;
     const padLeft = 40;
     const padRight = 15;
     const logicalH = chartH + padTop + padBottom;
+    const drawW = logicalW - padLeft - padRight;
+    const stepX = drawW / Math.max(raw.length - 1, 1);
+    const maxVal = Math.max(...vals, 1);
+
+    // Store geometry for mouse interaction
+    chartMeta[chapter.chapter_id] = {
+      padLeft, padTop, chartH, drawW, stepX, maxVal, raw, vals,
+      chapter, logicalW, logicalH, padRight
+    };
 
     canvas.width = logicalW * dpr;
     canvas.height = logicalH * dpr;
@@ -59,13 +74,18 @@
     canvas.style.height = logicalH + 'px';
     ctx.scale(dpr, dpr);
 
+    // Size the overlay to match
+    const overlay = overlays[chapter.chapter_id];
+    if (overlay) {
+      overlay.width = logicalW * dpr;
+      overlay.height = logicalH * dpr;
+      overlay.style.width = logicalW + 'px';
+      overlay.style.height = logicalH + 'px';
+    }
+
     // Background
     ctx.fillStyle = '#faf8f5';
     ctx.fillRect(0, 0, logicalW, logicalH);
-
-    const maxVal = Math.max(...vals, 1);
-    const drawW = logicalW - padLeft - padRight;
-    const stepX = drawW / Math.max(vals.length - 1, 1);
 
     // Y-axis grid lines
     ctx.strokeStyle = '#e5e1da';
@@ -116,8 +136,7 @@
     for (let i = 0; i < vals.length; i++) {
       const x = padLeft + i * stepX;
       const y = padTop + chartH * (1 - vals[i] / maxVal);
-      if (i === 0) ctx.lineTo(x, y);
-      else ctx.lineTo(x, y);
+      ctx.lineTo(x, y);
     }
     ctx.lineTo(padLeft + (vals.length - 1) * stepX, padTop + chartH);
     ctx.closePath();
@@ -150,6 +169,118 @@
     ctx.fillStyle = '#6b6560';
     ctx.font = '10px Source Sans 3, system-ui';
     ctx.fillText(`variation: ${cv}%`, logicalW - padRight, logicalH - 5);
+  }
+
+  function handleMouseMove(e, chapterId) {
+    const meta = chartMeta[chapterId];
+    const overlay = overlays[chapterId];
+    if (!meta || !overlay) return;
+
+    const rect = overlay.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left;
+    const mouseY = e.clientY - rect.top;
+
+    const ctx = overlay.getContext('2d');
+    const dpr = window.devicePixelRatio || 1;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, meta.logicalW, meta.logicalH);
+
+    // Find nearest sentence
+    const idx = Math.round((mouseX - meta.padLeft) / meta.stepX);
+    if (idx < 0 || idx >= meta.raw.length) {
+      overlay.style.cursor = 'default';
+      return;
+    }
+
+    const x = meta.padLeft + idx * meta.stepX;
+    const y = meta.padTop + meta.chartH * (1 - meta.vals[idx] / meta.maxVal);
+    const dist = Math.sqrt((mouseX - x) ** 2 + (mouseY - y) ** 2);
+
+    if (dist > 30) {
+      overlay.style.cursor = 'default';
+      return;
+    }
+
+    overlay.style.cursor = 'pointer';
+
+    // Dot
+    ctx.beginPath();
+    ctx.arc(x, y, 4, 0, Math.PI * 2);
+    ctx.fillStyle = '#2d6a5e';
+    ctx.fill();
+    ctx.strokeStyle = 'white';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // Tooltip
+    const words = meta.raw[idx];
+    const label = `${words} word${words !== 1 ? 's' : ''} — click to go`;
+    ctx.font = '11px Source Sans 3, system-ui';
+    const tw = ctx.measureText(label).width;
+    const tipW = tw + 12;
+    const tipH = 22;
+    let tipX = x - tipW / 2;
+    let tipY = y - tipH - 8;
+    if (tipX < 2) tipX = 2;
+    if (tipX + tipW > meta.logicalW - 2) tipX = meta.logicalW - tipW - 2;
+    if (tipY < 2) tipY = y + 12;
+
+    ctx.fillStyle = 'rgba(45, 42, 38, 0.9)';
+    ctx.beginPath();
+    ctx.roundRect(tipX, tipY, tipW, tipH, 4);
+    ctx.fill();
+
+    ctx.fillStyle = 'white';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(label, tipX + tipW / 2, tipY + tipH / 2);
+    ctx.textBaseline = 'alphabetic';
+  }
+
+  function handleMouseLeave(chapterId) {
+    const overlay = overlays[chapterId];
+    if (!overlay) return;
+    const meta = chartMeta[chapterId];
+    if (!meta) return;
+    const ctx = overlay.getContext('2d');
+    const dpr = window.devicePixelRatio || 1;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, meta.logicalW, meta.logicalH);
+    overlay.style.cursor = 'default';
+  }
+
+  async function handleClick(e, chapterId) {
+    const meta = chartMeta[chapterId];
+    const overlay = overlays[chapterId];
+    if (!meta || !overlay) return;
+
+    const rect = overlay.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left;
+    const mouseY = e.clientY - rect.top;
+
+    const idx = Math.round((mouseX - meta.padLeft) / meta.stepX);
+    if (idx < 0 || idx >= meta.raw.length) return;
+
+    const x = meta.padLeft + idx * meta.stepX;
+    const y = meta.padTop + meta.chartH * (1 - meta.vals[idx] / meta.maxVal);
+    const dist = Math.sqrt((mouseX - x) ** 2 + (mouseY - y) ** 2);
+    if (dist > 30) return;
+
+    const charPos = meta.chapter.sentence_starts[idx];
+    try {
+      const nextStart = idx + 1 < meta.chapter.sentence_starts.length
+        ? meta.chapter.sentence_starts[idx + 1]
+        : charPos + 1;
+
+      await emitTo('main', 'navigate-to-position', {
+        chapterId: meta.chapter.chapter_id,
+        charStart: charPos,
+        charEnd: nextStart,
+      });
+      await getCurrentWindow().minimize();
+    } catch (err) {
+      console.warn('Failed to emit navigation event:', err);
+    }
   }
 </script>
 
@@ -186,7 +317,16 @@
           </div>
           {#if chapter.sentence_lengths.length > 0}
             <div class="chart-wrap">
-              <canvas bind:this={canvases[chapter.chapter_id]}></canvas>
+              <div class="chart-stack">
+                <canvas bind:this={canvases[chapter.chapter_id]}></canvas>
+                <canvas
+                  class="chart-overlay"
+                  bind:this={overlays[chapter.chapter_id]}
+                  onmousemove={(e) => handleMouseMove(e, chapter.chapter_id)}
+                  onmouseleave={() => handleMouseLeave(chapter.chapter_id)}
+                  onclick={(e) => handleClick(e, chapter.chapter_id)}
+                ></canvas>
+              </div>
             </div>
           {:else}
             <div class="chapter-empty">No sentences found</div>
@@ -261,7 +401,13 @@
     overflow-x: auto; border: 1px solid #e5e1da; border-radius: 6px;
     background: #faf8f5; padding: 0.5rem;
   }
-  .chart-wrap canvas { display: block; }
+  .chart-stack {
+    position: relative; width: 100%;
+  }
+  .chart-stack canvas { display: block; }
+  .chart-overlay {
+    position: absolute; top: 0; left: 0;
+  }
 
   .chapter-empty {
     font-size: 0.8rem; color: #9e9891; font-style: italic;

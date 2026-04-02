@@ -76,10 +76,13 @@
     const ctx = dialogueCanvas.getContext('2d');
     const dpr = window.devicePixelRatio || 1;
     const containerW = dialogueCanvas.parentElement?.clientWidth || 600;
-    const barW = Math.max(30, Math.min(60, (containerW - 80) / data.length));
+    const singleBarW = Math.max(14, Math.min(28, (containerW - 100) / (data.length * 2.5)));
+    const pairGap = 2; // gap between dialogue & narrative bars
+    const groupGap = singleBarW * 1.2; // gap between chapter groups
+    const pairW = singleBarW * 2 + pairGap;
     const chartH = 220;
-    const labelH = 70;
-    const logicalW = Math.max(containerW, 70 + data.length * (barW + 6));
+    const labelH = 90;
+    const logicalW = Math.max(containerW, 80 + data.length * (pairW + groupGap));
     const logicalH = chartH + labelH + 30;
 
     dialogueCanvas.width = logicalW * dpr;
@@ -90,20 +93,36 @@
     ctx.fillStyle = '#faf8f5';
     ctx.fillRect(0, 0, logicalW, logicalH);
 
-    const maxVal = Math.max(...data.map(d => d.total_words), 1);
+    const maxVal = Math.max(...data.map(d => Math.max(d.narrative_words, d.dialogue_words)), 1);
 
     for (let i = 0; i < data.length; i++) {
-      const x = 60 + i * (barW + 6);
+      const groupX = 60 + i * (pairW + groupGap);
       const narH = (data[i].narrative_words / maxVal) * chartH;
       const dlgH = (data[i].dialogue_words / maxVal) * chartH;
 
+      // Narrative bar
       ctx.fillStyle = '#2d6a5e';
-      ctx.fillRect(x, chartH - narH - dlgH + 15, barW, narH);
-      ctx.fillStyle = '#d97706';
-      ctx.fillRect(x, chartH - dlgH + 15, barW, dlgH);
+      ctx.fillRect(groupX, chartH - narH + 15, singleBarW, narH);
 
+      // Dialogue bar
+      ctx.fillStyle = '#d97706';
+      ctx.fillRect(groupX + singleBarW + pairGap, chartH - dlgH + 15, singleBarW, dlgH);
+
+      // Percentages below bars
+      const total = data[i].total_words || 1;
+      const narPct = Math.round(data[i].narrative_words / total * 100);
+      const dlgPct = Math.round(data[i].dialogue_words / total * 100);
+
+      ctx.font = '9px Source Sans 3, system-ui';
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#2d6a5e';
+      ctx.fillText(`${narPct}%`, groupX + singleBarW / 2, chartH + 26);
+      ctx.fillStyle = '#d97706';
+      ctx.fillText(`${dlgPct}%`, groupX + singleBarW + pairGap + singleBarW / 2, chartH + 26);
+
+      // Chapter name
       ctx.save();
-      ctx.translate(x + barW / 2, chartH + 25);
+      ctx.translate(groupX + pairW / 2, chartH + 38);
       ctx.rotate(-Math.PI / 4);
       ctx.textAlign = 'right';
       ctx.font = '11px Source Sans 3, system-ui';
@@ -112,6 +131,7 @@
       ctx.restore();
     }
 
+    // Legend
     ctx.fillStyle = '#2d6a5e'; ctx.fillRect(logicalW - 180, 8, 12, 12);
     ctx.fillStyle = '#6b6560'; ctx.font = '11px Source Sans 3, system-ui'; ctx.textAlign = 'left';
     ctx.fillText('Narrative', logicalW - 164, 18);
@@ -190,17 +210,16 @@
         <div class="chart-wrap"><canvas bind:this={dialogueCanvas}></canvas></div>
       </div>
 
-      <div class="chart-row">
-        <div class="chart-section half">
-          <h2 class="chart-title">Avg Sentence Length</h2>
-          <p class="chart-hint">Longer sentences = denser prose. Short = punchy/action.</p>
-          <div class="chart-wrap"><canvas bind:this={sentenceLenCanvas}></canvas></div>
-        </div>
-        <div class="chart-section half">
-          <h2 class="chart-title">Vocabulary Density</h2>
-          <p class="chart-hint">% of unique words. Lower = more repetitive language.</p>
-          <div class="chart-wrap"><canvas bind:this={vocabCanvas}></canvas></div>
-        </div>
+      <div class="chart-section">
+        <h2 class="chart-title">Avg Sentence Length</h2>
+        <p class="chart-hint">Longer sentences = denser prose. Short = punchy/action.</p>
+        <div class="chart-wrap"><canvas bind:this={sentenceLenCanvas}></canvas></div>
+      </div>
+
+      <div class="chart-section">
+        <h2 class="chart-title">Vocabulary Density</h2>
+        <p class="chart-hint">% of unique words. Lower = more repetitive language.</p>
+        <div class="chart-wrap"><canvas bind:this={vocabCanvas}></canvas></div>
       </div>
 
       <!-- Detail table -->

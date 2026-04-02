@@ -18,6 +18,7 @@
   import { createChapterDoc, destroyDoc } from '$lib/ydoc.js';
   import { yDocToProsemirrorJSON } from 'y-prosemirror';
   import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
+  import { listen } from '@tauri-apps/api/event';
   import SearchPanel from '$lib/components/SearchPanel.svelte';
   import AnalysisPanel from '$lib/components/AnalysisPanel.svelte';
   import { addToast } from '$lib/toast.js';
@@ -191,6 +192,16 @@
     }
 
     projectLoading = false;
+
+    // Listen for cross-window navigation events (from popup analysis windows)
+    listen('navigate-to-position', (event) => {
+      const p = event.payload;
+      if (p.charStart !== undefined) {
+        handleGoToChapter(p.chapterId, '', { charStart: p.charStart, charEnd: p.charEnd });
+      } else {
+        handleGoToChapter(p.chapterId, p.searchText, p.charPosition);
+      }
+    });
 
     // Set up scroll listener for auto-checkpointing
     setTimeout(() => {
