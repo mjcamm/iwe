@@ -82,6 +82,7 @@ dependencies = [
  "aho-corasick",
  "genpdf",
  "log",
+ "phf 0.11.3",
  "regex",
  "rusqlite",
  "serde",

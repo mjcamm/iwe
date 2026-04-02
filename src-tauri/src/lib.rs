@@ -4,6 +4,7 @@ mod text_utils;
 mod palettes;
 mod scanner;
 mod spellcheck;
+mod syllable_data;
 mod synonyms;
 mod wordlists;
 mod ydoc;
@@ -795,6 +796,7 @@ pub fn run() {
             analysis::chapter_analysis,
             analysis::pacing_analysis,
             analysis::adverb_analysis,
+            analysis::readability_analysis,
             analysis::get_chapter_dialogue,
             analysis::debug_dialogue_spans,
             scanner::debug_stripped_text,

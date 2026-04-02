@@ -9,7 +9,8 @@
     "stats*",
     "print*",
     "timeflow*",
-    "pacing*"
+    "pacing*",
+    "readability*"
   ],
   "permissions": [
     "core:default",

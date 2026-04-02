@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::db::{self, AppState};
 use crate::scanner::{chapter_plain_text, scan_plain, build_terms_all, SearchTerm};
+use crate::syllable_data;
 use crate::text_utils;
 use crate::wordlists;
 use crate::ydoc;
@@ -1436,5 +1437,160 @@ pub fn adverb_analysis(state: tauri::State<'_, AppState>) -> Result<AdverbAnalys
         redundant_count,
         top_adverbs,
         instances,
+    })
+}
+
+// ---- Readability analysis (Flesch-Kincaid) ----
+
+/// Count syllables for a word. Uses the compiled phf lookup first, falls back to
+/// vowel-group heuristic with silent-e adjustment.
+fn count_syllables(word: &str) -> usize {
+    let lower = word.to_lowercase();
+    let clean: &str = lower.trim_matches(|c: char| !c.is_alphabetic());
+    if clean.is_empty() { return 1; }
+
+    if let Some(&count) = syllable_data::SYLLABLE_MAP.get(clean) {
+        return count as usize;
+    }
+
+    // Vowel-group heuristic
+    let chars: Vec<char> = clean.chars().collect();
+    let len = chars.len();
+    let mut count = 0usize;
+    let mut prev_vowel = false;
+
+    for (i, &ch) in chars.iter().enumerate() {
+        let is_vowel = matches!(ch, 'a' | 'e' | 'i' | 'o' | 'u' | 'y');
+        if is_vowel && !prev_vowel {
+            count += 1;
+        }
+        prev_vowel = is_vowel;
+        let _ = i; // used below
+    }
+
+    // Silent-e: if word ends with 'e' (not "le") and we counted > 1, subtract 1
+    if len > 2 && chars[len - 1] == 'e' && !matches!(chars[len - 2], 'a' | 'e' | 'i' | 'o' | 'u')
+        && !(chars[len - 2] == 'l')
+    {
+        if count > 1 { count -= 1; }
+    }
+
+    // Words ending in -ed: usually not a separate syllable unless preceded by t or d
+    if len > 3 && chars[len - 2] == 'e' && chars[len - 1] == 'd' {
+        let before_ed = chars[len - 3];
+        if before_ed != 't' && before_ed != 'd' {
+            if count > 1 { count -= 1; }
+        }
+    }
+
+    if count == 0 { 1 } else { count }
+}
+
+#[derive(Serialize)]
+pub struct ReadabilityChapter {
+    pub chapter_id: i64,
+    pub chapter_title: String,
+    pub grade_level: f64,
+    pub total_words: usize,
+    pub total_sentences: usize,
+    pub total_syllables: usize,
+    pub avg_words_per_sentence: f64,
+    pub avg_syllables_per_word: f64,
+    /// Per-sentence data for the detail chart
+    pub sentence_grades: Vec<f64>,
+    pub sentence_starts: Vec<usize>,
+    pub sentence_texts: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct ReadabilityAnalysis {
+    pub manuscript_grade: f64,
+    pub manuscript_words: usize,
+    pub manuscript_sentences: usize,
+    pub manuscript_syllables: usize,
+    pub chapters: Vec<ReadabilityChapter>,
+}
+
+fn flesch_kincaid_grade(words: usize, sentences: usize, syllables: usize) -> f64 {
+    if sentences == 0 || words == 0 { return 0.0; }
+    let wps = words as f64 / sentences as f64;
+    let spw = syllables as f64 / words as f64;
+    0.39 * wps + 11.8 * spw - 15.59
+}
+
+#[tauri::command]
+pub fn readability_analysis(state: tauri::State<'_, AppState>) -> Result<ReadabilityAnalysis, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    let chapters = db::list_chapters(conn).map_err(|e| e.to_string())?;
+
+    let mut total_words = 0usize;
+    let mut total_sentences = 0usize;
+    let mut total_syllables = 0usize;
+    let mut chapter_results = Vec::new();
+
+    for chapter in &chapters {
+        let plain = chapter_plain_text(chapter)?;
+        let sentences = text_utils::extract_sentences(&plain);
+
+        let mut ch_words = 0usize;
+        let mut ch_syllables = 0usize;
+        let mut sentence_grades = Vec::new();
+        let mut sentence_starts = Vec::new();
+        let mut sentence_texts = Vec::new();
+
+        for sent in &sentences {
+            let words_in_sent: Vec<&str> = sent.text
+                .split(|c: char| !c.is_alphanumeric() && c != '\'')
+                .filter(|w| !w.is_empty())
+                .collect();
+            let wc = words_in_sent.len();
+            let sc: usize = words_in_sent.iter().map(|w| count_syllables(w)).sum();
+
+            ch_words += wc;
+            ch_syllables += sc;
+
+            // Per-sentence FK grade (using 1 sentence)
+            let grade = flesch_kincaid_grade(wc, 1, sc);
+            sentence_grades.push(grade);
+            sentence_starts.push(sent.char_start);
+            let text = if sent.text.len() > 60 {
+                sent.text[..60].to_string()
+            } else {
+                sent.text.clone()
+            };
+            sentence_texts.push(text);
+        }
+
+        let ch_sentences = sentences.len();
+        let grade = flesch_kincaid_grade(ch_words, ch_sentences, ch_syllables);
+
+        total_words += ch_words;
+        total_sentences += ch_sentences;
+        total_syllables += ch_syllables;
+
+        chapter_results.push(ReadabilityChapter {
+            chapter_id: chapter.id,
+            chapter_title: chapter.title.clone(),
+            grade_level: (grade * 10.0).round() / 10.0,
+            total_words: ch_words,
+            total_sentences: ch_sentences,
+            total_syllables: ch_syllables,
+            avg_words_per_sentence: if ch_sentences > 0 { (ch_words as f64 / ch_sentences as f64 * 10.0).round() / 10.0 } else { 0.0 },
+            avg_syllables_per_word: if ch_words > 0 { (ch_syllables as f64 / ch_words as f64 * 100.0).round() / 100.0 } else { 0.0 },
+            sentence_grades,
+            sentence_starts,
+            sentence_texts,
+        });
+    }
+
+    let manuscript_grade = flesch_kincaid_grade(total_words, total_sentences, total_syllables);
+
+    Ok(ReadabilityAnalysis {
+        manuscript_grade: (manuscript_grade * 10.0).round() / 10.0,
+        manuscript_words: total_words,
+        manuscript_sentences: total_sentences,
+        manuscript_syllables: total_syllables,
+        chapters: chapter_results,
     })
 }

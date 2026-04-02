@@ -15,6 +15,7 @@
     ]},
     { group: 'Style', items: [
       { id: 'adverbs', icon: 'bi-pencil', label: 'Adverb Density' },
+      { id: 'readability', icon: 'bi-mortarboard', label: 'Readability Score' },
       { id: 'dialogue-detect', icon: 'bi-chat-quote', label: 'Dialogue Detection' },
     ]},
     { group: 'Overview', items: [
@@ -272,6 +273,20 @@
       });
     } catch (e) {
       console.error('Failed to open pacing analysis:', e);
+    }
+  }
+
+  async function launchReadability() {
+    try {
+      new WebviewWindow('readability-' + Date.now(), {
+        url: '/readability',
+        title: 'Readability Score',
+        width: 1200,
+        height: 800,
+        resizable: true,
+      });
+    } catch (e) {
+      console.error('Failed to open readability analysis:', e);
     }
   }
 
@@ -585,6 +600,14 @@
       <p class="hm-setup-desc">Visualise the rhythm of your prose. Sentence length waveforms show where your writing builds tension, slows down, or flatlines.</p>
       <button class="rep-scan-btn" onclick={launchPacing}>
         <i class="bi bi-activity"></i> Open Pacing Analysis
+      </button>
+    </div>
+
+  {:else if subTab === 'readability'}
+    <div class="hm-setup">
+      <p class="hm-setup-desc">Flesch-Kincaid grade level measures prose complexity based on sentence length and syllable count. Consistency across chapters matters more than any single number.</p>
+      <button class="rep-scan-btn" onclick={launchReadability}>
+        <i class="bi bi-mortarboard"></i> Open Readability Score
       </button>
     </div>
 

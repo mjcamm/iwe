@@ -228,6 +228,10 @@ export async function adverbAnalysis() {
   return invoke('adverb_analysis');
 }
 
+export async function readabilityAnalysis() {
+  return invoke('readability_analysis');
+}
+
 export async function getChapterDialogue(chapterId) {
   return invoke('get_chapter_dialogue', { chapterId });
 }
