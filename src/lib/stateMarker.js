@@ -9,7 +9,8 @@ export const StateMarker = Node.create({
   group: 'inline',
   inline: true,
   atom: true,
-  selectable: false,
+  selectable: true,
+  draggable: true,
 
   addAttributes() {
     return {
@@ -48,8 +49,8 @@ export const StateMarker = Node.create({
 
       const icon = document.createElement('span');
       icon.className = 'state-marker-icon';
-      icon.textContent = node.attrs.stateType === 'relationship' ? '\u25C6' : '\u25C6';
-      icon.title = node.attrs.stateType === 'fact' ? 'Fact marker' : 'Relationship marker';
+      icon.textContent = '\u25C6';
+      icon.title = 'State Marker';
       dom.appendChild(icon);
 
       return {
@@ -58,7 +59,7 @@ export const StateMarker = Node.create({
           if (updatedNode.type.name !== 'stateMarker') return false;
           dom.setAttribute('data-state-id', updatedNode.attrs.stateId);
           dom.setAttribute('data-state-type', updatedNode.attrs.stateType);
-          icon.title = updatedNode.attrs.stateType === 'fact' ? 'Fact marker' : 'Relationship marker';
+          icon.title = 'State Marker';
           return true;
         },
         stopEvent() { return false; },

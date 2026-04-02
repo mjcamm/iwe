@@ -643,6 +643,31 @@
     editorRef?.removeStateMarker(stateId);
   }
 
+  async function handleNavToMarker(markerId, chapterId) {
+    // Open the chapter if needed, then scroll to the marker
+    if (activeChapter?.id !== chapterId) {
+      await selectChapter(chapterId);
+      // Wait for editor to load
+      await new Promise(r => setTimeout(r, 200));
+    }
+    const positions = editorRef?.getStateMarkerPositions() || [];
+    const found = positions.find(p => p.stateId === markerId);
+    if (found) {
+      const ed = editorRef?.getEditor();
+      if (ed) {
+        ed.chain().focus().setTextSelection(found.pos).run();
+        setTimeout(() => {
+          const scrollEl = document.querySelector('.editor-scroll');
+          if (!scrollEl || !ed.view) return;
+          const coords = ed.view.coordsAtPos(found.pos);
+          const rect = scrollEl.getBoundingClientRect();
+          const target = coords.top - rect.top + scrollEl.scrollTop - rect.height / 3;
+          scrollEl.scrollTo({ top: target, behavior: 'smooth' });
+        }, 50);
+      }
+    }
+  }
+
   async function handleStateMarkerClick(stateId, stateType) {
     try {
       const marker = await getStateMarker(stateId);
@@ -939,6 +964,7 @@
           ongotochapter={handleGoToChapter}
           onclearselection={() => { selectedText = ''; lastSelectedText = ''; editorRef?.clearSelection(); }}
           ondeletestate={handleDeleteState}
+          onnavtomarker={handleNavToMarker}
         />
       {:else if rightPanelTab === 'search'}
         <SearchPanel

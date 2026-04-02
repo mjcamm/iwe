@@ -1142,20 +1142,27 @@
   /* State markers */
   .editor-page :global(.state-marker-anchor) {
     display: inline;
-    user-select: none;
+    user-select: all;
     cursor: pointer;
   }
   .editor-page :global(.state-marker-icon) {
     display: inline-block;
-    font-size: 10px;
+    font-size: 18px;
     color: #2d6a5e;
     vertical-align: middle;
     line-height: 1;
-    margin: 0 1px;
+    margin: 0 2px;
     opacity: 0.7;
     transition: opacity 0.2s;
   }
   .editor-page :global(.state-marker-anchor:hover .state-marker-icon) {
+    opacity: 1;
+  }
+  .editor-page :global(.state-marker-anchor.ProseMirror-selectednode .state-marker-icon),
+  .editor-page :global(.state-marker-anchor::selection),
+  .editor-page :global(.state-marker-anchor *::selection) {
+    background: Highlight;
+    color: HighlightText;
     opacity: 1;
   }
 

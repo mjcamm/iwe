@@ -20,6 +20,7 @@
     onctrlclickentity,
     onclearselection,
     ondeletestate,
+    onnavtomarker,
     chapters = [],
     focusStateTab = 0,
     focusStateId = null,
@@ -85,10 +86,12 @@
     const mid = activeMarkerId;
     if (mid && mid !== lastBuiltMarkerId && viewEntity && viewMarkers.length > 0) {
       lastBuiltMarkerId = mid;
+      showDeleteMarkerConfirm = false;
       buildEditRows(mid, viewEntity.id);
     }
     if (!mid) {
       lastBuiltMarkerId = null;
+      showDeleteMarkerConfirm = false;
     }
   });
 
@@ -295,6 +298,8 @@
   let resolvedIncoming = $state([]); // cursor-position-resolved incoming refs
   let stateFilterKey = $state('');
   let stateFilterValue = $state('');
+  let showDeleteMarkerConfirm = $state(false);
+  let stateSubView = $state('cursor'); // 'cursor' | 'all'
 
   async function showEntityView(entity) {
     viewEntity = entity;
@@ -1149,78 +1154,143 @@
                       Cancel
                     </button>
                   </div>
-                  <button class="btn-danger-subtle" onclick={() => handleDeleteMarker(marker.id)}>
-                    <i class="bi bi-trash"></i> Delete checkpoint
-                  </button>
+                  {#if showDeleteMarkerConfirm}
+                    <div class="delete-confirm">
+                      <p class="delete-confirm-msg">Delete this checkpoint?</p>
+                      <div class="delete-confirm-actions">
+                        <button class="btn-danger" onclick={() => handleDeleteMarker(marker.id)}>Delete</button>
+                        <button class="btn-author btn-author-subtle btn-author-sm" onclick={() => { showDeleteMarkerConfirm = false; }}>Cancel</button>
+                      </div>
+                    </div>
+                  {:else}
+                    <button class="btn-danger-subtle" onclick={() => { showDeleteMarkerConfirm = true; }}>
+                      <i class="bi bi-trash"></i> Delete checkpoint
+                    </button>
+                  {/if}
                 </div>
               </div>
             {/if}
           {:else}
-            <!-- Resolved state at cursor position -->
             <div class="state-view-container">
-              {#if resolvedState?.facts?.length > 0 || resolvedState?.entityRefs?.length > 0}
-                <div class="state-view-header">
+              <!-- Sub-view toggle -->
+              <div class="state-sub-tabs">
+                <button class="state-sub-tab" class:active={stateSubView === 'cursor'} onclick={() => stateSubView = 'cursor'}>
                   <i class="bi bi-crosshair"></i> State at cursor
-                </div>
-                <div class="state-filter-row">
-                  <input class="state-filter-input" bind:value={stateFilterKey} placeholder="Filter name..." />
-                  <input class="state-filter-input" bind:value={stateFilterValue} placeholder="Filter value..." />
-                </div>
-                <div class="state-resolved-list">
-                  {#if resolvedState?.facts?.length > 0}
-                    {#each resolvedState.facts.filter(f => {
-                      const kMatch = !stateFilterKey || f.key.toLowerCase().includes(stateFilterKey.toLowerCase());
-                      const vMatch = !stateFilterValue || f.value.toLowerCase().includes(stateFilterValue.toLowerCase());
-                      return kMatch && vMatch;
-                    }) as f}
-                      <div class="state-resolved-row">
-                        <div class="state-resolved-key">{f.key}</div>
-                        <div class="state-resolved-value">{f.value}</div>
-                      </div>
-                    {/each}
-                  {/if}
-                  {#if resolvedState?.entityRefs?.length > 0}
-                    {#each resolvedState.entityRefs.filter(r => {
-                      const kMatch = !stateFilterKey || r.refEntityName.toLowerCase().includes(stateFilterKey.toLowerCase());
-                      const vMatch = !stateFilterValue || (r.refActive ? 'active' : 'inactive').includes(stateFilterValue.toLowerCase());
-                      return kMatch && vMatch;
-                    }) as r}
-                      <div class="state-resolved-row state-resolved-ref">
-                        <div class="state-resolved-key">
-                          <i class="bi bi-link-45deg" style="font-size: 0.75rem;"></i>
-                          {r.refEntityName}
-                        </div>
-                        <div class="state-resolved-value" class:state-ref-inactive={!r.refActive}>
-                          {r.refActive ? 'Active' : 'Inactive'}
-                        </div>
-                      </div>
-                    {/each}
-                  {/if}
-                </div>
-              {:else if viewMarkers.length > 0}
-                <div class="view-notes-empty">
-                  No state values at this position. Checkpoints exist but are placed after the cursor.
-                </div>
-              {:else}
-                <div class="view-notes-empty">
-                  No state set. Right-click an entity mention and select "Set state value" to place a checkpoint.
-                </div>
-              {/if}
+                </button>
+                <button class="state-sub-tab" class:active={stateSubView === 'all'} onclick={() => stateSubView = 'all'}>
+                  <i class="bi bi-list-ul"></i> All state changes
+                </button>
+              </div>
 
-              {#if resolvedIncoming.length > 0}
-                <div class="state-incoming-section">
-                  <div class="state-incoming-header">
-                    <i class="bi bi-box-arrow-in-left"></i> Referenced by
+              {#if stateSubView === 'cursor'}
+                <!-- Resolved state at cursor position -->
+                {#if resolvedState?.facts?.length > 0 || resolvedState?.entityRefs?.length > 0}
+                  <div class="state-filter-row">
+                    <input class="state-filter-input" bind:value={stateFilterKey} placeholder="Filter name..." />
+                    <input class="state-filter-input" bind:value={stateFilterValue} placeholder="Filter value..." />
                   </div>
-                  {#each resolvedIncoming as ref}
-                    <div class="state-incoming-row">
-                      <div class="state-incoming-name">{ref.srcName}</div>
-                      <div class="state-incoming-status" class:state-ref-inactive={!ref.active}>
-                        {ref.active ? 'Active' : 'Inactive'}
+                  <div class="state-resolved-list">
+                    {#if resolvedState?.facts?.length > 0}
+                      {#each resolvedState.facts.filter(f => {
+                        const kMatch = !stateFilterKey || f.key.toLowerCase().includes(stateFilterKey.toLowerCase());
+                        const vMatch = !stateFilterValue || f.value.toLowerCase().includes(stateFilterValue.toLowerCase());
+                        return kMatch && vMatch;
+                      }) as f}
+                        <div class="state-resolved-row">
+                          <div class="state-resolved-key">{f.key}</div>
+                          <div class="state-resolved-value">{f.value}</div>
+                        </div>
+                      {/each}
+                    {/if}
+                    {#if resolvedState?.entityRefs?.length > 0}
+                      {#each resolvedState.entityRefs.filter(r => {
+                        const kMatch = !stateFilterKey || r.refEntityName.toLowerCase().includes(stateFilterKey.toLowerCase());
+                        const vMatch = !stateFilterValue || (r.refActive ? 'active' : 'inactive').includes(stateFilterValue.toLowerCase());
+                        return kMatch && vMatch;
+                      }) as r}
+                        <div class="state-resolved-row state-resolved-ref">
+                          <div class="state-resolved-key">
+                            <i class="bi bi-link-45deg" style="font-size: 0.75rem;"></i>
+                            {r.refEntityName}
+                          </div>
+                          <div class="state-resolved-value" class:state-ref-inactive={!r.refActive}>
+                            {r.refActive ? 'Active' : 'Inactive'}
+                          </div>
+                        </div>
+                      {/each}
+                    {/if}
+                  </div>
+                {:else if viewMarkers.length > 0}
+                  <div class="view-notes-empty">
+                    No state values at this position. Checkpoints exist but are placed after the cursor.
+                  </div>
+                {:else}
+                  <div class="view-notes-empty">
+                    No state set. Right-click an entity mention and select "Set state value" to place a checkpoint.
+                  </div>
+                {/if}
+
+                {#if resolvedIncoming.length > 0}
+                  <div class="state-incoming-section">
+                    <div class="state-incoming-header">
+                      <i class="bi bi-box-arrow-in-left"></i> Referenced by
+                    </div>
+                    {#each resolvedIncoming as ref}
+                      <div class="state-incoming-row">
+                        <div class="state-incoming-name">{ref.srcName}</div>
+                        <div class="state-incoming-status" class:state-ref-inactive={!ref.active}>
+                          {ref.active ? 'Active' : 'Inactive'}
+                        </div>
                       </div>
+                    {/each}
+                  </div>
+                {/if}
+
+              {:else if stateSubView === 'all'}
+                <!-- All state changes for this entity -->
+                {#if viewMarkers.length === 0}
+                  <div class="view-notes-empty">
+                    No state checkpoints yet.
+                  </div>
+                {:else}
+                  {#each viewMarkers as marker (marker.id)}
+                    <div class="state-change-card" onclick={() => onnavtomarker?.(marker.id, marker.chapter_id)} role="button" tabindex="0">
+                      <div class="state-change-header">
+                        <span class="state-change-chapter">
+                          <i class="bi bi-diamond" style="font-size: 0.65rem; color: #2d6a5e;"></i>
+                          {getChapterName(marker.chapter_id)}
+                        </span>
+                        <button class="state-change-edit" onclick={e => { e.stopPropagation(); activeMarkerId = marker.id; }} title="Edit this checkpoint">
+                          <i class="bi bi-pencil"></i>
+                        </button>
+                      </div>
+                      {#if marker.values.length > 0}
+                        <div class="state-change-values">
+                          {#each marker.values as v}
+                            {#if v.value_type === 'entity_ref'}
+                              <div class="state-change-val">
+                                <span class="state-change-key">
+                                  {v.ref_entity_name || 'Unknown'}
+                                  <i class="bi bi-link-45deg" style="font-size: 0.7rem; color: var(--iwe-text-faint);"></i>
+                                </span>
+                                <span class="state-change-value" class:state-ref-inactive={!v.ref_active}>
+                                  {v.ref_active ? 'Active' : 'Inactive'}
+                                </span>
+                              </div>
+                            {:else}
+                              <div class="state-change-val">
+                                <span class="state-change-key">{v.fact_key}</span>
+                                <span class="state-change-value">{v.fact_value}</span>
+                              </div>
+                            {/if}
+                          {/each}
+                        </div>
+                      {:else}
+                        <div class="state-change-empty">No values set</div>
+                      {/if}
                     </div>
                   {/each}
-                </div>
+                {/if}
               {/if}
             </div>
           {/if}
@@ -2006,6 +2076,34 @@
     cursor: pointer;
   }
   .state-cancel-btn:hover { background: var(--iwe-bg-hover); }
+  .state-sub-tabs {
+    display: flex;
+    gap: 0;
+    margin-bottom: 0.6rem;
+    border-bottom: 1px solid var(--iwe-border-light, #eee);
+  }
+  .state-sub-tab {
+    flex: 1;
+    font-family: var(--iwe-font-ui);
+    font-size: 0.75rem;
+    padding: 0.35rem 0.4rem;
+    border: none;
+    background: none;
+    color: var(--iwe-text-faint);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.25rem;
+    border-bottom: 2px solid transparent;
+    transition: color 0.15s, border-color 0.15s;
+  }
+  .state-sub-tab:hover { color: var(--iwe-text-secondary); }
+  .state-sub-tab.active {
+    color: var(--iwe-accent, #2d6a5e);
+    border-bottom-color: var(--iwe-accent, #2d6a5e);
+    font-weight: 600;
+  }
   .state-view-container {
     padding: 0.5rem 0.75rem;
   }
@@ -2187,6 +2285,72 @@
   }
   .state-ref-inactive {
     color: var(--iwe-text-faint) !important;
+  }
+  .state-change-card {
+    background: var(--iwe-bg, #fffef9);
+    border: 1px solid var(--iwe-border-light, #eee);
+    border-radius: 6px;
+    margin-bottom: 0.4rem;
+    overflow: hidden;
+    cursor: pointer;
+    transition: border-color 0.15s;
+  }
+  .state-change-card:hover {
+    border-color: var(--iwe-accent, #2d6a5e);
+  }
+  .state-change-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.3rem 0.5rem;
+    background: var(--iwe-bg-active, #f5f2ed);
+  }
+  .state-change-chapter {
+    font-family: var(--iwe-font-ui);
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--iwe-text);
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+  }
+  .state-change-edit {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--iwe-text-faint);
+    font-size: 0.75rem;
+    padding: 0.1rem 0.3rem;
+    border-radius: var(--iwe-radius-sm);
+  }
+  .state-change-edit:hover { background: var(--iwe-hover); color: var(--iwe-text); }
+  .state-change-values {
+    padding: 0.3rem 0.5rem;
+  }
+  .state-change-val {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    padding: 0.1rem 0;
+    font-size: 0.8rem;
+  }
+  .state-change-key {
+    font-family: var(--iwe-font-ui);
+    font-weight: 600;
+    color: var(--iwe-text);
+    display: flex;
+    align-items: center;
+    gap: 0.2rem;
+  }
+  .state-change-value {
+    font-family: var(--iwe-font-prose);
+    color: var(--iwe-accent, #2d6a5e);
+  }
+  .state-change-empty {
+    padding: 0.3rem 0.5rem;
+    font-size: 0.78rem;
+    color: var(--iwe-text-faint);
+    font-style: italic;
   }
   .state-incoming-section {
     margin-top: 1rem;
