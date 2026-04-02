@@ -82,7 +82,9 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             entity_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
             chapter_id INTEGER,
-            text TEXT NOT NULL,
+            y_start BLOB NOT NULL,
+            y_end BLOB NOT NULL,
+            sort_order INTEGER NOT NULL DEFAULT 0,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
 
@@ -153,14 +155,6 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         .is_ok();
     if !has_visible {
         conn.execute_batch("ALTER TABLE entities ADD COLUMN visible INTEGER NOT NULL DEFAULT 1;")?;
-    }
-
-    // Migration: add sort_order to entity_notes if missing
-    let has_note_sort: bool = conn
-        .prepare("SELECT sort_order FROM entity_notes LIMIT 0")
-        .is_ok();
-    if !has_note_sort {
-        conn.execute_batch("ALTER TABLE entity_notes ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0;")?;
     }
 
     // Migration: custom_words table for spell checker
@@ -472,7 +466,8 @@ pub struct EntityNote {
     pub id: i64,
     pub entity_id: i64,
     pub chapter_id: Option<i64>,
-    pub text: String,
+    pub y_start: Vec<u8>,
+    pub y_end: Vec<u8>,
     pub sort_order: i64,
     pub created_at: String,
 }
@@ -488,25 +483,26 @@ pub struct EntityFreeNote {
 
 pub fn get_entity_notes(conn: &Connection, entity_id: i64) -> rusqlite::Result<Vec<EntityNote>> {
     let mut stmt = conn.prepare(
-        "SELECT n.id, n.entity_id, n.chapter_id, n.text, COALESCE(n.sort_order, 0), n.created_at FROM entity_notes n WHERE n.entity_id = ?1 ORDER BY n.sort_order ASC, n.created_at DESC"
+        "SELECT n.id, n.entity_id, n.chapter_id, n.y_start, n.y_end, COALESCE(n.sort_order, 0), n.created_at FROM entity_notes n WHERE n.entity_id = ?1 ORDER BY n.sort_order ASC, n.created_at DESC"
     )?;
     let rows = stmt.query_map(params![entity_id], |row| {
         Ok(EntityNote {
             id: row.get(0)?,
             entity_id: row.get(1)?,
             chapter_id: row.get(2)?,
-            text: row.get(3)?,
-            sort_order: row.get(4)?,
-            created_at: row.get(5)?,
+            y_start: row.get(3)?,
+            y_end: row.get(4)?,
+            sort_order: row.get(5)?,
+            created_at: row.get(6)?,
         })
     })?;
     rows.collect()
 }
 
-pub fn add_entity_note(conn: &Connection, entity_id: i64, chapter_id: Option<i64>, text: &str) -> rusqlite::Result<i64> {
+pub fn add_entity_note(conn: &Connection, entity_id: i64, chapter_id: Option<i64>, y_start: &[u8], y_end: &[u8]) -> rusqlite::Result<i64> {
     conn.execute(
-        "INSERT INTO entity_notes (entity_id, chapter_id, text) VALUES (?1, ?2, ?3)",
-        params![entity_id, chapter_id, text],
+        "INSERT INTO entity_notes (entity_id, chapter_id, y_start, y_end) VALUES (?1, ?2, ?3, ?4)",
+        params![entity_id, chapter_id, y_start, y_end],
     )?;
     Ok(conn.last_insert_rowid())
 }

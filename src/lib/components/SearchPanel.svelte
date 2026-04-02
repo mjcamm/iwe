@@ -294,7 +294,7 @@
             {#each chapter.results as result}
               <button
                 class="search-slab"
-                onclick={() => ongotochapter?.(result.chapter_id, result.matched_text, result.anchor)}
+                onclick={() => ongotochapter?.(result.chapter_id, result.matched_text, result.char_position)}
                 title="Jump to this match"
               >
                 <span class="slab-text">
@@ -382,7 +382,7 @@
             {#each chapter.results as result}
               <button
                 class="search-slab"
-                onclick={() => ongotochapter?.(result.chapter_id, result.matched_text, result.anchor)}
+                onclick={() => ongotochapter?.(result.chapter_id, result.dialogue, result.char_position)}
                 title="Jump to this dialogue"
               >
                 <span class="slab-text">
@@ -460,7 +460,7 @@
             {#each chapter.results as result, ri}
               {@const middleKey = `${chapter.chapterId}-${ri}`}
               <div class="search-slab rel-slab">
-                <button class="slab-jump" onclick={() => ongotochapter?.(result.chapter_id, result.entity_a_match, result.anchor)} title="Jump">
+                <button class="slab-jump" onclick={() => ongotochapter?.(result.chapter_id, result.entity_a_match, result.char_position)} title="Jump">
                   <i class="bi bi-box-arrow-up-right" style="font-size: 0.65rem;"></i>
                 </button>
                 {#if result.distance > 0}

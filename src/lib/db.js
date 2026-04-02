@@ -176,8 +176,8 @@ export async function getEntityNotes(entityId) {
   return invoke('get_entity_notes', { entityId });
 }
 
-export async function addEntityNote(entityId, chapterId, text) {
-  return invoke('add_entity_note', { entityId, chapterId: chapterId || null, text });
+export async function addEntityNote(entityId, chapterId, yStart, yEnd) {
+  return invoke('add_entity_note', { entityId, chapterId: chapterId || null, yStart, yEnd });
 }
 
 export async function deleteEntityNote(id) {

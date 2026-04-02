@@ -5,6 +5,28 @@
   let { ongotochapter, entities = [] } = $props();
 
   let subTab = $state('frequency');
+  let selectorOpen = $state(false);
+
+  const analysisTools = [
+    { group: 'Repetition', items: [
+      { id: 'frequency', icon: 'bi-sort-numeric-down', label: 'Word Frequency' },
+      { id: 'clusters', icon: 'bi-arrow-repeat', label: 'Cluster Finder' },
+      { id: 'similar', icon: 'bi-copy', label: 'Similar Phrasing' },
+    ]},
+    { group: 'Overview', items: [
+      { id: 'chapters', icon: 'bi-bar-chart', label: 'Chapter Analysis' },
+      { id: 'heatmap', icon: 'bi-grid-3x3-gap', label: 'Entity Heatmap' },
+    ]},
+  ];
+
+  let activeTool = $derived(
+    analysisTools.flatMap(g => g.items).find(t => t.id === subTab)
+  );
+
+  function selectTool(id) {
+    subTab = id;
+    selectorOpen = false;
+  }
 
   // ---- Shared exclude state ----
   let excludeCharacters = $state(true);
@@ -208,23 +230,37 @@
 </script>
 
 <div class="analysis-content">
-  <!-- Sub-tabs for future analysis tools -->
-  <div class="analysis-sub-tabs">
-    <button class="analysis-sub-tab" class:active={subTab === 'frequency'} onclick={() => subTab = 'frequency'}>
-      <i class="bi bi-sort-numeric-down"></i> Frequency
+  <!-- Analysis tool selector -->
+  <div class="tool-selector-wrap">
+    <button class="tool-selector-btn" onclick={() => selectorOpen = !selectorOpen}>
+      {#if activeTool}
+        <i class="bi {activeTool.icon}"></i>
+        <span class="tool-selector-label">{activeTool.label}</span>
+      {/if}
+      <i class="bi bi-chevron-down tool-selector-chevron" class:open={selectorOpen}></i>
     </button>
-    <button class="analysis-sub-tab" class:active={subTab === 'clusters'} onclick={() => subTab = 'clusters'}>
-      <i class="bi bi-arrow-repeat"></i> Clusters
-    </button>
-    <button class="analysis-sub-tab" class:active={subTab === 'similar'} onclick={() => subTab = 'similar'}>
-      <i class="bi bi-copy"></i> Similar
-    </button>
-    <button class="analysis-sub-tab" class:active={subTab === 'chapters'} onclick={() => subTab = 'chapters'}>
-      <i class="bi bi-bar-chart"></i> Chapters
-    </button>
-    <button class="analysis-sub-tab" class:active={subTab === 'heatmap'} onclick={() => subTab = 'heatmap'}>
-      <i class="bi bi-grid-3x3-gap"></i> Heatmap
-    </button>
+    {#if selectorOpen}
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div class="tool-selector-backdrop" onclick={() => selectorOpen = false} onkeydown={() => {}}></div>
+      <div class="tool-selector-dropdown">
+        {#each analysisTools as group}
+          <div class="tool-group-label">{group.group}</div>
+          {#each group.items as tool (tool.id)}
+            <button
+              class="tool-option"
+              class:active={subTab === tool.id}
+              onclick={() => selectTool(tool.id)}
+            >
+              <i class="bi {tool.icon}"></i>
+              <span>{tool.label}</span>
+              {#if subTab === tool.id}
+                <i class="bi bi-check2 tool-option-check"></i>
+              {/if}
+            </button>
+          {/each}
+        {/each}
+      </div>
+    {/if}
   </div>
 
   {#if subTab === 'frequency'}
@@ -297,7 +333,7 @@
                     <div class="occ-chapter-tag">{occ.chapter_title}</div>
                     <button
                       class="occ-snippet"
-                      onclick={() => ongotochapter?.(occ.chapter_id, item.word, occ.anchor)}
+                      onclick={() => ongotochapter?.(occ.chapter_id, item.word, occ.char_position)}
                       title="Jump to this occurrence"
                     >
                       &ldquo;...{@html highlightWord(occ.context, item.word)}...&rdquo;
@@ -365,7 +401,7 @@
                 {#each item.clusters as cluster}
                   <button
                     class="rep-cluster"
-                    onclick={() => ongotochapter?.(cluster.chapter_id, item.word, cluster.anchor)}
+                    onclick={() => ongotochapter?.(cluster.chapter_id, item.word, { charStart: cluster.char_start, charEnd: cluster.char_end })}
                     title="Jump to this cluster"
                   >
                     <span class="rep-cluster-badge">{cluster.count}&times; within {cluster.window_words} words — {cluster.chapter_title}</span>
@@ -422,7 +458,7 @@
               <span class="sim-count">{group.count} occurrence{group.count !== 1 ? 's' : ''}</span>
             </div>
             {#each group.occurrences as occ}
-              <button class="sim-sentence" onclick={() => ongotochapter?.(occ.chapter_id, occ.sentence.split(' ').slice(0, 3).join(' '), occ.anchor)}>
+              <button class="sim-sentence" onclick={() => ongotochapter?.(occ.chapter_id, occ.sentence, occ.char_position)}>
                 <div class="sim-sentence-header">
                   <span class="sim-chapter-tag">{occ.chapter_title}</span>
                   {#if occ.similarity < 1.0}
@@ -480,19 +516,50 @@
     font-family: var(--iwe-font-ui);
   }
 
-  .analysis-sub-tabs {
-    display: flex; flex-shrink: 0;
+  .tool-selector-wrap {
+    position: relative; flex-shrink: 0;
     border-bottom: 1px solid var(--iwe-border);
   }
-  .analysis-sub-tab {
-    flex: 1; display: flex; align-items: center; justify-content: center; gap: 0.3rem;
-    padding: 0.45rem 0.5rem;
-    font-family: var(--iwe-font-ui); font-size: 0.75rem; font-weight: 500;
-    background: none; border: none; border-bottom: 2px solid transparent;
-    color: var(--iwe-text-muted); cursor: pointer; transition: all 150ms;
+  .tool-selector-btn {
+    display: flex; align-items: center; gap: 0.4rem;
+    width: 100%; padding: 0.5rem 0.75rem;
+    font-family: var(--iwe-font-ui); font-size: 0.8rem; font-weight: 500;
+    background: none; border: none; color: var(--iwe-text);
+    cursor: pointer; transition: background 100ms;
   }
-  .analysis-sub-tab:hover { color: var(--iwe-text-secondary); background: var(--iwe-bg-hover); }
-  .analysis-sub-tab.active { color: var(--iwe-text); border-bottom-color: var(--iwe-accent); }
+  .tool-selector-btn:hover { background: var(--iwe-bg-hover); }
+  .tool-selector-label { flex: 1; text-align: left; }
+  .tool-selector-chevron {
+    font-size: 0.65rem; color: var(--iwe-text-faint);
+    transition: transform 150ms;
+  }
+  .tool-selector-chevron.open { transform: rotate(180deg); }
+
+  .tool-selector-backdrop {
+    position: fixed; inset: 0; z-index: 99;
+  }
+  .tool-selector-dropdown {
+    position: absolute; top: 100%; left: 0; right: 0; z-index: 100;
+    background: var(--iwe-bg); border: 1px solid var(--iwe-border);
+    border-top: none; border-radius: 0 0 var(--iwe-radius-sm) var(--iwe-radius-sm);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+    padding: 0.25rem 0;
+  }
+  .tool-group-label {
+    font-size: 0.6rem; font-weight: 700; color: var(--iwe-text-faint);
+    text-transform: uppercase; letter-spacing: 0.06em;
+    padding: 0.5rem 0.75rem 0.2rem;
+  }
+  .tool-option {
+    display: flex; align-items: center; gap: 0.4rem;
+    width: 100%; padding: 0.4rem 0.75rem 0.4rem 1.1rem;
+    font-family: var(--iwe-font-ui); font-size: 0.8rem;
+    background: none; border: none; color: var(--iwe-text-secondary);
+    cursor: pointer; text-align: left; transition: all 100ms;
+  }
+  .tool-option:hover { background: var(--iwe-bg-hover); color: var(--iwe-text); }
+  .tool-option.active { color: var(--iwe-accent); font-weight: 500; }
+  .tool-option-check { margin-left: auto; font-size: 0.75rem; }
 
   /* Controls */
   .rep-controls {

@@ -9,6 +9,7 @@
   import PalettePickerModal from '$lib/components/PalettePickerModal.svelte';
   import Toasts from '$lib/components/Toasts.svelte';
   import { exportDocx, exportTxt, exportHtml, exportPdf } from '$lib/export.js';
+  import { buildTextMap } from '$lib/entityHighlight.js';
   import { generateHTML } from '@tiptap/core';
   import StarterKit from '@tiptap/starter-kit';
   import TextAlign from '@tiptap/extension-text-align';
@@ -36,6 +37,8 @@
   let entities = $state([]);
   let selectedText = $state('');
   let lastSelectedText = ''; // persists even after selection clears (for pinning)
+  let selectionFrom = 0;
+  let selectionTo = 0;
   let editorRef;
 
   // Derived from entity.visible — the Set that drives highlighting
@@ -223,8 +226,10 @@
 
   async function handleEntityClick(entityId, entityName, isCtrl) {
     if (isCtrl && lastSelectedText && lastSelectedText.trim()) {
-      // Ctrl+click with selection → pin text to entity
-      await addEntityNote(entityId, activeChapter?.id || null, lastSelectedText.trim());
+      // Ctrl+click with selection → pin text range to entity using Y.Doc relative positions
+      const relPositions = editorRef?.createRelativePositions(selectionFrom, selectionTo);
+      if (!relPositions) return;
+      await addEntityNote(entityId, activeChapter?.id || null, relPositions.yStart, relPositions.yEnd);
       addToast(`Pinned to ${entityName}`, 'success');
       lastSelectedText = '';
       selectedText = '';
@@ -334,104 +339,47 @@
    * Universal jump-to-position. Used by EVERYTHING.
    *
    * @param chapterId - which chapter to open
-   * @param searchText - the word/phrase to highlight
-   * @param anchorOrPosition - either a char_position (number) from Rust, or an anchor string (legacy)
+   * @param searchText - the word/phrase to highlight (used to determine highlight length)
+   * @param position - char_position (number) from Rust, or PM position (number) when negative hack, or {pmFrom, pmTo} for pre-resolved positions
    */
-  async function handleGoToChapter(chapterId, searchText, anchorOrPosition) {
+  async function handleGoToChapter(chapterId, searchText, position) {
     await pushNavCheckpoint(true);
     await selectChapter(chapterId);
     setTimeout(() => {
       const ed = editorRef?.getEditor();
       if (!ed) return;
 
-      // Build word index from PM doc — single source of truth
-      const docWords = [];
-      ed.state.doc.descendants((node, pos) => {
-        if (!node.isText) return;
-        const re = /[a-zA-Z0-9\u00C0-\u024F'\u2019]+/g;
-        let m;
-        while ((m = re.exec(node.text)) !== null) {
-          docWords.push({ word: m[0].toLowerCase(), pos: pos + m.index, len: m[0].length });
-        }
-      });
-
-      function toWords(text) {
-        if (!text) return [];
-        return text.replace(/[^a-zA-Z0-9\u00C0-\u024F'\u2019\s]/g, ' ')
-          .trim().split(/\s+/).filter(w => w.length > 0).map(w => w.toLowerCase());
-      }
-
-      function findSequence(words) {
-        if (words.length === 0) return -1;
-        for (let i = 0; i <= docWords.length - words.length; i++) {
-          let match = true;
-          for (let j = 0; j < words.length; j++) {
-            if (docWords[i + j].word !== words[j]) { match = false; break; }
-          }
-          if (match) return i;
-        }
-        return -1;
-      }
-
       let pmFrom = null;
       let pmTo = null;
 
-      // Build search attempts in priority order:
-      // 1. Anchor text (context around the match — most specific, disambiguates repeated phrases)
-      // 2. Search text (the matched word/phrase itself)
-      const anchor = typeof anchorOrPosition === 'string' ? anchorOrPosition : null;
-      const attempts = [
-        anchor ? toWords(anchor) : [],
-        searchText ? toWords(searchText) : [],
-      ].filter(a => a.length > 0);
-
-      for (const words of attempts) {
-        const idx = findSequence(words);
-        if (idx >= 0) {
-          // Find the actual searchText words within the matched sequence
-          // so we highlight just the search term, not the whole anchor
-          if (searchText && anchor && words.length > toWords(searchText).length) {
-            const searchWords = toWords(searchText);
-            const searchIdx = findSequenceFrom(words, searchWords);
-            if (searchIdx >= 0) {
-              pmFrom = docWords[idx + searchIdx].pos;
-              const last = docWords[idx + searchIdx + searchWords.length - 1];
-              pmTo = last.pos + last.len;
+      if (position && typeof position === 'object' && 'pmFrom' in position) {
+        // Pre-resolved PM positions (from Y.Doc relative positions)
+        pmFrom = position.pmFrom;
+        pmTo = position.pmTo;
+      } else if (position && typeof position === 'object' && 'charStart' in position) {
+        // Char offset range from Rust
+        const { posMap } = buildTextMap(ed.state.doc);
+        if (position.charStart < posMap.length) {
+          pmFrom = posMap[position.charStart];
+          const end = Math.min(position.charEnd, posMap.length) - 1;
+          pmTo = posMap[end] + 1;
+        }
+      } else if (typeof position === 'number') {
+        // Char offset from Rust — convert via buildTextMap
+        const { posMap } = buildTextMap(ed.state.doc);
+        if (position < posMap.length) {
+          pmFrom = posMap[position];
+          if (searchText) {
+            const endCharPos = position + searchText.length;
+            if (endCharPos <= posMap.length) {
+              pmTo = posMap[endCharPos - 1] + 1;
             } else {
-              pmFrom = docWords[idx].pos;
-              const last = docWords[idx + words.length - 1];
-              pmTo = last.pos + last.len;
+              pmTo = posMap[posMap.length - 1] + 1;
             }
           } else {
-            pmFrom = docWords[idx].pos;
-            const last = docWords[idx + words.length - 1];
-            pmTo = last.pos + last.len;
-          }
-          break;
-        }
-      }
-
-      // Last resort: find first occurrence of the first word
-      if (pmFrom === null && searchText) {
-        const firstWord = toWords(searchText)[0];
-        if (firstWord) {
-          const idx = docWords.findIndex(dw => dw.word === firstWord);
-          if (idx >= 0) {
-            pmFrom = docWords[idx].pos;
-            pmTo = pmFrom + docWords[idx].len;
+            pmTo = pmFrom + 1;
           }
         }
-      }
-
-      function findSequenceFrom(haystack, needle) {
-        for (let i = 0; i <= haystack.length - needle.length; i++) {
-          let match = true;
-          for (let j = 0; j < needle.length; j++) {
-            if (haystack[i + j] !== needle[j]) { match = false; break; }
-          }
-          if (match) return i;
-        }
-        return -1;
       }
 
       if (pmFrom === null) return;
@@ -488,7 +436,7 @@
         }
 
         scrollEl.appendChild(container);
-        setTimeout(() => container.remove(), 7000);
+        setTimeout(() => container.remove(), 3000);
       } catch { /* positioning can fail, that's ok */ }
     }, 100);
   }
@@ -946,9 +894,13 @@
         onselecttab={selectChapter}
         onclosetab={closeTab}
         onchange={handleContentChange}
-        onselectionchange={(text, from) => {
+        onselectionchange={(text, from, to) => {
           selectedText = text;
-          if (text.trim()) lastSelectedText = text;
+          if (text.trim()) {
+            lastSelectedText = text;
+            selectionFrom = from;
+            selectionTo = to;
+          }
           clearTimeout(cursorMoveTimer);
           cursorMoveTimer = setTimeout(() => { cursorMoveTrigger++; }, 300);
           if (from !== undefined) cursorPos = from;
@@ -1016,6 +968,9 @@
           onclearselection={() => { selectedText = ''; lastSelectedText = ''; editorRef?.clearSelection(); }}
           ondeletestate={handleDeleteState}
           onnavtomarker={handleNavToMarker}
+          resolveNotePositions={(yStart, yEnd) => editorRef?.resolveRelativePositions(yStart, yEnd)}
+          getEditorTextBetween={(from, to) => editorRef?.getTextBetween(from, to)}
+          createNotePositions={() => editorRef?.createRelativePositions(selectionFrom, selectionTo)}
         />
       {:else if rightPanelTab === 'search'}
         <SearchPanel

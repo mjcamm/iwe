@@ -98,6 +98,57 @@ Users annotate their manuscript by highlighting text and right-clicking → "Add
 - `src/lib/components/NotesPanel.svelte` — List and detail views
 - `src-tauri/src/db.rs` — `comments` table, `Comment` struct, CRUD
 
+### Entity State Tracking (checkpoint model)
+
+Writers track how entities change throughout the manuscript by placing **state markers** (visible ◆ diamond icons) in the document and attaching key-value facts and entity references to them.
+
+**Checkpoint model:** A state marker is a "checkpoint" — a Y.Doc inline atom node that can hold multiple key-value pairs and entity references. Each checkpoint says "at this point in the story, these things are true about this entity." State is resolved by accumulating all checkpoints in **story-time order** up to the cursor position — later checkpoints overwrite earlier values for the same key.
+
+**Two value types per checkpoint:**
+- **Key/Value facts** — freeform text pairs (e.g. `weight = 100kg`, `mood = angry`). Once a key name is saved, it cannot be renamed — only values change at subsequent checkpoints.
+- **Entity references** — links to other entities with an Active/Inactive toggle (e.g. `The Sword → Active`). Used for tracking relationships/possessions.
+
+**Data model (two tables):**
+- `state_markers` — parent row per marker (entity_id, chapter_id, note, timestamps)
+- `state_marker_values` — child rows per checkpoint (value_type='fact'|'entity_ref', fact_key, fact_value, ref_entity_id, ref_active)
+
+**State tab in EntityPanel** has three modes:
+1. **Resolved view** (default) — shows accumulated state at cursor position, dynamically recalculated as cursor moves (300ms debounce). Two sub-views: "State at cursor" and "All state changes" (chronological list of every checkpoint). Also shows "Referenced by" section for incoming entity refs.
+2. **Checkpoint editor** — opened by clicking a ◆ marker in the editor. Shows all entity variables (both this checkpoint's values and inherited values from earlier checkpoints). Save button persists changes, Cancel discards. Two add buttons: "Add variable" and "Add entity reference".
+3. **Filters** — name and value text filters on the resolved view for trimming large variable lists.
+
+**State resolution uses story-time order, not document order.** The `resolveUpTo()` function in EntityPanel loads `time_section_order` from the DB, determines which time section each marker is in via `getTimeSectionForPos()`, and uses the section's story_order to position markers chronologically. A flashback section ordered before Chapter 1 in the Time Flow Manager will have its state checkpoints resolved before Chapter 1's.
+
+**Key files:**
+- `src/lib/stateMarker.js` — `StateMarker` TipTap node (inline, atom, selectable, draggable), click handler plugin
+- `src/lib/components/EntityPanel.svelte` — State sub-tab, `resolveUpTo()`, `buildEditRows()`, `resolveStateAtCursor()`
+- `src-tauri/src/db.rs` — `state_markers` + `state_marker_values` tables, `StateMarker`/`StateMarkerValue` structs, CRUD
+
+**Creating state markers:** Right-click an entity mention → "Set state value" → inserts ◆ marker at cursor → opens entity panel in checkpoint editor mode. The editor pre-shows all existing entity variables with their resolved values at that position.
+
+**Clicking state markers:** Clicking a ◆ in the editor fires `state-marker-click` event → page looks up the marker's entity via `getStateMarker(id)` → opens entity panel to that entity's state tab in checkpoint editor mode.
+
+### Time Flow System (non-linear narratives)
+
+Handles flashbacks, flash-forwards, and time jumps. Writers wrap text in **time break regions** — a named start divider + content + end divider. The Time Flow Manager reorders these regions in story-time order.
+
+**Time break node (`src/lib/timeBreak.js`):** A wrapping TipTap block node (like blockquote). Contains `block+` content. Has a `label` attribute (editable, e.g. "Fifteen years earlier"). Rendered with a start divider (editable label), content area (teal left border), and end divider ("End time jump"). Nesting is prevented — `insertTimeBreak` checks parent nodes.
+
+**Time Flow Manager (`src/routes/timeflow/+page.svelte`):** Popup window showing all time sections as draggable cards. Chapters without time breaks = one card. Chapters with time breaks = multiple cards (flow sections + time-jumped sections). Drag to reorder in story-time order. Saves to `time_section_order` table.
+
+**Data model:**
+- `time_section_order` — chapter_id, section_index, label, story_order (global sort key). When empty, system falls back to chapter sort_order (zero setup required).
+
+**How sections are extracted (Rust):** `ydoc::extract_time_sections()` walks the Y.Doc top-level children. Regular blocks accumulate into flow sections. `timeBreak` wrapper nodes become their own sections with the label attribute. Returns `Vec<TimeSection>` with section_index, label, is_flow, preview_text, word_count.
+
+**How entity state uses time flow:** `resolveUpTo()` in EntityPanel builds a story order map from `time_section_order`, determines each marker's time section via `getTimeSectionForPos()`, and uses story_order for ordering. Within the same section, document position is the tiebreaker.
+
+**Key files:**
+- `src/lib/timeBreak.js` — `TimeBreak` wrapping TipTap node
+- `src/routes/timeflow/+page.js` + `+page.svelte` — Time Flow Manager popup
+- `src-tauri/src/ydoc.rs` — `extract_time_sections()`, `locate_state_markers_in_sections()`
+- `src-tauri/capabilities/default.json` — includes `"timeflow*"`
+
 ### Navigation / Jump-to-Position (CRITICAL — read this carefully)
 
 `handleGoToChapter(chapterId, searchText, anchorOrPosition)` in the project page is the **ONE central function** for ALL click-to-navigate-and-highlight across the entire app. Every feature that lets the user click a result and jump to a position in the editor MUST use this function. Do not create alternative navigation paths.
@@ -120,7 +171,7 @@ Users annotate their manuscript by highlighting text and right-clicking → "Add
 
 ### Multi-window architecture
 
-Pop-up windows (heatmap, chapter analysis, stats) are separate SvelteKit routes opened via `WebviewWindow` from `@tauri-apps/api/webviewWindow`. They read data directly from the database — no data passing between windows. Each window needs its route in `src/routes/` and its label pattern in `src-tauri/capabilities/default.json`.
+Pop-up windows (heatmap, chapter analysis, stats, time flow manager) are separate SvelteKit routes opened via `WebviewWindow` from `@tauri-apps/api/webviewWindow`. They read data directly from the database — no data passing between windows. Each window needs its route in `src/routes/` and its label pattern in `src-tauri/capabilities/default.json`.
 
 The print preview window converts Y.Doc bytes to HTML via `yDocToProsemirrorJSON()` + `generateHTML()` before rendering.
 
@@ -134,19 +185,22 @@ src/
 │   ├── heatmap/                  # Entity heatmap (popup window)
 │   ├── chapters/                 # Chapter analysis (popup window)
 │   ├── stats/                    # Writing stats (popup window)
+│   ├── timeflow/                 # Time Flow Manager (popup window)
 │   └── print/                    # Print preview (popup window)
 ├── lib/
 │   ├── db.js                     # ALL Tauri command wrappers
 │   ├── entityHighlight.js        # ProseMirror decoration plugin (entities + spellcheck)
 │   ├── noteMarker.js             # NoteMarker TipTap node + comment highlight decorations
+│   ├── stateMarker.js            # StateMarker TipTap node (entity state checkpoints)
+│   ├── timeBreak.js              # TimeBreak TipTap wrapping node (time jump regions)
 │   ├── ydoc.js                   # Y.Doc lifecycle (create, encode, destroy)
 │   ├── export.js                 # DOCX/HTML/TXT/PDF export
 │   ├── theme.css                 # Design system CSS variables
 │   ├── toast.js                  # Toast notification store
 │   └── components/
-│       ├── Editor.svelte         # TipTap editor + toolbar + suggestions + spellcheck + context menu + comments
+│       ├── Editor.svelte         # TipTap editor + toolbar + suggestions + spellcheck + context menu + comments + state markers + time breaks
 │       ├── WordModal.svelte      # Combined spelling & synonym modal
-│       ├── EntityPanel.svelte    # Entity CRUD + notes + detection
+│       ├── EntityPanel.svelte    # Entity CRUD + notes + detection + state tracking
 │       ├── NotesPanel.svelte     # Comments/notes list + detail view
 │       ├── ChapterNav.svelte     # Chapter sidebar
 │       ├── SearchPanel.svelte    # Text/dialogue/relationship search
@@ -172,7 +226,7 @@ src-tauri/
 └── Cargo.toml
 ```
 
-## Database Schema (13 tables)
+## Database Schema (16 tables)
 
 - **chapters** — id, title, content (BLOB — Yjs state), sort_order, timestamps
 - **entities** — id, name, entity_type (character/place/thing), description, color, visible
@@ -183,12 +237,15 @@ src-tauri/
 - **entity_notes** — pinned text excerpts from chapters, with sort_order
 - **entity_free_notes** — free-form note cards per entity, with sort_order
 - **comments** — chapter_id, note_text, timestamps (position lives in the Y.Doc as a noteMarker node)
+- **state_markers** — entity_id, chapter_id, note, timestamps (position lives in Y.Doc as a stateMarker node)
+- **state_marker_values** — marker_id, value_type ('fact'|'entity_ref'), fact_key, fact_value, ref_entity_id, ref_active
+- **time_section_order** — chapter_id, section_index, label, story_order (global sort key for time flow)
 - **writing_activity** — per-save log (timestamp, chapter, word counts, delta)
 - **daily_stats** — aggregated daily (words added/deleted/net, active minutes)
 - **writing_settings** — daily_goal, session_gap_minutes (singleton)
 - **nav_history** — chapter_id, scroll_top, cursor_pos (max 100)
 
-Migrations are handled in `init_schema()` with `CREATE TABLE IF NOT EXISTS` for idempotent creation and `ALTER TABLE ... ADD COLUMN` checks for backward compatibility with existing `.iwe` files.
+Migrations are handled in `init_schema()` with `CREATE TABLE IF NOT EXISTS` for idempotent creation and `ALTER TABLE ... ADD COLUMN` checks for backward compatibility with existing `.iwe` files. During active development, schema changes may require deleting the `.iwe` file and starting fresh.
 
 ## Key Design Decisions
 
@@ -219,11 +276,20 @@ Uses a hand-rolled Hunspell-compatible dictionary parser (`spellcheck.rs`) that 
 ### Synonyms (Moby Thesaurus)
 The Moby Thesaurus II (~30K entries) is embedded via `include_str!` and parsed into an in-memory `HashMap` at startup (`synonyms.rs`). Lookups try the exact word first, then strip common suffixes (-s, -ed, -ing, -ly, etc.) to find base forms. Returns up to 200 synonyms per word.
 
-### Right-click context menu
-The editor has a custom context menu (`handleContextMenu` in Editor.svelte) that adapts based on what was right-clicked: entity words get "Go to definition" and "Find references"; misspelled words get "Spelling & Synonyms..." and "Add to dictionary"; all words get "Synonyms..." and entity creation options; "Add a note" is always available (creates a comment highlight on the selection, or a pinned note at cursor if no selection). The WordModal component is a large modal with flowing pill grids for both spelling suggestions and synonyms.
+### State markers are Y.Doc nodes, not text offsets
+State markers are inline atom nodes in the Y.Doc — they have permanent identity and survive edits. Navigation to a state marker uses `getStateMarkerPositions()` which finds the node by its `stateId` attribute directly in the ProseMirror doc. No word-sequence searching needed. Markers are selectable and draggable — users can cut/paste them to relocate.
 
-### Decoration coexistence (three independent plugin systems)
-Three separate ProseMirror plugins manage decorations independently: `entityHighlightKey` for entity highlights, `spellCheckKey` for red squiggly underlines, and `commentDecoKey` for comment highlights. The `applyingDecorations` flag prevents entity/spell decorations from triggering infinite loops. Each plugin has its own PluginKey and state management.
+### State resolution is story-time-aware
+The `resolveUpTo()` function in EntityPanel doesn't use document order. It loads `time_section_order` from the DB, determines each marker's time section via `getTimeSectionForPos()`, and orders markers by their section's `story_order`. This means a state checkpoint inside a flashback that's been positioned before Chapter 1 in the Time Flow Manager will be resolved before Chapter 1's checkpoints. Fallback when no time flow ordering exists: chapter sort_order × 1000 + section_index.
+
+### Time breaks are wrapping nodes, not dividers
+A time break is a **wrapping** block node (like blockquote), not a single divider. It has a start divider (with editable label), content area, and end divider. Content inside the wrapper is the time-jumped text. This clearly delineates the region and prevents ambiguity about where the time jump ends. Nesting is prevented by checking parent nodes in `insertTimeBreak`.
+
+### Right-click context menu
+The editor has a custom context menu (`handleContextMenu` in Editor.svelte) that adapts based on what was right-clicked: entity words get "Go to definition", "Find references", and "Set state value" (creates a state checkpoint); misspelled words get "Spelling & Synonyms..." and "Add to dictionary"; all words get "Synonyms..." and entity creation options; "Add a note" is always available. The WordModal component is a large modal with flowing pill grids for both spelling suggestions and synonyms.
+
+### Decoration coexistence (four independent plugin systems)
+Four separate ProseMirror plugins manage decorations/interactions independently: `entityHighlightKey` for entity highlights, `spellCheckKey` for red squiggly underlines, `commentDecoKey` for comment highlights, and `stateMarkerDecoKey` for state marker click handling. The `applyingDecorations` flag prevents entity/spell decorations from triggering infinite loops. Each plugin has its own PluginKey and state management.
 
 ### Writing stats tracking
 On every content save (500ms debounce), the project page computes word count delta and calls `logWritingActivity()`. The Rust side updates `daily_stats` atomically. Active time is computed from gaps between consecutive activities (capped at session_gap_minutes).

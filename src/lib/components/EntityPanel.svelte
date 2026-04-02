@@ -28,6 +28,9 @@
     cursorPos = 0,
     getMarkerPositions = null, // function that returns [{stateId, pos}] from editor
     getTimeSectionForPos = null, // function(chapterId, docPos) => {chapterId, sectionIndex}
+    resolveNotePositions = null, // function(yStart, yEnd) => {from, to} or null
+    getEditorTextBetween = null, // function(from, to) => string
+    createNotePositions = null, // function() => {yStart, yEnd} or null — from current selection
   } = $props();
 
   let view = $state('list'); // 'list' | 'create' | 'detect' | 'references' | 'view'
@@ -462,9 +465,11 @@
 
   async function pinSelectedText(entityId) {
     if (!selectedText || !selectedText.trim()) return;
+    const relPositions = createNotePositions?.();
+    if (!relPositions) return;
     const chapterId = activeChapterId || null;
     const entity = entities.find(e => e.id === entityId);
-    await addEntityNote(entityId, chapterId, selectedText.trim());
+    await addEntityNote(entityId, chapterId, relPositions.yStart, relPositions.yEnd);
     if (viewEntity && viewEntity.id === entityId) {
       viewNotes = await getEntityNotes(entityId);
     }
@@ -608,7 +613,7 @@
     }
     const loc = candidate.locations[browseIndex];
     if (loc && ongotochapter) {
-      ongotochapter(loc.chapter_id, candidate.text, loc.context);
+      ongotochapter(loc.chapter_id, candidate.text, loc.char_position);
     }
   }
 
@@ -953,7 +958,7 @@
             {#each chapter.references as ref, i}
               <button
                 class="refs-snippet"
-                onclick={() => ongotochapter?.(chapter.chapter_id, ref.matched_text, ref.anchor)}
+                onclick={() => ongotochapter?.(chapter.chapter_id, ref.matched_text, ref.position)}
                 title="Jump to this reference"
               >
                 <span class="refs-snippet-text">
@@ -1053,15 +1058,21 @@
           {:else}
             <div class="dnd-zone" use:dndzone={{ items: viewNotes, flipDurationMs: 200 }} onconsider={handleExcerptDndConsider} onfinalize={handleExcerptDndFinalize}>
               {#each viewNotes as note (note.id)}
+                {@const resolved = note.chapter_id === activeChapterId ? resolveNotePositions?.(note.y_start, note.y_end) : null}
+                {@const noteText = resolved ? getEditorTextBetween?.(resolved.from, resolved.to) : null}
                 <div class="view-note">
                   <div class="view-note-drag"><i class="bi bi-grip-vertical"></i></div>
                   <div class="view-note-body">
                     <button class="view-note-text clickable" onclick={() => {
-                      // Use first few words as search text, full excerpt as anchor
-                      const words = note.text.split(/\s+/).slice(0, 5).join(' ');
-                      ongotochapter?.(note.chapter_id, words, note.text.slice(0, 40));
-                    }} title="Jump to this excerpt">
-                      &ldquo;{note.text}&rdquo;
+                      if (resolved) {
+                        ongotochapter?.(note.chapter_id, noteText, { pmFrom: resolved.from, pmTo: resolved.to });
+                      }
+                    }} title="Jump to this excerpt" disabled={!resolved}>
+                      {#if noteText}
+                        &ldquo;{noteText}&rdquo;
+                      {:else}
+                        <span class="note-unresolved"><i class="bi bi-journal-text"></i> Open chapter to view</span>
+                      {/if}
                     </button>
                     <div class="view-note-footer">
                       <span class="view-note-date">{new Date(note.created_at).toLocaleDateString()}</span>
@@ -1895,6 +1906,8 @@
     cursor: pointer; transition: color 100ms;
   }
   .view-note-text.clickable:hover { color: var(--iwe-accent); }
+  .view-note-text:disabled { cursor: default; opacity: 0.7; }
+  .note-unresolved { font-style: italic; color: var(--iwe-text-faint); font-size: 0.8rem; }
   .view-note-footer {
     display: flex; align-items: center; justify-content: space-between;
     margin-top: 0.3rem;

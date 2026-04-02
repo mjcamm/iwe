@@ -1,3 +1,4 @@
+mod analysis;
 mod db;
 mod palettes;
 mod scanner;
@@ -137,10 +138,10 @@ fn get_entity_notes(state: tauri::State<'_, AppState>, entity_id: i64) -> Result
 }
 
 #[tauri::command]
-fn add_entity_note(state: tauri::State<'_, AppState>, entity_id: i64, chapter_id: Option<i64>, text: String) -> Result<i64, String> {
+fn add_entity_note(state: tauri::State<'_, AppState>, entity_id: i64, chapter_id: Option<i64>, y_start: Vec<u8>, y_end: Vec<u8>) -> Result<i64, String> {
     let guard = state.db.lock().map_err(|e| e.to_string())?;
     let conn = guard.as_ref().ok_or("No project open")?;
-    db::add_entity_note(conn, entity_id, chapter_id, &text).map_err(|e| e.to_string())
+    db::add_entity_note(conn, entity_id, chapter_id, &y_start, &y_end).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -787,10 +788,10 @@ pub fn run() {
             scanner::relationship_search,
             scanner::text_search,
             scanner::dialogue_search,
-            scanner::word_frequency,
-            scanner::find_similar_phrases,
-            scanner::generate_heatmap,
-            scanner::chapter_analysis,
+            analysis::word_frequency,
+            analysis::find_similar_phrases,
+            analysis::generate_heatmap,
+            analysis::chapter_analysis,
             scanner::debug_stripped_text,
             spellcheck::check_spelling,
             spellcheck::get_spell_suggestions,

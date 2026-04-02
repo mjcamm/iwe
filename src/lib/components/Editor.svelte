@@ -6,7 +6,8 @@
   import TextAlign from '@tiptap/extension-text-align';
   import Superscript from '@tiptap/extension-superscript';
   import Subscript from '@tiptap/extension-subscript';
-  import { ySyncPlugin, yUndoPlugin, undo, redo } from 'y-prosemirror';
+  import { ySyncPlugin, ySyncPluginKey, yUndoPlugin, undo, redo, absolutePositionToRelativePosition, relativePositionToAbsolutePosition } from 'y-prosemirror';
+  import * as Y from 'yjs';
   import { keymap } from '@tiptap/pm/keymap';
   import { scanText, addIgnoredWord, checkSpelling, getSpellSuggestions, addToDictionary } from '$lib/db.js';
   import { createHighlightPlugin, createSpellCheckPlugin, buildTextMap, applyDecorations, applySpellDecorations, entityHighlightKey, spellCheckKey } from '$lib/entityHighlight.js';
@@ -404,6 +405,42 @@
     return editorRaw;
   }
 
+  /** Convert a PM selection range to serialized Y.Doc relative positions */
+  export function createRelativePositions(from, to) {
+    if (!editorRaw || !currentXmlFragment) return null;
+    const state = editorRaw.state;
+    const syncState = ySyncPluginKey.getState(state);
+    if (!syncState) return null;
+    const mapping = syncState.binding.mapping;
+    const startRel = absolutePositionToRelativePosition(from, currentXmlFragment, mapping);
+    const endRel = absolutePositionToRelativePosition(to, currentXmlFragment, mapping);
+    return {
+      yStart: Array.from(Y.encodeRelativePosition(startRel)),
+      yEnd: Array.from(Y.encodeRelativePosition(endRel)),
+    };
+  }
+
+  /** Resolve serialized relative positions back to PM positions */
+  export function resolveRelativePositions(yStart, yEnd) {
+    if (!editorRaw || !currentYDoc || !currentXmlFragment) return null;
+    const state = editorRaw.state;
+    const syncState = ySyncPluginKey.getState(state);
+    if (!syncState) return null;
+    const mapping = syncState.binding.mapping;
+    const startRel = Y.decodeRelativePosition(new Uint8Array(yStart));
+    const endRel = Y.decodeRelativePosition(new Uint8Array(yEnd));
+    const startAbs = relativePositionToAbsolutePosition(currentYDoc, currentXmlFragment, startRel, mapping);
+    const endAbs = relativePositionToAbsolutePosition(currentYDoc, currentXmlFragment, endRel, mapping);
+    if (startAbs === null || endAbs === null) return null;
+    return { from: startAbs, to: endAbs };
+  }
+
+  /** Extract text between two resolved PM positions */
+  export function getTextBetween(from, to) {
+    if (!editorRaw) return '';
+    return editorRaw.state.doc.textBetween(from, to, ' ');
+  }
+
   export function clearSelection() {
     if (!editorRaw) return;
     const { to } = editorRaw.state.selection;
@@ -620,7 +657,7 @@
           editorState = { editor };
           const { from, to } = editor.state.selection;
           const text = from !== to ? editor.state.doc.textBetween(from, to, ' ') : '';
-          onselectionchange?.(text, from);
+          onselectionchange?.(text, from, to);
         }
         // Update comment highlights when doc changes
         if (transaction.docChanged) {
