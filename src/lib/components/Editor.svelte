@@ -10,7 +10,7 @@
   import * as Y from 'yjs';
   import { keymap } from '@tiptap/pm/keymap';
   import { scanText, addIgnoredWord, checkSpelling, getSpellSuggestions, addToDictionary } from '$lib/db.js';
-  import { createHighlightPlugin, createSpellCheckPlugin, buildTextMap, applyDecorations, applySpellDecorations, entityHighlightKey, spellCheckKey } from '$lib/entityHighlight.js';
+  import { createHighlightPlugin, createSpellCheckPlugin, createDebugPlugin, buildTextMap, applyDecorations, applySpellDecorations, applyDebugDecorations, entityHighlightKey, spellCheckKey } from '$lib/entityHighlight.js';
   import { createChapterDoc, encodeDoc, destroyDoc } from '$lib/ydoc.js';
   import { NoteMarker, applyCommentHighlights } from '$lib/noteMarker.js';
   import { StateMarker } from '$lib/stateMarker.js';
@@ -441,6 +441,11 @@
     return editorRaw.state.doc.textBetween(from, to, ' ');
   }
 
+  export function setDebugDecorations(ranges) {
+    if (!editorRaw) return;
+    applyDebugDecorations(editorRaw, ranges);
+  }
+
   export function clearSelection() {
     if (!editorRaw) return;
     const { to } = editorRaw.state.selection;
@@ -633,6 +638,7 @@
                 onentityclick?.(entityId, entityName, isCtrl);
               }),
               createSpellCheckPlugin(),
+              createDebugPlugin(),
             ];
           },
         }),

@@ -102,3 +102,9 @@ a:hover { color: var(--iwe-accent-hover); }
   0%, 30% { opacity: 1; background: rgba(253, 230, 138, 0.35); }
   100% { opacity: 0; }
 }
+
+/* Debug decoration highlights (dialogue detection etc.) */
+.debug-highlight {
+  background: rgba(45, 106, 94, 0.15);
+  border-bottom: 2px solid #2d6a5e;
+}

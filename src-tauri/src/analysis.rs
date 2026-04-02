@@ -1205,6 +1205,26 @@ fn tokenize_with_positions(text: &str, base_offset: usize) -> Vec<(String, Strin
     tokens
 }
 
+#[derive(Serialize)]
+pub struct DialogueRange {
+    pub char_start: usize,
+    pub char_end: usize,
+}
+
+#[tauri::command]
+pub fn get_chapter_dialogue(
+    state: tauri::State<'_, AppState>,
+    chapter_id: i64,
+) -> Result<Vec<DialogueRange>, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    let chapters = db::list_chapters(conn).map_err(|e| e.to_string())?;
+    let chapter = chapters.iter().find(|c| c.id == chapter_id).ok_or("Chapter not found")?;
+    let plain = chapter_plain_text(chapter)?;
+    let spans = text_utils::extract_dialogue(&plain);
+    Ok(spans.iter().map(|s| DialogueRange { char_start: s.char_start, char_end: s.char_end }).collect())
+}
+
 #[tauri::command]
 pub fn debug_dialogue_spans(
     state: tauri::State<'_, AppState>,

@@ -2,7 +2,7 @@
   import { wordFrequency, findSimilarPhrases, textSearch, adverbAnalysis, debugDialogueSpans } from '$lib/db.js';
   import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 
-  let { ongotochapter, entities = [] } = $props();
+  let { ongotochapter, entities = [], ontoggledialoguehighlight, dialogueHighlightActive = false } = $props();
 
   let subTab = $state('frequency');
   let selectorOpen = $state(false);
@@ -15,6 +15,7 @@
     ]},
     { group: 'Style', items: [
       { id: 'adverbs', icon: 'bi-pencil', label: 'Adverb Density' },
+      { id: 'dialogue-detect', icon: 'bi-chat-quote', label: 'Dialogue Detection' },
     ]},
     { group: 'Overview', items: [
       { id: 'chapters', icon: 'bi-bar-chart', label: 'Chapter Analysis' },
@@ -587,6 +588,23 @@
       </button>
     </div>
 
+  {:else if subTab === 'dialogue-detect'}
+    <div class="hm-setup">
+      <p class="hm-setup-desc">Highlights all detected dialogue in the current chapter. Use this to verify dialogue detection is working correctly and spot missing or mismatched quotation marks.</p>
+      <button
+        class="rep-scan-btn"
+        class:active={dialogueHighlightActive}
+        onclick={() => ontoggledialoguehighlight?.()}
+        style={dialogueHighlightActive ? 'background: #dc2626;' : ''}
+      >
+        <i class="bi" class:bi-chat-quote={!dialogueHighlightActive} class:bi-x-lg={dialogueHighlightActive}></i>
+        {dialogueHighlightActive ? 'Clear Highlights' : 'Highlight Dialogue'}
+      </button>
+      {#if dialogueHighlightActive}
+        <p class="dialogue-detect-hint">Dialogue is highlighted with a <span class="dialogue-detect-sample">teal underline</span> in the editor. Text without highlighting is detected as narration. Check for missing or mismatched quotes.</p>
+      {/if}
+    </div>
+
   {:else if subTab === 'adverbs'}
     <div class="adv-quote">
       <p class="adv-quote-text">"I believe the road to hell is paved with adverbs, and I will shout it from the rooftops. To put it another way, they're like dandelions. If you have one on your lawn, it looks pretty and unique. If you fail to root it out, however, you find five the next day... fifty the day after that... and then, my brothers and sisters, your lawn is totally, completely, and profligately covered with dandelions."</p>
@@ -1041,6 +1059,16 @@
     font-family: var(--iwe-font-ui); font-size: 0.8rem;
     color: var(--iwe-text-secondary); margin: 0;
   }
+
+  .dialogue-detect-hint {
+    font-size: 0.8rem; color: var(--iwe-text-secondary); line-height: 1.5; margin: 0;
+  }
+  .dialogue-detect-sample {
+    border-bottom: 2px solid #2d6a5e; background: rgba(45, 106, 94, 0.15);
+    padding: 0 2px;
+  }
+  .rep-scan-btn.active { background: #dc2626; }
+  .rep-scan-btn.active:hover { background: #b91c1c; }
 
   .adv-desc {
     font-size: 0.9rem; color: var(--iwe-text-secondary);

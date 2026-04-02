@@ -3,6 +3,43 @@ import { Decoration, DecorationSet } from '@tiptap/pm/view';
 
 export const entityHighlightKey = new PluginKey('entityHighlight');
 export const spellCheckKey = new PluginKey('spellCheck');
+export const debugDecoKey = new PluginKey('debugDeco');
+
+/**
+ * Create a plugin for debug decorations (dialogue highlighting etc.)
+ * Ranges are applied via applyDebugDecorations().
+ */
+export function createDebugPlugin() {
+  return new Plugin({
+    key: debugDecoKey,
+    state: {
+      init() { return DecorationSet.empty; },
+      apply(tr, old) {
+        const meta = tr.getMeta(debugDecoKey);
+        if (meta) return meta;
+        return old.map(tr.mapping, tr.doc);
+      },
+    },
+    props: {
+      decorations(state) { return this.getState(state); },
+    },
+  });
+}
+
+/**
+ * Apply debug decorations to the editor.
+ * @param {Editor} editor - TipTap editor instance
+ * @param {Array<{from: number, to: number}>} ranges - PM position ranges to highlight
+ */
+export function applyDebugDecorations(editor, ranges) {
+  if (!editor || !editor.view) return;
+  const doc = editor.state.doc;
+  const decos = ranges.map(r =>
+    Decoration.inline(r.from, r.to, { class: 'debug-highlight' })
+  );
+  const set = DecorationSet.create(doc, decos);
+  editor.view.dispatch(editor.state.tr.setMeta(debugDecoKey, set));
+}
 
 /**
  * Walk the ProseMirror doc and build plain text + a position map

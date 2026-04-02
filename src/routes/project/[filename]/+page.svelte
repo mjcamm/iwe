@@ -1,7 +1,7 @@
 <script>
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
-  import { getProjectsDir, getSettings, saveSettings, openProject, getChapters, getChapter, addChapter, updateChapterContent, renameChapter, deleteChapter, getEntities, createEntity, updateEntity, deleteEntity, setEntityVisible, addAlias, removeAlias, scanAllChapters, getNavHistory, pushNavEntry, truncateNavAfter, addEntityNote, logWritingActivity, setSpellLanguage, getAllChapterWordCounts, getChapterComments, addComment, updateComment, deleteComment, addStateMarker, deleteStateMarker, getStateMarker } from '$lib/db.js';
+  import { getProjectsDir, getSettings, saveSettings, openProject, getChapters, getChapter, addChapter, updateChapterContent, renameChapter, deleteChapter, getEntities, createEntity, updateEntity, deleteEntity, setEntityVisible, addAlias, removeAlias, scanAllChapters, getNavHistory, pushNavEntry, truncateNavAfter, addEntityNote, logWritingActivity, setSpellLanguage, getAllChapterWordCounts, getChapterComments, addComment, updateComment, deleteComment, addStateMarker, deleteStateMarker, getStateMarker, getChapterDialogue } from '$lib/db.js';
   import ChapterNav from '$lib/components/ChapterNav.svelte';
   import Editor from '$lib/components/Editor.svelte';
   import EntityPanel from '$lib/components/EntityPanel.svelte';
@@ -41,6 +41,70 @@
   let selectionFrom = 0;
   let selectionTo = 0;
   let editorRef;
+
+  // Dialogue detection highlight state
+  let dialogueHighlightActive = $state(false);
+
+  function toggleDialogueHighlight() {
+    const ed = editorRef?.getEditor();
+    if (!ed || !activeChapter) return;
+
+    if (dialogueHighlightActive) {
+      editorRef?.setDebugDecorations([]);
+      dialogueHighlightActive = false;
+      return;
+    }
+
+    // Detect dialogue directly from PM doc text — positions are guaranteed correct
+    const { text, posMap } = buildTextMap(ed.state.doc);
+    const openers = new Set(['"', '\u201C', '\u201E', '\u00AB', '\u300C']);
+    const closerMap = {
+      '"': new Set(['"']),
+      '\u201C': new Set(['\u201D', '"']),
+      '\u201E': new Set(['\u201D', '\u201C']),
+      '\u00AB': new Set(['\u00BB']),
+      '\u300C': new Set(['\u300D']),
+    };
+
+    const ranges = [];
+    let i = 0;
+    while (i < text.length) {
+      const ch = text[i];
+      if (openers.has(ch)) {
+        // For straight quotes: check next char is a letter (opening heuristic)
+        if (ch === '"') {
+          const next = i + 1 < text.length ? text[i + 1] : ' ';
+          if (!/[a-zA-Z\u00C0-\u024F\u2014'\u2018\u2019]/.test(next)) {
+            i++;
+            continue;
+          }
+        }
+
+        const validClosers = closerMap[ch];
+        let j = i + 1;
+        let found = false;
+        while (j < text.length && j - i < 500) {
+          if (validClosers.has(text[j])) {
+            // Ensure there's actual content
+            if (j - i > 2) {
+              const from = posMap[i];
+              const to = posMap[j] + 1;
+              ranges.push({ from, to });
+            }
+            i = j + 1;
+            found = true;
+            break;
+          }
+          j++;
+        }
+        if (found) continue;
+      }
+      i++;
+    }
+
+    editorRef?.setDebugDecorations(ranges);
+    dialogueHighlightActive = true;
+  }
 
   // Derived from entity.visible — the Set that drives highlighting
   let viewedEntityIds = $derived(new Set(entities.filter(e => e.visible).map(e => e.id)));
@@ -992,6 +1056,8 @@
         <AnalysisPanel
           {entities}
           ongotochapter={handleGoToChapter}
+          ontoggledialoguehighlight={toggleDialogueHighlight}
+          dialogueHighlightActive={dialogueHighlightActive}
         />
       {:else if rightPanelTab === 'notes'}
         <NotesPanel
