@@ -220,6 +220,10 @@ export async function chapterAnalysis() {
   return invoke('chapter_analysis');
 }
 
+export async function pacingAnalysis() {
+  return invoke('pacing_analysis');
+}
+
 export async function generateHeatmap(entityIds) {
   return invoke('generate_heatmap', { entityIds });
 }

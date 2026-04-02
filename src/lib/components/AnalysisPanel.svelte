@@ -16,6 +16,7 @@
     { group: 'Overview', items: [
       { id: 'chapters', icon: 'bi-bar-chart', label: 'Chapter Analysis' },
       { id: 'heatmap', icon: 'bi-grid-3x3-gap', label: 'Entity Heatmap' },
+      { id: 'pacing', icon: 'bi-activity', label: 'Pacing Analysis' },
     ]},
   ];
 
@@ -200,6 +201,20 @@
       });
     } catch (e) {
       console.error('Failed to open chapter analysis:', e);
+    }
+  }
+
+  async function launchPacing() {
+    try {
+      new WebviewWindow('pacing-' + Date.now(), {
+        url: '/pacing',
+        title: 'Pacing Analysis',
+        width: 1200,
+        height: 800,
+        resizable: true,
+      });
+    } catch (e) {
+      console.error('Failed to open pacing analysis:', e);
     }
   }
 
@@ -505,6 +520,14 @@
       <button class="rep-scan-btn" onclick={launchHeatmap} disabled={heatmapEntities.size === 0}>
         <i class="bi bi-grid-3x3-gap"></i>
         Open Heatmap ({heatmapEntities.size} entities)
+      </button>
+    </div>
+
+  {:else if subTab === 'pacing'}
+    <div class="hm-setup">
+      <p class="hm-setup-desc">Visualise the rhythm of your prose. Sentence length waveforms show where your writing builds tension, slows down, or flatlines.</p>
+      <button class="rep-scan-btn" onclick={launchPacing}>
+        <i class="bi bi-activity"></i> Open Pacing Analysis
       </button>
     </div>
   {/if}

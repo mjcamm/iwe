@@ -712,3 +712,60 @@ pub fn chapter_analysis(state: tauri::State<'_, AppState>) -> Result<Vec<Chapter
 
     Ok(results)
 }
+
+// ---- Pacing analysis (sentence length waveform) ----
+
+#[derive(Serialize)]
+pub struct PacingChapter {
+    pub chapter_id: i64,
+    pub chapter_title: String,
+    pub sentence_lengths: Vec<usize>, // word count per sentence, in order
+}
+
+#[tauri::command]
+pub fn pacing_analysis(state: tauri::State<'_, AppState>) -> Result<Vec<PacingChapter>, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    let chapters = db::list_chapters(conn).map_err(|e| e.to_string())?;
+
+    let mut results = Vec::new();
+
+    for chapter in &chapters {
+        let plain = chapter_plain_text(chapter)?;
+        let chars: Vec<char> = plain.chars().collect();
+
+        let mut sentence_lengths = Vec::new();
+        let mut sent_start = 0;
+
+        for (i, &ch) in chars.iter().enumerate() {
+            if ch == '.' || ch == '?' || ch == '!' {
+                let sent_text: String = chars[sent_start..=i].iter().collect();
+                let wc = sent_text.split(|c: char| !c.is_alphanumeric() && c != '\'')
+                    .filter(|w| !w.is_empty())
+                    .count();
+                if wc > 0 {
+                    sentence_lengths.push(wc);
+                }
+                sent_start = i + 1;
+            }
+        }
+        // Trailing text without terminator
+        if sent_start < chars.len() {
+            let sent_text: String = chars[sent_start..].iter().collect();
+            let wc = sent_text.split(|c: char| !c.is_alphanumeric() && c != '\'')
+                .filter(|w| !w.is_empty())
+                .count();
+            if wc > 0 {
+                sentence_lengths.push(wc);
+            }
+        }
+
+        results.push(PacingChapter {
+            chapter_id: chapter.id,
+            chapter_title: chapter.title.clone(),
+            sentence_lengths,
+        });
+    }
+
+    Ok(results)
+}

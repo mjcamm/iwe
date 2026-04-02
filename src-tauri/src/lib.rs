@@ -792,6 +792,7 @@ pub fn run() {
             analysis::find_similar_phrases,
             analysis::generate_heatmap,
             analysis::chapter_analysis,
+            analysis::pacing_analysis,
             scanner::debug_stripped_text,
             spellcheck::check_spelling,
             spellcheck::get_spell_suggestions,
