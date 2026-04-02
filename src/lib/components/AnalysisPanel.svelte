@@ -1,5 +1,5 @@
 <script>
-  import { wordFrequency, findSimilarPhrases, textSearch } from '$lib/db.js';
+  import { wordFrequency, findSimilarPhrases, textSearch, adverbAnalysis, debugDialogueSpans } from '$lib/db.js';
   import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 
   let { ongotochapter, entities = [] } = $props();
@@ -12,6 +12,9 @@
       { id: 'frequency', icon: 'bi-sort-numeric-down', label: 'Word Frequency' },
       { id: 'clusters', icon: 'bi-arrow-repeat', label: 'Cluster Finder' },
       { id: 'similar', icon: 'bi-copy', label: 'Similar Phrasing' },
+    ]},
+    { group: 'Style', items: [
+      { id: 'adverbs', icon: 'bi-pencil', label: 'Adverb Density' },
     ]},
     { group: 'Overview', items: [
       { id: 'chapters', icon: 'bi-bar-chart', label: 'Chapter Analysis' },
@@ -164,6 +167,59 @@
       simResults = [];
     }
     simLoading = false;
+  }
+
+  // ---- Dialogue attribution adverb state ----
+  let adverbData = $state(null);
+  let adverbLoading = $state(false);
+  let adverbExpanded = $state(null); // filter to a specific adverb word
+  let adverbShowRedundant = $state(false); // show only redundant instances
+
+  async function runAdverbScan() {
+    adverbLoading = true;
+    try {
+      adverbData = await adverbAnalysis();
+    } catch (e) {
+      console.warn('Adverb analysis failed:', e);
+      adverbData = null;
+    }
+    adverbLoading = false;
+  }
+
+  let adverbFiltered = $derived(() => {
+    if (!adverbData) return [];
+    let list = adverbData.instances;
+    if (adverbShowRedundant) list = list.filter(i => i.redundant);
+    if (adverbExpanded) list = list.filter(i => i.adverb.toLowerCase() === adverbExpanded);
+    return list;
+  });
+
+  let adverbGrouped = $derived(() => {
+    const filtered = adverbFiltered();
+    const map = new Map();
+    for (const inst of filtered) {
+      if (!map.has(inst.chapter_id)) {
+        map.set(inst.chapter_id, { chapterId: inst.chapter_id, title: inst.chapter_title, instances: [] });
+      }
+      map.get(inst.chapter_id).instances.push(inst);
+    }
+    return [...map.values()];
+  });
+
+  function highlightAdverb(context, adverb, speechVerb, redundant) {
+    let html = context.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    if (!adverb) return html;
+    // Highlight adverb
+    const advEscaped = adverb.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const advRe = new RegExp(`(\\b${advEscaped}\\b)`, 'gi');
+    html = html.replace(advRe, '<mark class="adv-highlight">$1</mark>');
+    // For redundant instances, also highlight the speech verb
+    if (redundant && speechVerb) {
+      const verbEscaped = speechVerb.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const verbRe = new RegExp(`(\\b${verbEscaped}\\b)`, 'gi');
+      html = html.replace(verbRe, '<mark class="adv-highlight-verb">$1</mark>');
+    }
+    return html;
   }
 
   function similarityLabel(sim) {
@@ -530,6 +586,123 @@
         <i class="bi bi-activity"></i> Open Pacing Analysis
       </button>
     </div>
+
+  {:else if subTab === 'adverbs'}
+    <div class="adv-quote">
+      <p class="adv-quote-text">"I believe the road to hell is paved with adverbs, and I will shout it from the rooftops. To put it another way, they're like dandelions. If you have one on your lawn, it looks pretty and unique. If you fail to root it out, however, you find five the next day... fifty the day after that... and then, my brothers and sisters, your lawn is totally, completely, and profligately covered with dandelions."</p>
+      <p class="adv-quote-attr">-- Stephen King, <em>On Writing: A Memoir of the Craft</em></p>
+    </div>
+    <div class="rep-controls">
+      <p class="adv-desc">Finds adverbs in dialogue attribution -- where the author tells the reader how something was said instead of showing it.</p>
+      <button class="rep-scan-btn" onclick={runAdverbScan} disabled={adverbLoading}>
+        {#if adverbLoading}Scanning...{:else}<i class="bi bi-pencil"></i> Scan Dialogue Tags{/if}
+      </button>
+    </div>
+
+    {#if adverbData}
+      <!-- Summary stats -->
+      {@const adverbRate = adverbData.total_dialogue_spans > 0 ? (adverbData.attributions_with_adverbs / adverbData.total_dialogue_spans * 100) : 0}
+      <div class="adv-summary">
+        <div class="adv-stat">
+          <span class="adv-stat-val">{adverbRate.toFixed(1)}%</span>
+          <span class="adv-stat-label">Tag adverb rate</span>
+        </div>
+        <div class="adv-stat">
+          <span class="adv-stat-val">{adverbData.total_instances}</span>
+          <span class="adv-stat-label">Adverbs found</span>
+        </div>
+        <div class="adv-stat">
+          <span class="adv-stat-val">{adverbData.total_dialogue_spans}</span>
+          <span class="adv-stat-label">Dialogue spans</span>
+        </div>
+        <div class="adv-stat">
+          <span class="adv-stat-val adv-dialogue-tag">{adverbData.redundant_count}</span>
+          <span class="adv-stat-label">Redundant</span>
+        </div>
+      </div>
+
+      <!-- Filter: redundant only -->
+      {#if adverbData.redundant_count > 0}
+        <div class="adv-filters">
+          <button class="adv-filter-btn" class:active={!adverbShowRedundant} onclick={() => adverbShowRedundant = false}>
+            All ({adverbData.total_instances})
+          </button>
+          <button class="adv-filter-btn" class:active={adverbShowRedundant} onclick={() => adverbShowRedundant = true}>
+            Redundant ({adverbData.redundant_count})
+          </button>
+        </div>
+      {/if}
+
+      <!-- Top offenders -->
+      <div class="adv-top-section">
+        <div class="adv-top-label">Most frequent</div>
+        <div class="adv-top-list">
+          {#each adverbData.top_adverbs.slice(0, 15) as freq (freq.word)}
+            <button
+              class="adv-top-pill"
+              class:active={adverbExpanded === freq.word}
+              onclick={() => adverbExpanded = adverbExpanded === freq.word ? null : freq.word}
+            >
+              {freq.word}
+              <span class="adv-pill-count">{freq.count}</span>
+            </button>
+          {/each}
+        </div>
+      </div>
+
+      <!-- Instance list -->
+      <div class="adv-instance-list">
+        {#if adverbFiltered().length === 0}
+          <div class="search-empty">No matches for current filter.</div>
+        {:else}
+          <div class="adv-result-count">
+            {adverbFiltered().length} instance{adverbFiltered().length !== 1 ? 's' : ''}
+            across {adverbGrouped().length} chapter{adverbGrouped().length !== 1 ? 's' : ''}
+          </div>
+        {/if}
+        {#each adverbGrouped() as chapter (chapter.chapterId)}
+          <div class="search-chapter">
+            <div class="search-chapter-header">
+              <span class="search-chapter-title">{chapter.title}</span>
+              <span class="search-chapter-count">{chapter.instances.length}</span>
+            </div>
+            {#each chapter.instances as inst}
+              <button
+                class="search-slab"
+                onclick={async () => {
+                  console.log('[adverb-nav]', {
+                    adverb: inst.adverb,
+                    speechVerb: inst.speech_verb,
+                    chapterId: inst.chapter_id,
+                    chapterTitle: inst.chapter_title,
+                    charPosition: inst.char_position,
+                    redundant: inst.redundant,
+                    dialogueSnippet: inst.dialogue_snippet,
+                    context: inst.context,
+                  });
+                  try {
+                    const debug = await debugDialogueSpans(inst.chapter_id, inst.char_position);
+                    console.log('[dialogue-debug]', debug);
+                  } catch (e) { console.warn('[dialogue-debug] failed:', e); }
+                  ongotochapter?.(inst.chapter_id, inst.adverb, inst.char_position);
+                }}
+                title="Jump to this adverb"
+              >
+                <div class="adv-slab-meta">
+                  <span class="adv-tag-badge">{inst.speech_verb}</span>
+                  {#if inst.redundant}
+                    <span class="adv-redundant-badge">redundant</span>
+                  {/if}
+                </div>
+                <span class="slab-text">
+                  ...{@html highlightAdverb(inst.context, inst.adverb, inst.speech_verb, inst.redundant)}...
+                </span>
+              </button>
+            {/each}
+          </div>
+        {/each}
+      </div>
+    {/if}
   {/if}
 </div>
 
@@ -848,6 +1021,140 @@
 
   :global(.rep-highlight) {
     background: #fde68a; color: var(--iwe-text); font-weight: 600;
+    border-radius: 2px; padding: 0 2px;
+  }
+
+  /* Adverb quote */
+  .adv-quote {
+    padding: 0.6rem 0.75rem;
+    border-bottom: 1px solid var(--iwe-border-light);
+    border-left: 3px solid var(--iwe-accent);
+    background: var(--iwe-bg-hover);
+    margin: 0;
+  }
+  .adv-quote-text {
+    font-family: var(--iwe-font-prose); font-size: 0.9rem;
+    color: var(--iwe-text-secondary); line-height: 1.6;
+    font-style: italic; margin: 0 0 0.3rem;
+  }
+  .adv-quote-attr {
+    font-family: var(--iwe-font-ui); font-size: 0.8rem;
+    color: var(--iwe-text-secondary); margin: 0;
+  }
+
+  .adv-desc {
+    font-size: 0.9rem; color: var(--iwe-text-secondary);
+    line-height: 1.5; margin: 0 0 0.3rem;
+  }
+
+  /* Adverb density */
+  .adv-summary {
+    display: flex; gap: 1px; background: var(--iwe-border-light);
+    border-bottom: 1px solid var(--iwe-border-light);
+  }
+  .adv-stat {
+    flex: 1; display: flex; flex-direction: column; align-items: center;
+    padding: 0.5rem; background: var(--iwe-bg);
+  }
+  .adv-stat-val {
+    font-size: 1.1rem; font-weight: 600; color: var(--iwe-text);
+    font-family: var(--iwe-font-prose);
+  }
+  .adv-stat-val.adv-dialogue-tag { color: #dc2626; }
+  .adv-stat-label {
+    font-size: 0.6rem; color: var(--iwe-text-faint); text-transform: uppercase;
+    letter-spacing: 0.04em; margin-top: 0.1rem;
+  }
+
+  .adv-filters {
+    display: flex; border-bottom: 1px solid var(--iwe-border-light);
+  }
+  .adv-filter-btn {
+    flex: 1; padding: 0.35rem 0.3rem; background: none; border: none;
+    border-bottom: 2px solid transparent;
+    font-family: var(--iwe-font-ui); font-size: 0.7rem; font-weight: 500;
+    color: var(--iwe-text-muted); cursor: pointer; transition: all 100ms;
+  }
+  .adv-filter-btn:hover { color: var(--iwe-text-secondary); background: var(--iwe-bg-hover); }
+  .adv-filter-btn.active { color: var(--iwe-text); border-bottom-color: var(--iwe-accent); }
+
+  .adv-top-section {
+    padding: 0.4rem 0.75rem; border-bottom: 1px solid var(--iwe-border-light);
+  }
+  .adv-top-label {
+    font-size: 0.65rem; font-weight: 600; color: var(--iwe-text-faint);
+    text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 0.3rem;
+  }
+  .adv-top-list { display: flex; flex-wrap: wrap; gap: 0.25rem; }
+  .adv-top-pill {
+    display: flex; align-items: center; gap: 0.25rem;
+    padding: 0.2rem 0.5rem; border-radius: 12px;
+    font-family: var(--iwe-font-ui); font-size: 0.75rem;
+    background: var(--iwe-bg-hover); border: 1px solid var(--iwe-border-light);
+    color: var(--iwe-text-secondary); cursor: pointer; transition: all 100ms;
+  }
+  .adv-top-pill:hover { border-color: var(--iwe-accent); color: var(--iwe-accent); }
+  .adv-top-pill.active { background: var(--iwe-accent); color: white; border-color: var(--iwe-accent); }
+  .adv-top-pill.active .adv-pill-count,
+  .adv-top-pill.active .adv-pill-dlg { color: rgba(255,255,255,0.7); }
+  .adv-pill-count { font-size: 0.65rem; color: var(--iwe-text-faint); font-weight: 600; }
+  .adv-pill-dlg { font-size: 0.6rem; color: #dc2626; font-weight: 500; }
+
+  .adv-instance-list { flex: 1; overflow-y: auto; }
+  .adv-result-count {
+    font-size: 0.7rem; color: var(--iwe-text-faint); padding: 0.4rem 0.75rem;
+    border-bottom: 1px solid var(--iwe-border-light);
+  }
+  .adv-slab-meta {
+    display: flex; align-items: center; gap: 0.3rem; margin-bottom: 0.2rem;
+  }
+  .adv-tag-badge {
+    font-size: 0.6rem; color: var(--iwe-text-faint); background: var(--iwe-bg-active);
+    padding: 0.1rem 0.3rem; border-radius: 8px; font-weight: 500;
+  }
+  .adv-redundant-badge {
+    font-size: 0.55rem; color: #dc2626; background: #fef2f2;
+    padding: 0.1rem 0.3rem; border-radius: 8px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.03em;
+  }
+  .search-chapter { border-bottom: 1px solid var(--iwe-border); }
+  .search-chapter-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0.5rem 0.75rem; position: sticky; top: 0; z-index: 1;
+    background: var(--iwe-bg-sidebar);
+    border-bottom: 1px solid var(--iwe-border-light);
+  }
+  .search-chapter-title {
+    font-family: var(--iwe-font-prose);
+    font-size: 0.95rem; font-weight: 600; color: var(--iwe-text);
+  }
+  .search-chapter-count {
+    font-size: 0.7rem; color: var(--iwe-text-muted);
+    background: var(--iwe-bg-active); padding: 0.15rem 0.45rem;
+    border-radius: 10px; font-weight: 500;
+  }
+  .search-slab {
+    display: block; width: 100%;
+    background: none; border: none; border-bottom: 1px solid var(--iwe-border-light);
+    padding: 0.65rem 0.75rem; cursor: pointer; text-align: left;
+    transition: background 100ms; font-family: var(--iwe-font-ui);
+  }
+  .search-slab:last-child { border-bottom: none; }
+  .search-slab:hover { background: var(--iwe-bg-hover); }
+  .slab-text {
+    font-family: var(--iwe-font-prose); font-size: 0.85rem;
+    color: var(--iwe-text-secondary); line-height: 1.7;
+  }
+  .search-empty {
+    padding: 1.5rem; text-align: center; color: var(--iwe-text-faint);
+    font-size: 0.85rem; font-style: italic;
+  }
+  :global(.adv-highlight) {
+    background: #fde68a; color: var(--iwe-text); font-weight: 600;
+    border-radius: 2px; padding: 0 2px;
+  }
+  :global(.adv-highlight-verb) {
+    background: #fecaca; color: var(--iwe-text); font-weight: 600;
     border-radius: 2px; padding: 0 2px;
   }
 </style>

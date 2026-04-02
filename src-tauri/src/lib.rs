@@ -1,5 +1,6 @@
 mod analysis;
 mod db;
+mod text_utils;
 mod palettes;
 mod scanner;
 mod spellcheck;
@@ -793,6 +794,8 @@ pub fn run() {
             analysis::generate_heatmap,
             analysis::chapter_analysis,
             analysis::pacing_analysis,
+            analysis::adverb_analysis,
+            analysis::debug_dialogue_spans,
             scanner::debug_stripped_text,
             spellcheck::check_spelling,
             spellcheck::get_spell_suggestions,

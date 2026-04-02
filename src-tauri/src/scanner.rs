@@ -4,6 +4,7 @@ use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 
 use crate::db::{self, AppState};
+use crate::text_utils;
 use crate::wordlists;
 use crate::ydoc;
 
@@ -983,12 +984,6 @@ pub fn dialogue_search(
         .build()
         .map_err(|e| format!("Invalid search pattern: {}", e))?;
 
-    // Regex to find quoted text — handles "..." and "..." (curly quotes)
-    let quote_re = RegexBuilder::new(r#"[""\u{201C}](.*?)[""\u{201D}]"#)
-        .dot_matches_new_line(true)
-        .build()
-        .map_err(|e| format!("Quote regex error: {}", e))?;
-
     let mut results = Vec::new();
     let context_radius: usize = 80;
 
@@ -996,41 +991,35 @@ pub fn dialogue_search(
         let plain = chapter_plain_text(chapter)?;
         let chars: Vec<char> = plain.chars().collect();
 
-        // Find all quoted passages
-        for quote_match in quote_re.find_iter(&plain) {
-            let quote_text = quote_match.as_str();
+        let spans = text_utils::extract_dialogue(&plain);
 
-            // Search within this quoted passage
-            if let Some(inner_match) = search_re.find(quote_text) {
+        for span in &spans {
+            // Search within this dialogue span
+            if let Some(inner_match) = search_re.find(&span.inner_text) {
                 let matched_text = inner_match.as_str().to_string();
 
-                // Get char position of the quote in the full text
-                let quote_char_start = plain[..quote_match.start()].chars().count();
-                let quote_char_end = plain[..quote_match.end()].chars().count();
-
                 // Build context — include text before the quote to show who's speaking
-                let ctx_start = quote_char_start.saturating_sub(context_radius);
-                let ctx_end = (quote_char_end + context_radius / 2).min(chars.len());
+                let ctx_start = span.char_start.saturating_sub(context_radius);
+                let ctx_end = (span.char_end + context_radius / 2).min(chars.len());
 
                 let actual_start = if ctx_start == 0 { 0 } else {
-                    (ctx_start..quote_char_start).find(|&i| chars[i].is_whitespace())
+                    (ctx_start..span.char_start).find(|&i| chars[i].is_whitespace())
                         .map(|i| i + 1).unwrap_or(ctx_start)
                 };
                 let actual_end = if ctx_end >= chars.len() { chars.len() } else {
-                    (quote_char_end..ctx_end).rev().find(|&i| chars[i].is_whitespace())
+                    (span.char_end..ctx_end).rev().find(|&i| chars[i].is_whitespace())
                         .unwrap_or(ctx_end)
                 };
 
                 let context: String = chars[actual_start..actual_end].iter().collect();
-                let dialogue: String = chars[quote_char_start..quote_char_end].iter().collect();
 
                 results.push(DialogueResult {
                     chapter_id: chapter.id,
                     chapter_title: chapter.title.clone(),
-                    dialogue,
+                    dialogue: span.text.clone(),
                     matched_text,
                     context,
-                    char_position: quote_char_start,
+                    char_position: span.char_start,
                 });
             }
         }

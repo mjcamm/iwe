@@ -224,6 +224,14 @@ export async function pacingAnalysis() {
   return invoke('pacing_analysis');
 }
 
+export async function adverbAnalysis() {
+  return invoke('adverb_analysis');
+}
+
+export async function debugDialogueSpans(chapterId, aroundPos) {
+  return invoke('debug_dialogue_spans', { chapterId, aroundPos });
+}
+
 export async function generateHeatmap(entityIds) {
   return invoke('generate_heatmap', { entityIds });
 }
