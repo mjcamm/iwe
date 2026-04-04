@@ -10,7 +10,8 @@
     "print*",
     "timeflow*",
     "pacing*",
-    "readability*"
+    "readability*",
+    "paragraphs*"
   ],
   "permissions": [
     "core:default",

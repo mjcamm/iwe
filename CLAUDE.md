@@ -149,13 +149,13 @@ Handles flashbacks, flash-forwards, and time jumps. Writers wrap text in **time 
 - `src/lib/timeBreak.js` — `TimeBreak` wrapping TipTap node
 - `src/routes/timeflow/+page.js` + `+page.svelte` — Time Flow Manager popup
 - `src-tauri/src/ydoc.rs` — `extract_time_sections()`, `locate_state_markers_in_sections()`
-- `src-tauri/capabilities/default.json` — includes `"timeflow*"`, `"pacing*"`
+- `src-tauri/capabilities/default.json` — includes `"timeflow*"`, `"pacing*"`, `"readability*"`, `"paragraphs*"`
 
 ### Navigation / Jump-to-Position (CRITICAL — read this carefully)
 
 `handleGoToChapter(chapterId, searchText, positionHint)` in the project page is the **ONE central function** for ALL click-to-navigate-and-highlight across the entire app. Every feature that lets the user click a result and jump to a position in the editor MUST use this function. Do not create alternative navigation paths.
 
-**Used by:** find-all-references, text search, dialogue search, relationship search, similar phrasing, word frequency browser, cluster finder, entity detection go-to, pinned excerpt clicks, pacing analysis, adverb analysis.
+**Used by:** find-all-references, text search, dialogue search, relationship search, similar phrasing, word frequency browser, cluster finder, entity detection go-to, pinned excerpt clicks, pacing analysis, adverb analysis, readability analysis, paragraph length analysis.
 
 **CRITICAL — `buildTextMap` is the single source of truth:**
 
@@ -178,7 +178,7 @@ Handles flashbacks, flash-forwards, and time jumps. Writers wrap text in **time 
 
 ### Multi-window architecture
 
-Pop-up windows (heatmap, chapter analysis, stats, time flow manager, pacing analysis) are separate SvelteKit routes opened via `WebviewWindow` from `@tauri-apps/api/webviewWindow`. They read data directly from the database — no data passing between windows. Each window needs its route in `src/routes/` and its label pattern in `src-tauri/capabilities/default.json`.
+Pop-up windows (heatmap, chapter analysis, stats, time flow manager, pacing analysis, readability score, paragraph length) are separate SvelteKit routes opened via `WebviewWindow` from `@tauri-apps/api/webviewWindow`. They read data directly from the database — no data passing between windows. Each window needs its route in `src/routes/` and its label pattern in `src-tauri/capabilities/default.json`.
 
 **Cross-window events:** Popup windows can navigate the main editor via `emitTo('main', 'navigate-to-position', payload)` from `@tauri-apps/api/event`. The main window listens for this event and calls `handleGoToChapter`. Payload: `{ chapterId, searchText, charPosition }`.
 
@@ -196,6 +196,8 @@ src/
 │   ├── stats/                    # Writing stats (popup window)
 │   ├── timeflow/                 # Time Flow Manager (popup window)
 │   ├── pacing/                   # Pacing analysis — sentence length waveforms (popup window)
+│   ├── readability/              # Readability score — Flesch-Kincaid grade level (popup window)
+│   ├── paragraphs/               # Paragraph length variation analysis (popup window)
 │   └── print/                    # Print preview (popup window)
 ├── lib/
 │   ├── db.js                     # ALL Tauri command wrappers
@@ -214,7 +216,7 @@ src/
 │       ├── NotesPanel.svelte     # Comments/notes list + detail view
 │       ├── ChapterNav.svelte     # Chapter sidebar
 │       ├── SearchPanel.svelte    # Text/dialogue/relationship search
-│       ├── AnalysisPanel.svelte  # Analysis tools (frequency/clusters/similar/adverbs/dialogue detection/heatmap/pacing/chapters)
+│       ├── AnalysisPanel.svelte  # Analysis tools (frequency/clusters/similar/adverbs/readability/paragraphs/dialogue detection/heatmap/pacing/chapters)
 │       └── Toasts.svelte         # Toast renderer
 
 src-tauri/
@@ -223,16 +225,19 @@ src-tauri/
 │   ├── lib.rs                    # Tauri commands + PDF export
 │   ├── db.rs                     # Database schema + all queries
 │   ├── scanner.rs                # Aho-Corasick scanner + entity/search commands
-│   ├── analysis.rs               # Analysis tools (frequency, clusters, similar, pacing, adverbs, heatmap, chapter analysis)
+│   ├── analysis.rs               # Analysis tools (frequency, clusters, similar, pacing, adverbs, heatmap, chapter analysis, readability, paragraph length)
 │   ├── text_utils.rs             # Shared text utilities (dialogue extraction, sentence extraction, word counting)
 │   ├── ydoc.rs                   # Y.Doc load/encode/text extraction (yrs)
 │   ├── spellcheck.rs             # Hunspell dictionary + spell checking + custom words
 │   ├── synonyms.rs               # Moby Thesaurus lookup (in-memory)
+│   ├── syllable_data.rs          # AUTO-GENERATED phf map of word→syllable counts (generated by generate_syllables.py)
 │   └── wordlists.rs              # Verb/adjective/adverb lists for POS tags
 ├── fonts/
 │   └── LiberationSerif-*.ttf     # Embedded fonts for PDF export
+├── generate_syllables.py           # One-time script: CSV → syllable_data.rs (phf map)
 ├── resources/
 │   ├── dictionaries/en_US.*      # Hunspell dictionary (embedded via include_str!)
+│   ├── syllables-list.csv        # Syllable count dictionary (dev-only, not shipped — compiled into syllable_data.rs)
 │   └── mthesaur.txt              # Moby Thesaurus II (embedded via include_str!)
 ├── capabilities/default.json     # Tauri permissions
 └── Cargo.toml
@@ -313,7 +318,17 @@ Entity notes (pinned excerpts) store Y.Doc relative positions (`y_start BLOB`, `
 The "Dialogue Detection" tool in AnalysisPanel highlights all detected dialogue in the editor using the `debugDecoKey` ProseMirror plugin. Detection runs entirely in JS using `buildTextMap` text — no Rust round-trip, positions are guaranteed correct. Quote marks get a darker highlight, inner dialogue text gets a lighter highlight. The highlighting recalculates live on edit (300ms debounce) so authors can fix mismatched quotes and see the detection update in real-time.
 
 ### Charts use Canvas 2D (no library)
-All charts across the app (chapter analysis, heatmap, pacing waveforms) use raw `canvas.getContext('2d')` calls. No chart library. The design system uses: `#faf8f5` background, `#2d6a5e` teal for primary data, `#d97706` amber for secondary, `#6b6560` for labels, Libre Baskerville for titles, Source Sans 3 for UI text.
+All charts across the app (chapter analysis, heatmap, pacing waveforms, readability, paragraph length) use raw `canvas.getContext('2d')` calls. No chart library. The design system uses: `#faf8f5` background, `#2d6a5e` teal for primary data, `#d97706` amber for secondary, `#6b6560` for labels, Libre Baskerville for titles, Source Sans 3 for UI text.
+
+### Readability Score (Flesch-Kincaid)
+Popup window (`/readability`) computing Flesch-Kincaid grade level per chapter and manuscript-wide. Uses `text_utils::extract_sentences()` for sentence splitting and a compiled `phf` hash map (`syllable_data.rs`) for syllable counting with a vowel-group heuristic fallback.
+
+**Syllable data pipeline:** `src-tauri/resources/syllables-list.csv` (7,596 words) → `generate_syllables.py` → `src/syllable_data.rs` (compile-time `phf::Map`). The CSV is dev-only and never ships in the binary. The `phf` crate compiles the map into the binary as hashed bucket structures — not human-readable strings. Run `python generate_syllables.py` from `src-tauri/` after updating the CSV.
+
+**Sentence counting note:** Our sentence splitter is more accurate than most online tools — it correctly handles abbreviations (Mr., Dr., U.S.A.), ellipsis, initials, and dialogue attribution. This means we count fewer sentences than naive tools, producing slightly higher grade levels. This is intentional and more correct.
+
+### Paragraph Length Variation
+Popup window (`/paragraphs`) showing paragraph word counts as vertical columns per chapter. Uses `ydoc::extract_text_with_breaks()` which inserts `\n\n` between Y.Doc top-level blocks. Flags runs of 3+ consecutive paragraphs within 15% of each other's word count as "monotonous" (shown in amber). Computes std dev and variation % per chapter.
 
 ### Writing stats tracking
 On every content save (500ms debounce), the project page computes word count delta and calls `logWritingActivity()`. The Rust side updates `daily_stats` atomically. Active time is computed from gaps between consecutive activities (capped at session_gap_minutes).

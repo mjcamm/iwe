@@ -797,6 +797,7 @@ pub fn run() {
             analysis::pacing_analysis,
             analysis::adverb_analysis,
             analysis::readability_analysis,
+            analysis::paragraph_length_analysis,
             analysis::get_chapter_dialogue,
             analysis::debug_dialogue_spans,
             scanner::debug_stripped_text,

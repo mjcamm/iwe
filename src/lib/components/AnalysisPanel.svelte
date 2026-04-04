@@ -16,6 +16,7 @@
     { group: 'Style', items: [
       { id: 'adverbs', icon: 'bi-pencil', label: 'Adverb Density' },
       { id: 'readability', icon: 'bi-mortarboard', label: 'Readability Score' },
+      { id: 'paragraphs', icon: 'bi-text-paragraph', label: 'Paragraph Length' },
       { id: 'dialogue-detect', icon: 'bi-chat-quote', label: 'Dialogue Detection' },
     ]},
     { group: 'Overview', items: [
@@ -287,6 +288,20 @@
       });
     } catch (e) {
       console.error('Failed to open readability analysis:', e);
+    }
+  }
+
+  async function launchParagraphs() {
+    try {
+      new WebviewWindow('paragraphs-' + Date.now(), {
+        url: '/paragraphs',
+        title: 'Paragraph Length',
+        width: 1200,
+        height: 800,
+        resizable: true,
+      });
+    } catch (e) {
+      console.error('Failed to open paragraph length analysis:', e);
     }
   }
 
@@ -608,6 +623,14 @@
       <p class="hm-setup-desc">Flesch-Kincaid grade level measures prose complexity based on sentence length and syllable count. Consistency across chapters matters more than any single number.</p>
       <button class="rep-scan-btn" onclick={launchReadability}>
         <i class="bi bi-mortarboard"></i> Open Readability Score
+      </button>
+    </div>
+
+  {:else if subTab === 'paragraphs'}
+    <div class="hm-setup">
+      <p class="hm-setup-desc">Visualise the shape of your prose. Uniform paragraph lengths create monotony — a mix of short and long paragraphs creates visual rhythm on the page.</p>
+      <button class="rep-scan-btn" onclick={launchParagraphs}>
+        <i class="bi bi-text-paragraph"></i> Open Paragraph Length
       </button>
     </div>
 

@@ -232,6 +232,10 @@ export async function readabilityAnalysis() {
   return invoke('readability_analysis');
 }
 
+export async function paragraphLengthAnalysis() {
+  return invoke('paragraph_length_analysis');
+}
+
 export async function getChapterDialogue(chapterId) {
   return invoke('get_chapter_dialogue', { chapterId });
 }

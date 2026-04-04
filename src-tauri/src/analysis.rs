@@ -1594,3 +1594,144 @@ pub fn readability_analysis(state: tauri::State<'_, AppState>) -> Result<Readabi
         chapters: chapter_results,
     })
 }
+
+// ---- Paragraph length analysis ----
+
+#[derive(Serialize)]
+pub struct ParagraphInfo {
+    pub word_count: usize,
+    pub char_start: usize,
+    pub preview: String,
+    pub monotonous: bool, // part of a 3+ run within 15% of each other
+}
+
+#[derive(Serialize)]
+pub struct ParagraphChapter {
+    pub chapter_id: i64,
+    pub chapter_title: String,
+    pub paragraphs: Vec<ParagraphInfo>,
+    pub total_paragraphs: usize,
+    pub avg_length: f64,
+    pub std_dev: f64,
+    pub variation_pct: f64, // std_dev / avg * 100
+}
+
+#[derive(Serialize)]
+pub struct ParagraphAnalysis {
+    pub chapters: Vec<ParagraphChapter>,
+}
+
+fn flag_monotonous_runs(paragraphs: &mut [ParagraphInfo]) {
+    let len = paragraphs.len();
+    if len < 3 { return; }
+
+    // Find runs of 3+ paragraphs where each is within 15% of the run's average
+    let mut i = 0;
+    while i < len {
+        let mut j = i + 1;
+        // Extend the run as long as consecutive paragraphs are within 15% of each other
+        while j < len {
+            let wc_j = paragraphs[j].word_count as f64;
+            let wc_prev = paragraphs[j - 1].word_count as f64;
+            if wc_prev == 0.0 || wc_j == 0.0 {
+                break;
+            }
+            let ratio = if wc_j > wc_prev { wc_j / wc_prev } else { wc_prev / wc_j };
+            if ratio <= 1.15 {
+                j += 1;
+            } else {
+                break;
+            }
+        }
+        if j - i >= 3 {
+            for k in i..j {
+                paragraphs[k].monotonous = true;
+            }
+        }
+        i = if j > i + 1 { j } else { i + 1 };
+    }
+}
+
+#[tauri::command]
+pub fn paragraph_length_analysis(state: tauri::State<'_, AppState>) -> Result<ParagraphAnalysis, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    let chapters = db::list_chapters(conn).map_err(|e| e.to_string())?;
+
+    let mut chapter_results = Vec::new();
+
+    for chapter in &chapters {
+        let doc = ydoc::load_doc(&chapter.content)?;
+        let text = ydoc::extract_text_with_breaks(&doc);
+
+        // Split on double newlines (extract_text_with_breaks uses \n\n between blocks)
+        // Also handle \r\n\r\n for Windows compatibility
+        let raw_paragraphs: Vec<&str> = text.split("\n\n")
+            .flat_map(|s| s.split("\r\n\r\n"))
+            .collect();
+
+        let mut char_offset = 0usize;
+        let mut paragraphs: Vec<ParagraphInfo> = Vec::new();
+
+        for raw in &raw_paragraphs {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                char_offset += raw.len() + 2; // +2 for the \n\n separator
+                continue;
+            }
+
+            let wc = text_utils::count_words(trimmed);
+            if wc == 0 {
+                char_offset += raw.len() + 2;
+                continue;
+            }
+
+            let preview = if trimmed.len() > 80 {
+                trimmed[..80].to_string()
+            } else {
+                trimmed.to_string()
+            };
+
+            paragraphs.push(ParagraphInfo {
+                word_count: wc,
+                char_start: char_offset,
+                preview,
+                monotonous: false,
+            });
+
+            char_offset += raw.len() + 2;
+        }
+
+        // Flag monotonous runs
+        flag_monotonous_runs(&mut paragraphs);
+
+        // Stats
+        let total = paragraphs.len();
+        let avg = if total > 0 {
+            paragraphs.iter().map(|p| p.word_count as f64).sum::<f64>() / total as f64
+        } else { 0.0 };
+
+        let std_dev = if total > 1 {
+            let variance = paragraphs.iter()
+                .map(|p| (p.word_count as f64 - avg).powi(2))
+                .sum::<f64>() / total as f64;
+            variance.sqrt()
+        } else { 0.0 };
+
+        let variation_pct = if avg > 0.0 { std_dev / avg * 100.0 } else { 0.0 };
+
+        chapter_results.push(ParagraphChapter {
+            chapter_id: chapter.id,
+            chapter_title: chapter.title.clone(),
+            paragraphs,
+            total_paragraphs: total,
+            avg_length: (avg * 10.0).round() / 10.0,
+            std_dev: (std_dev * 10.0).round() / 10.0,
+            variation_pct: (variation_pct * 10.0).round() / 10.0,
+        });
+    }
+
+    Ok(ParagraphAnalysis {
+        chapters: chapter_results,
+    })
+}
