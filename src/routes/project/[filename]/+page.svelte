@@ -1,24 +1,12 @@
 <script>
   import { onMount } from 'svelte';
-  import { goto } from '$app/navigation';
-  import { getProjectsDir, getSettings, saveSettings, openProject, getChapters, getChapter, addChapter, updateChapterContent, renameChapter, deleteChapter, getEntities, createEntity, updateEntity, deleteEntity, setEntityVisible, addAlias, removeAlias, scanAllChapters, getNavHistory, pushNavEntry, truncateNavAfter, addEntityNote, logWritingActivity, setSpellLanguage, getAllChapterWordCounts, getChapterComments, addComment, updateComment, deleteComment, addStateMarker, deleteStateMarker, getStateMarker, getChapterDialogue } from '$lib/db.js';
+  import { beforeNavigate } from '$app/navigation';
+  import { getSettings, saveSettings, getChapters, getChapter, addChapter, updateChapterContent, renameChapter, deleteChapter, getEntities, createEntity, updateEntity, deleteEntity, setEntityVisible, addAlias, removeAlias, scanAllChapters, getNavHistory, pushNavEntry, truncateNavAfter, addEntityNote, logWritingActivity, setSpellLanguage, getAllChapterWordCounts, getChapterComments, addComment, updateComment, deleteComment, addStateMarker, deleteStateMarker, getStateMarker, getChapterDialogue } from '$lib/db.js';
   import ChapterNav from '$lib/components/ChapterNav.svelte';
   import Editor from '$lib/components/Editor.svelte';
   import EntityPanel from '$lib/components/EntityPanel.svelte';
   import NotesPanel from '$lib/components/NotesPanel.svelte';
-  import PalettePickerModal from '$lib/components/PalettePickerModal.svelte';
-  import Toasts from '$lib/components/Toasts.svelte';
-  import { exportDocx, exportTxt, exportHtml, exportPdf } from '$lib/export.js';
   import { buildTextMap } from '$lib/entityHighlight.js';
-  import { generateHTML } from '@tiptap/core';
-  import StarterKit from '@tiptap/starter-kit';
-  import TextAlign from '@tiptap/extension-text-align';
-  import Superscript from '@tiptap/extension-superscript';
-  import Subscript from '@tiptap/extension-subscript';
-  import { createChapterDoc, destroyDoc } from '$lib/ydoc.js';
-  import { yDocToProsemirrorJSON } from 'y-prosemirror';
-  import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
-  import { listen } from '@tauri-apps/api/event';
   import SearchPanel from '$lib/components/SearchPanel.svelte';
   import AnalysisPanel from '$lib/components/AnalysisPanel.svelte';
   import { addToast } from '$lib/toast.js';
@@ -27,7 +15,6 @@
 
   let projectLoading = $state(true);
   let editorReady = $state(false);
-  let showPaletteBrowse = $state(false);
   let projectTitle = $state('');
   let chapters = $state([]);
   let openTabs = $state([]);
@@ -224,9 +211,6 @@
   const RIGHT_MAX = 1000;
 
   onMount(async () => {
-    const dir = await getProjectsDir();
-    if (!dir) { goto('/'); return; }
-
     // Load saved panel widths
     const settings = await getSettings();
     if (settings.leftPanelWidth) leftWidth = settings.leftPanelWidth;
@@ -235,8 +219,6 @@
       try { await setSpellLanguage(settings.spellLanguage); } catch {}
     }
 
-    const filepath = `${dir}/${data.filename}`;
-    await openProject(filepath);
     projectTitle = data.filename.replace('.iwe', '');
     chapters = await getChapters();
     entities = await getEntities();
@@ -265,9 +247,9 @@
 
     projectLoading = false;
 
-    // Listen for cross-window navigation events (from popup analysis windows)
-    listen('navigate-to-position', (event) => {
-      const p = event.payload;
+    // Listen for cross-window navigation events (forwarded by layout)
+    window.addEventListener('iwe-navigate-to-position', (event) => {
+      const p = event.detail;
       handleGoToChapter(p.chapterId, p.searchText, p.charPosition || 0);
     });
 
@@ -278,6 +260,15 @@
         scrollEl.addEventListener('scroll', () => resetCheckpointTimer());
       }
     }, 500);
+  });
+
+  // Flush pending autosave before navigating away
+  beforeNavigate(() => {
+    if (saveTimer && activeChapter) {
+      clearTimeout(saveTimer);
+      saveTimer = null;
+      updateChapterContent(activeChapter.id, activeChapter.content);
+    }
   });
 
   let chapterCounts = $state({});
@@ -332,83 +323,6 @@
   let activeNoteId = $state(null); // selected note in detail view
 
   let pendingEntityName = $state(null);
-
-  let showExportMenu = $state(false);
-
-  // Schema extensions for generating HTML from Y.Doc (matches editor config)
-  const exportExtensions = [
-    StarterKit.configure({ heading: { levels: [1, 2, 3] }, history: false }),
-    TextAlign.configure({ types: ['heading', 'paragraph'] }),
-    Superscript,
-    Subscript,
-  ];
-
-  /** Convert Y.Doc bytes to HTML using TipTap's schema */
-  function chapterToHtml(chapterContent) {
-    try {
-      const { doc, xmlFragment } = createChapterDoc(chapterContent);
-      const json = yDocToProsemirrorJSON(doc, 'prosemirror');
-      destroyDoc(doc);
-      return generateHTML(json, exportExtensions);
-    } catch (e) {
-      console.warn('[export] failed to generate HTML:', e);
-      return '';
-    }
-  }
-
-  /** Prepare chapters with HTML content for export functions */
-  function chaptersWithHtml() {
-    return chapters.map(ch => ({
-      ...ch,
-      content: chapterToHtml(ch.content),
-    }));
-  }
-
-  async function handleExport(format) {
-    showExportMenu = false;
-    try {
-      let path;
-      if (format === 'pdf-a4') {
-        path = await exportPdf(chapters, projectTitle, 'a4');
-      } else if (format === 'pdf-book') {
-        path = await exportPdf(chapters, projectTitle, 'book');
-      } else {
-        // DOCX/TXT/HTML need HTML content — generate from Y.Doc
-        const htmlChapters = chaptersWithHtml();
-        if (format === 'docx') path = await exportDocx(htmlChapters, projectTitle);
-        else if (format === 'txt') path = await exportTxt(htmlChapters, projectTitle);
-        else if (format === 'html') path = await exportHtml(htmlChapters, projectTitle);
-      }
-      if (path) addToast(`Exported to ${path.split(/[/\\]/).pop()}`, 'success');
-    } catch (e) {
-      console.error('Export failed:', e);
-      addToast('Export failed: ' + e, 'error');
-    }
-  }
-
-  function launchWritingStats() {
-    try {
-      new WebviewWindow('stats-' + Date.now(), {
-        url: '/stats',
-        title: 'Writing Stats',
-        width: 1100,
-        height: 800,
-        resizable: true,
-      });
-    } catch (e) { console.error('Failed to open stats:', e); }
-  }
-
-  function launchTimeFlow() {
-    try {
-      new WebviewWindow('timeflow-' + Date.now(), {
-        url: '/timeflow',
-        title: 'Time Flow Manager',
-        width: 900,
-        height: 700,
-        resizable: true,
-      });
-    } catch (e) { console.error('Failed to open time flow:', e); }
-  }
 
   function handleQuickAdd(word) {
     pendingEntityName = word;
@@ -941,46 +855,8 @@
 {/if}
 {#if !projectLoading}
 <div class="workspace">
-  <!-- Toolbar -->
-  <div class="toolbar">
-    <a href="/" class="toolbar-back" title="Back to manuscripts">&larr;</a>
-    <span class="toolbar-sep"></span>
-    <span class="toolbar-title">{projectTitle}</span>
-    <span class="toolbar-spacer"></span>
-    <div class="export-wrap">
-      <button class="stats-btn" onclick={() => showExportMenu = !showExportMenu} title="Export manuscript">
-        <i class="bi bi-download"></i> Export
-      </button>
-      {#if showExportMenu}
-        <div class="export-menu">
-          <button class="export-option" onclick={() => handleExport('docx')}>
-            <i class="bi bi-file-earmark-word"></i> Word (.docx)
-          </button>
-          <button class="export-option" onclick={() => handleExport('pdf-a4')}>
-            <i class="bi bi-file-earmark-pdf"></i> PDF — A4
-          </button>
-          <button class="export-option" onclick={() => handleExport('pdf-book')}>
-            <i class="bi bi-book"></i> PDF — Book (5"×8")
-          </button>
-          <button class="export-option" onclick={() => handleExport('html')}>
-            <i class="bi bi-filetype-html"></i> HTML (.html)
-          </button>
-          <button class="export-option" onclick={() => handleExport('txt')}>
-            <i class="bi bi-file-earmark-text"></i> Plain Text (.txt)
-          </button>
-        </div>
-      {/if}
-    </div>
-    <button class="stats-btn" onclick={() => showPaletteBrowse = true} title="Word Palettes">
-      <i class="bi bi-palette2"></i> Palettes
-    </button>
-    <button class="stats-btn" onclick={launchWritingStats} title="Writing Stats">
-      <i class="bi bi-graph-up"></i> Stats
-    </button>
-    <button class="stats-btn" onclick={launchTimeFlow} title="Time Flow Manager">
-      <i class="bi bi-clock-history"></i> Time Flow
-    </button>
-    <span class="toolbar-spacer"></span>
+  <!-- Editor nav bar -->
+  <div class="editor-nav">
     <button class="nav-btn" disabled={!canGoBack} onclick={navBack} title="Go back">
       <i class="bi bi-chevron-left"></i>
     </button>
@@ -1137,17 +1013,6 @@
 </div>
 {/if}
 
-<PalettePickerModal
-  show={showPaletteBrowse}
-  word=""
-  editorFrom={0}
-  editorTo={0}
-  onreplace={() => {}}
-  onclose={() => showPaletteBrowse = false}
-/>
-
-<Toasts />
-
 <style>
   .project-loading {
     position: fixed; inset: 0; z-index: 10000;
@@ -1180,57 +1045,16 @@
   }
 
   .workspace {
-    display: flex; flex-direction: column; height: 100vh;
+    display: flex; flex-direction: column; height: 100%;
     background: var(--iwe-bg);
   }
 
-  .toolbar {
-    display: flex; align-items: center; gap: 0.6rem;
-    padding: 0 1rem; height: 42px; flex-shrink: 0;
-    border-bottom: 1px solid var(--iwe-border);
+  .editor-nav {
+    display: flex; align-items: center; gap: 0.3rem;
+    padding: 0.2rem 0.5rem; flex-shrink: 0;
+    border-bottom: 1px solid var(--iwe-border-light);
     background: var(--iwe-bg-warm);
   }
-  .toolbar-back {
-    text-decoration: none; color: var(--iwe-text-muted);
-    font-size: 1.1rem; padding: 0.2rem 0.4rem;
-    border-radius: var(--iwe-radius-sm); transition: all 150ms;
-  }
-  .toolbar-back:hover { background: var(--iwe-bg-hover); color: var(--iwe-text); }
-  .toolbar-sep { width: 1px; height: 14px; background: var(--iwe-border); }
-  .toolbar-title {
-    font-family: var(--iwe-font-prose); font-size: 0.95rem;
-    color: var(--iwe-text); font-weight: 400;
-  }
-  .toolbar-spacer { flex: 1; }
-  .stats-btn {
-    font-family: var(--iwe-font-ui); font-size: 0.8rem;
-    padding: 0.3rem 0.7rem; border: 1px solid var(--iwe-border);
-    border-radius: var(--iwe-radius-sm); cursor: pointer;
-    background: none; color: var(--iwe-text-muted);
-    display: inline-flex; align-items: center; gap: 0.3rem;
-    transition: all 150ms;
-  }
-  .stats-btn:hover { border-color: var(--iwe-accent); color: var(--iwe-accent); }
-
-  .export-wrap { position: relative; }
-  .export-menu {
-    position: absolute; top: 100%; left: 50%; transform: translateX(-50%);
-    margin-top: 4px; z-index: 100;
-    background: var(--iwe-bg); border: 1px solid var(--iwe-border);
-    border-radius: var(--iwe-radius); padding: 0.3rem;
-    box-shadow: 0 6px 20px rgba(0,0,0,0.08);
-    display: flex; flex-direction: column; gap: 2px;
-    min-width: 170px;
-  }
-  .export-option {
-    display: flex; align-items: center; gap: 0.5rem;
-    font-family: var(--iwe-font-ui); font-size: 0.8rem;
-    padding: 0.4rem 0.6rem; border: none; border-radius: var(--iwe-radius-sm);
-    background: none; color: var(--iwe-text); cursor: pointer;
-    text-align: left; transition: background 100ms;
-  }
-  .export-option:hover { background: var(--iwe-bg-hover); }
-  .export-option i { font-size: 1rem; color: var(--iwe-text-muted); }
   .nav-btn {
     background: none; border: 1px solid var(--iwe-border);
     border-radius: var(--iwe-radius-sm); cursor: pointer;

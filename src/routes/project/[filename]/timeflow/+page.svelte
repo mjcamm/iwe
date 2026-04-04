@@ -17,8 +17,6 @@
       const chaptersData = await getAllTimeSections();
       const savedOrder = await getTimeSectionOrder();
 
-      // Build card list: each chapter without time breaks = 1 card,
-      // chapters with breaks = multiple cards (one per section)
       let allCards = [];
       for (const ch of chaptersData) {
         for (const sec of ch.sections) {
@@ -47,7 +45,6 @@
         }
       }
 
-      // Apply saved order if it exists
       if (savedOrder.length > 0) {
         const orderMap = new Map();
         for (const entry of savedOrder) {
@@ -59,7 +56,6 @@
           return oa - ob;
         });
       } else {
-        // Default: chapter order, sections in document order
         allCards.sort((a, b) => {
           if (a.sortOrder !== b.sortOrder) return a.sortOrder - b.sortOrder;
           return a.sectionIndex - b.sectionIndex;
@@ -169,14 +165,14 @@
 </div>
 
 <style>
-  :global(html), :global(body) { overflow: auto !important; height: auto !important; }
-
   .timeflow-page {
     font-family: 'Source Sans 3', sans-serif;
     max-width: 800px;
     margin: 0 auto;
     padding: 2rem 1.5rem;
     color: #3d3a37;
+    height: 100%;
+    overflow-y: auto;
   }
   .timeflow-header {
     margin-bottom: 1.5rem;

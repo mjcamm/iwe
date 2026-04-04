@@ -13,12 +13,11 @@
   let calendarCells = [];
   let tooltip = $state(null);
   let calendarYear = $state(new Date().getFullYear());
-  let selectedDay = $state(null); // date string
+  let selectedDay = $state(null);
   let hourlyData = $state([]);
   let hourlyLoading = $state(false);
   let hourlyCanvas;
 
-  // Local date string helper — avoids UTC timezone issues
   function toLocalDateStr(d) {
     const y = d.getFullYear();
     const m = String(d.getMonth() + 1).padStart(2, '0');
@@ -44,16 +43,13 @@
     selectedDay = dateStr;
     hourlyLoading = true;
     try {
-      console.log('[stats] fetching hourly for:', dateStr);
       hourlyData = await getHourlyBreakdown(dateStr);
-      console.log('[stats] hourly data:', hourlyData);
     } catch (e) { console.error('[stats] hourly error:', e); hourlyData = []; }
     hourlyLoading = false;
   }
 
   $effect(() => {
     if (selectedDay && hourlyData.length > 0) {
-      // Wait a tick for the canvas to mount
       setTimeout(() => { if (hourlyCanvas) drawHourlyChart(); }, 50);
     }
   });
@@ -77,14 +73,12 @@
     ctx.fillStyle = '#faf8f5';
     ctx.fillRect(0, 0, logicalW, logicalH);
 
-    // Build full 24-hour array
     const hours = Array.from({ length: 24 }, (_, i) => {
       const h = hourlyData.find(d => d.hour === i);
       return h ? h.net_words : 0;
     });
     const maxVal = Math.max(...hours.map(Math.abs), 1);
 
-    // Zero line
     const zeroY = padT + chartH / 2;
     ctx.strokeStyle = '#e5e1da';
     ctx.lineWidth = 1;
@@ -112,7 +106,6 @@
         ctx.fillText(val.toString(), x + barW / 2, zeroY + h + 10);
       }
 
-      // Hour label
       ctx.fillStyle = '#9e9891';
       ctx.font = '9px Source Sans 3, system-ui';
       ctx.textAlign = 'center';
@@ -125,7 +118,6 @@
     await updateWritingSettings(settings.daily_goal, settings.session_gap_minutes);
   }
 
-  // --- Computed stats ---
   let today = $derived(() => {
     const d = toLocalDateStr(new Date());
     return stats.find(s => s.date === d) || { words_added: 0, words_deleted: 0, net_words: 0, active_minutes: 0 };
@@ -134,7 +126,6 @@
   let streak = $derived(() => {
     let count = 0;
     const sorted = [...stats].sort((a, b) => b.date.localeCompare(a.date));
-    const todayStr = toLocalDateStr(new Date());
     let checkDate = new Date();
 
     for (let i = 0; i < 365; i++) {
@@ -142,7 +133,7 @@
       const day = sorted.find(s => s.date === dateStr);
       if (day && day.net_words > 0) {
         count++;
-      } else if (i > 0) { // allow today to be 0
+      } else if (i > 0) {
         break;
       }
       checkDate.setDate(checkDate.getDate() - 1);
@@ -159,7 +150,6 @@
   let totalDays = $derived(() => stats.filter(s => s.net_words > 0).length);
   let avgPerDay = $derived(() => totalDays() > 0 ? Math.round(totalWritten() / totalDays()) : 0);
 
-  // --- Calendar heatmap ---
   function drawCalendar() {
     const canvas = calendarCanvas;
     const ctx = canvas.getContext('2d');
@@ -170,16 +160,13 @@
     const labelW = 40;
     const headerH = 25;
 
-    // Jan 1 to Dec 31 of selected year
     const yearStart = new Date(calendarYear, 0, 1);
     const yearEnd = new Date(calendarYear, 11, 31);
     const today = new Date();
 
-    // Start from the Sunday of the week containing Jan 1
     const startDate = new Date(yearStart);
     startDate.setDate(startDate.getDate() - startDate.getDay());
 
-    // End at the Saturday of the week containing Dec 31
     const endDate = new Date(yearEnd);
     endDate.setDate(endDate.getDate() + (6 - endDate.getDay()));
 
@@ -197,13 +184,11 @@
     ctx.fillStyle = '#faf8f5';
     ctx.fillRect(0, 0, logicalW, logicalH);
 
-    // Build date → words map
     const dateMap = {};
     for (const s of stats) {
       dateMap[s.date] = s.net_words;
     }
 
-    // Day labels
     const dayLabels = ['Sun', 'Mon', '', 'Wed', '', 'Fri', ''];
     ctx.font = '11px Source Sans 3, system-ui';
     ctx.fillStyle = '#9e9891';
@@ -221,9 +206,7 @@
         const d = new Date(startDate);
         d.setDate(d.getDate() + week * 7 + day);
 
-        // Only draw cells for the selected year
         if (d.getFullYear() !== calendarYear) continue;
-        // Don't draw future dates
         if (d > today) continue;
 
         const dateStr = toLocalDateStr(d);
@@ -233,7 +216,6 @@
 
         calendarCells.push({ x, y, size: cellSize, date: dateStr, words });
 
-        // Month label
         if (d.getMonth() !== lastMonth && day === 0) {
           lastMonth = d.getMonth();
           monthLabels.push({ x, month: d.toLocaleString('default', { month: 'short' }) });
@@ -255,7 +237,6 @@
       }
     }
 
-    // Month labels
     ctx.font = '11px Source Sans 3, system-ui';
     ctx.fillStyle = '#6b6560';
     ctx.textAlign = 'left';
@@ -264,7 +245,6 @@
     }
   }
 
-  // --- Manuscript growth chart ---
   function drawGrowthChart() {
     const canvas = growthCanvas;
     const ctx = canvas.getContext('2d');
@@ -289,7 +269,6 @@
     const chartW = logicalW - padL - padR;
     const chartH = logicalH - padT - padB;
 
-    // Draw line
     ctx.beginPath();
     ctx.strokeStyle = '#2d6a5e';
     ctx.lineWidth = 2;
@@ -300,14 +279,12 @@
     }
     ctx.stroke();
 
-    // Fill under
     ctx.lineTo(padL + chartW, padT + chartH);
     ctx.lineTo(padL, padT + chartH);
     ctx.closePath();
     ctx.fillStyle = 'rgba(45, 106, 94, 0.1)';
     ctx.fill();
 
-    // Y axis labels
     ctx.font = '10px Source Sans 3, system-ui';
     ctx.fillStyle = '#9e9891';
     ctx.textAlign = 'right';
@@ -320,22 +297,19 @@
       ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(padL + chartW, y); ctx.stroke();
     }
 
-    // X axis labels
     ctx.textAlign = 'center';
     const step = Math.max(1, Math.floor(data.length / 6));
     for (let i = 0; i < data.length; i += step) {
       const x = padL + (i / (data.length - 1)) * chartW;
-      ctx.fillText(data[i][0].slice(5), x, logicalH - 5); // MM-DD
+      ctx.fillText(data[i][0].slice(5), x, logicalH - 5);
     }
   }
 
-  // --- Daily words bar chart (last 30 days) ---
   function drawDailyChart() {
     const canvas = dailyCanvas;
     const ctx = canvas.getContext('2d');
     const dpr = window.devicePixelRatio || 1;
 
-    // Last 30 days
     const days = [];
     const today = new Date();
     for (let i = 29; i >= 0; i--) {
@@ -363,7 +337,6 @@
 
     const maxVal = Math.max(...days.map(d => d.net), settings.daily_goal || 1000, 1);
 
-    // Goal line
     const goalY = padT + chartH - ((settings.daily_goal || 1000) / maxVal) * chartH;
     ctx.strokeStyle = '#d97706';
     ctx.lineWidth = 1;
@@ -375,7 +348,6 @@
     ctx.textAlign = 'left';
     ctx.fillText('Goal', logicalW - 30, goalY - 3);
 
-    // Bars
     for (let i = 0; i < days.length; i++) {
       const x = padL + i * (barW + 2);
       const h = Math.max(0, (days[i].net / maxVal) * chartH);
@@ -384,7 +356,6 @@
       ctx.fillStyle = metGoal ? '#2d6a5e' : '#9ecac2';
       ctx.fillRect(x, y, barW, h);
 
-      // Day label
       if (i % 3 === 0 || i === days.length - 1) {
         ctx.font = '9px Source Sans 3, system-ui';
         ctx.fillStyle = '#9e9891';
@@ -416,7 +387,6 @@
     <div class="stats-loading">Loading stats...</div>
   {:else}
     <div class="stats-content">
-      <!-- Today's stats -->
       <div class="today-grid">
         <div class="today-card accent">
           <span class="today-val">{today().net_words.toLocaleString()}</span>
@@ -450,7 +420,6 @@
         </div>
       </div>
 
-      <!-- Calendar heatmap -->
       <div class="chart-section">
         <div class="chart-title-row">
           <h2 class="chart-title">Writing Calendar</h2>
@@ -496,7 +465,6 @@
         </div>
       </div>
 
-      <!-- Hourly breakdown for selected day -->
       {#if selectedDay}
         <div class="chart-section hourly-section">
           <div class="chart-title-row">
@@ -529,14 +497,12 @@
         </div>
       {/if}
 
-      <!-- Last 30 days -->
       <div class="chart-section">
         <h2 class="chart-title">Last 30 Days</h2>
         <p class="chart-hint">Dashed line = daily goal. Dark bars = goal met.</p>
         <div class="chart-wrap"><canvas bind:this={dailyCanvas}></canvas></div>
       </div>
 
-      <!-- Manuscript growth -->
       <div class="chart-section">
         <h2 class="chart-title">Manuscript Growth</h2>
         <p class="chart-hint">Total word count over time. Watch your book grow.</p>
@@ -547,11 +513,11 @@
 </div>
 
 <style>
-  :global(html), :global(body) { overflow: auto !important; height: auto !important; }
-
   .stats-page {
     font-family: 'Source Sans 3', system-ui, sans-serif;
-    background: #faf8f5; min-height: 100vh;
+    background: #faf8f5;
+    height: 100%;
+    overflow-y: auto;
   }
   .stats-toolbar {
     display: flex; align-items: center; justify-content: space-between;
