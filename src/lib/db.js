@@ -118,6 +118,10 @@ export async function deleteChapter(id) {
   return invoke('delete_chapter', { id });
 }
 
+export async function reorderChapters(ids) {
+  return invoke('reorder_chapters', { ids });
+}
+
 // --- Entity operations ---
 
 export async function getEntities() {
@@ -192,12 +196,16 @@ export async function getEntityFreeNotes(entityId) {
   return invoke('get_entity_free_notes', { entityId });
 }
 
-export async function addEntityFreeNote(entityId, text) {
-  return invoke('add_entity_free_note', { entityId, text });
+export async function addEntityFreeNote(entityId, title, text) {
+  return invoke('add_entity_free_note', { entityId, title, text });
 }
 
-export async function updateEntityFreeNote(id, text) {
-  return invoke('update_entity_free_note', { id, text });
+export async function updateEntityFreeNote(id, title, text) {
+  return invoke('update_entity_free_note', { id, title, text });
+}
+
+export async function moveEntityFreeNote(id, newEntityId) {
+  return invoke('move_entity_free_note', { id, newEntityId });
 }
 
 export async function deleteEntityFreeNote(id) {
@@ -206,6 +214,82 @@ export async function deleteEntityFreeNote(id) {
 
 export async function reorderEntityFreeNotes(ids) {
   return invoke('reorder_entity_free_notes', { ids });
+}
+
+// ---- Chapter planning notes (kanban) ----
+
+export async function getChapterPlanningNotes(chapterId) {
+  return invoke('get_chapter_planning_notes', { chapterId });
+}
+
+export async function getAllChapterPlanningNotes() {
+  return invoke('get_all_chapter_planning_notes');
+}
+
+export async function addChapterPlanningNote(chapterId, title, description) {
+  return invoke('add_chapter_planning_note', { chapterId, title, description });
+}
+
+export async function updateChapterPlanningNote(id, title, description) {
+  return invoke('update_chapter_planning_note', { id, title, description });
+}
+
+export async function deleteChapterPlanningNote(id) {
+  return invoke('delete_chapter_planning_note', { id });
+}
+
+export async function reorderChapterPlanningNotes(ids) {
+  return invoke('reorder_chapter_planning_notes', { ids });
+}
+
+export async function moveChapterPlanningNote(id, newChapterId) {
+  return invoke('move_chapter_planning_note', { id, newChapterId });
+}
+
+// ---- Kanban freeform board ----
+
+export async function getKanbanColumns() {
+  return invoke('get_kanban_columns');
+}
+
+export async function addKanbanColumn(title) {
+  return invoke('add_kanban_column', { title });
+}
+
+export async function updateKanbanColumn(id, title) {
+  return invoke('update_kanban_column', { id, title });
+}
+
+export async function deleteKanbanColumn(id) {
+  return invoke('delete_kanban_column', { id });
+}
+
+export async function reorderKanbanColumns(ids) {
+  return invoke('reorder_kanban_columns', { ids });
+}
+
+export async function getAllKanbanCards() {
+  return invoke('get_all_kanban_cards');
+}
+
+export async function addKanbanCard(columnId, title, description) {
+  return invoke('add_kanban_card', { columnId, title, description });
+}
+
+export async function updateKanbanCard(id, title, description) {
+  return invoke('update_kanban_card', { id, title, description });
+}
+
+export async function deleteKanbanCard(id) {
+  return invoke('delete_kanban_card', { id });
+}
+
+export async function moveKanbanCard(id, newColumnId, newSortOrder) {
+  return invoke('move_kanban_card', { id, newColumnId, newSortOrder });
+}
+
+export async function reorderKanbanCards(ids) {
+  return invoke('reorder_kanban_cards', { ids });
 }
 
 export async function textSearch(query, caseSensitive = false, wholeWord = false, useRegex = false, fuzzy = false) {

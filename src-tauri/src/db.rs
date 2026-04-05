@@ -214,6 +214,50 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         );
     ")?;
 
+    // Migration: add title column to entity_free_notes
+    let has_free_note_title: bool = conn
+        .prepare("SELECT title FROM entity_free_notes LIMIT 0")
+        .is_ok();
+    if !has_free_note_title {
+        conn.execute_batch("ALTER TABLE entity_free_notes ADD COLUMN title TEXT NOT NULL DEFAULT '';")?;
+    }
+
+    // Kanban: chapter planning notes
+    conn.execute_batch("
+        CREATE TABLE IF NOT EXISTS chapter_planning_notes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chapter_id INTEGER NOT NULL REFERENCES chapters(id) ON DELETE CASCADE,
+            title TEXT NOT NULL DEFAULT '',
+            description TEXT NOT NULL DEFAULT '',
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_chapter_planning_notes_chapter ON chapter_planning_notes(chapter_id);
+    ")?;
+
+    // Kanban: freeform columns
+    conn.execute_batch("
+        CREATE TABLE IF NOT EXISTS kanban_columns (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL DEFAULT '',
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+    ")?;
+
+    // Kanban: freeform cards
+    conn.execute_batch("
+        CREATE TABLE IF NOT EXISTS kanban_cards (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            column_id INTEGER NOT NULL REFERENCES kanban_columns(id) ON DELETE CASCADE,
+            title TEXT NOT NULL DEFAULT '',
+            description TEXT NOT NULL DEFAULT '',
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_kanban_cards_column ON kanban_cards(column_id);
+    ")?;
+
     Ok(())
 }
 
@@ -285,6 +329,16 @@ pub fn rename_chapter(conn: &Connection, id: i64, title: &str) -> rusqlite::Resu
 
 pub fn delete_chapter(conn: &Connection, id: i64) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM chapters WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+pub fn reorder_chapters(conn: &Connection, ids: &[i64]) -> rusqlite::Result<()> {
+    for (i, id) in ids.iter().enumerate() {
+        conn.execute(
+            "UPDATE chapters SET sort_order = ?1 WHERE id = ?2",
+            params![i as i64, id],
+        )?;
+    }
     Ok(())
 }
 
@@ -476,6 +530,7 @@ pub struct EntityNote {
 pub struct EntityFreeNote {
     pub id: i64,
     pub entity_id: i64,
+    pub title: String,
     pub text: String,
     pub sort_order: i64,
     pub created_at: String,
@@ -526,39 +581,52 @@ pub fn reorder_entity_notes(conn: &Connection, ids: &[i64]) -> rusqlite::Result<
 
 pub fn get_entity_free_notes(conn: &Connection, entity_id: i64) -> rusqlite::Result<Vec<EntityFreeNote>> {
     let mut stmt = conn.prepare(
-        "SELECT id, entity_id, text, sort_order, created_at FROM entity_free_notes WHERE entity_id = ?1 ORDER BY sort_order ASC, created_at ASC"
+        "SELECT id, entity_id, title, text, sort_order, created_at FROM entity_free_notes WHERE entity_id = ?1 ORDER BY sort_order ASC, created_at ASC"
     )?;
     let rows = stmt.query_map(params![entity_id], |row| {
         Ok(EntityFreeNote {
             id: row.get(0)?,
             entity_id: row.get(1)?,
-            text: row.get(2)?,
-            sort_order: row.get(3)?,
-            created_at: row.get(4)?,
+            title: row.get(2)?,
+            text: row.get(3)?,
+            sort_order: row.get(4)?,
+            created_at: row.get(5)?,
         })
     })?;
     rows.collect()
 }
 
-pub fn add_entity_free_note(conn: &Connection, entity_id: i64, text: &str) -> rusqlite::Result<i64> {
+pub fn add_entity_free_note(conn: &Connection, entity_id: i64, title: &str, text: &str) -> rusqlite::Result<i64> {
     let max_order: i64 = conn.query_row(
         "SELECT COALESCE(MAX(sort_order), -1) FROM entity_free_notes WHERE entity_id = ?1",
         params![entity_id], |row| row.get(0),
     )?;
     conn.execute(
-        "INSERT INTO entity_free_notes (entity_id, text, sort_order) VALUES (?1, ?2, ?3)",
-        params![entity_id, text, max_order + 1],
+        "INSERT INTO entity_free_notes (entity_id, title, text, sort_order) VALUES (?1, ?2, ?3, ?4)",
+        params![entity_id, title, text, max_order + 1],
     )?;
     Ok(conn.last_insert_rowid())
 }
 
-pub fn update_entity_free_note(conn: &Connection, id: i64, text: &str) -> rusqlite::Result<()> {
-    conn.execute("UPDATE entity_free_notes SET text = ?1 WHERE id = ?2", params![text, id])?;
+pub fn update_entity_free_note(conn: &Connection, id: i64, title: &str, text: &str) -> rusqlite::Result<()> {
+    conn.execute("UPDATE entity_free_notes SET title = ?1, text = ?2 WHERE id = ?3", params![title, text, id])?;
     Ok(())
 }
 
 pub fn delete_entity_free_note(conn: &Connection, id: i64) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM entity_free_notes WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+pub fn move_entity_free_note(conn: &Connection, id: i64, new_entity_id: i64) -> rusqlite::Result<()> {
+    let max_order: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(sort_order), -1) FROM entity_free_notes WHERE entity_id = ?1",
+        params![new_entity_id], |row| row.get(0),
+    )?;
+    conn.execute(
+        "UPDATE entity_free_notes SET entity_id = ?1, sort_order = ?2 WHERE id = ?3",
+        params![new_entity_id, max_order + 1, id],
+    )?;
     Ok(())
 }
 
@@ -1200,4 +1268,241 @@ pub fn resolve_entity_state(
     Ok(ResolvedEntityState {
         facts: fact_map.into_iter().map(|(k, v)| ResolvedFact { key: k, value: v }).collect(),
     })
+}
+
+// ---- Chapter planning notes (kanban) ----
+
+#[derive(Serialize, Clone)]
+pub struct ChapterPlanningNote {
+    pub id: i64,
+    pub chapter_id: i64,
+    pub title: String,
+    pub description: String,
+    pub sort_order: i64,
+    pub created_at: String,
+}
+
+pub fn get_chapter_planning_notes(conn: &Connection, chapter_id: i64) -> rusqlite::Result<Vec<ChapterPlanningNote>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, chapter_id, title, description, sort_order, created_at FROM chapter_planning_notes WHERE chapter_id = ?1 ORDER BY sort_order ASC, created_at ASC"
+    )?;
+    let rows = stmt.query_map(params![chapter_id], |row| {
+        Ok(ChapterPlanningNote {
+            id: row.get(0)?,
+            chapter_id: row.get(1)?,
+            title: row.get(2)?,
+            description: row.get(3)?,
+            sort_order: row.get(4)?,
+            created_at: row.get(5)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn get_all_chapter_planning_notes(conn: &Connection) -> rusqlite::Result<Vec<ChapterPlanningNote>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, chapter_id, title, description, sort_order, created_at FROM chapter_planning_notes ORDER BY chapter_id ASC, sort_order ASC"
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(ChapterPlanningNote {
+            id: row.get(0)?,
+            chapter_id: row.get(1)?,
+            title: row.get(2)?,
+            description: row.get(3)?,
+            sort_order: row.get(4)?,
+            created_at: row.get(5)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn add_chapter_planning_note(conn: &Connection, chapter_id: i64, title: &str, description: &str) -> rusqlite::Result<i64> {
+    let max_order: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(sort_order), -1) FROM chapter_planning_notes WHERE chapter_id = ?1",
+        params![chapter_id], |row| row.get(0),
+    )?;
+    conn.execute(
+        "INSERT INTO chapter_planning_notes (chapter_id, title, description, sort_order) VALUES (?1, ?2, ?3, ?4)",
+        params![chapter_id, title, description, max_order + 1],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn update_chapter_planning_note(conn: &Connection, id: i64, title: &str, description: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE chapter_planning_notes SET title = ?1, description = ?2 WHERE id = ?3",
+        params![title, description, id],
+    )?;
+    Ok(())
+}
+
+pub fn delete_chapter_planning_note(conn: &Connection, id: i64) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM chapter_planning_notes WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+pub fn reorder_chapter_planning_notes(conn: &Connection, ids: &[i64]) -> rusqlite::Result<()> {
+    for (i, id) in ids.iter().enumerate() {
+        conn.execute(
+            "UPDATE chapter_planning_notes SET sort_order = ?1 WHERE id = ?2",
+            params![i as i64, id],
+        )?;
+    }
+    Ok(())
+}
+
+pub fn move_chapter_planning_note(conn: &Connection, id: i64, new_chapter_id: i64) -> rusqlite::Result<()> {
+    let max_order: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(sort_order), -1) FROM chapter_planning_notes WHERE chapter_id = ?1",
+        params![new_chapter_id], |row| row.get(0),
+    )?;
+    conn.execute(
+        "UPDATE chapter_planning_notes SET chapter_id = ?1, sort_order = ?2 WHERE id = ?3",
+        params![new_chapter_id, max_order + 1, id],
+    )?;
+    Ok(())
+}
+
+// ---- Kanban freeform board ----
+
+#[derive(Serialize, Clone)]
+pub struct KanbanColumn {
+    pub id: i64,
+    pub title: String,
+    pub sort_order: i64,
+    pub created_at: String,
+}
+
+#[derive(Serialize, Clone)]
+pub struct KanbanCard {
+    pub id: i64,
+    pub column_id: i64,
+    pub title: String,
+    pub description: String,
+    pub sort_order: i64,
+    pub created_at: String,
+}
+
+pub fn get_kanban_columns(conn: &Connection) -> rusqlite::Result<Vec<KanbanColumn>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, title, sort_order, created_at FROM kanban_columns ORDER BY sort_order ASC"
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(KanbanColumn {
+            id: row.get(0)?,
+            title: row.get(1)?,
+            sort_order: row.get(2)?,
+            created_at: row.get(3)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn add_kanban_column(conn: &Connection, title: &str) -> rusqlite::Result<i64> {
+    let max_order: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(sort_order), -1) FROM kanban_columns",
+        [], |row| row.get(0),
+    )?;
+    conn.execute(
+        "INSERT INTO kanban_columns (title, sort_order) VALUES (?1, ?2)",
+        params![title, max_order + 1],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn update_kanban_column(conn: &Connection, id: i64, title: &str) -> rusqlite::Result<()> {
+    conn.execute("UPDATE kanban_columns SET title = ?1 WHERE id = ?2", params![title, id])?;
+    Ok(())
+}
+
+pub fn delete_kanban_column(conn: &Connection, id: i64) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM kanban_columns WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+pub fn reorder_kanban_columns(conn: &Connection, ids: &[i64]) -> rusqlite::Result<()> {
+    for (i, id) in ids.iter().enumerate() {
+        conn.execute(
+            "UPDATE kanban_columns SET sort_order = ?1 WHERE id = ?2",
+            params![i as i64, id],
+        )?;
+    }
+    Ok(())
+}
+
+pub fn get_kanban_cards(conn: &Connection, column_id: i64) -> rusqlite::Result<Vec<KanbanCard>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, column_id, title, description, sort_order, created_at FROM kanban_cards WHERE column_id = ?1 ORDER BY sort_order ASC"
+    )?;
+    let rows = stmt.query_map(params![column_id], |row| {
+        Ok(KanbanCard {
+            id: row.get(0)?,
+            column_id: row.get(1)?,
+            title: row.get(2)?,
+            description: row.get(3)?,
+            sort_order: row.get(4)?,
+            created_at: row.get(5)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn get_all_kanban_cards(conn: &Connection) -> rusqlite::Result<Vec<KanbanCard>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, column_id, title, description, sort_order, created_at FROM kanban_cards ORDER BY column_id ASC, sort_order ASC"
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(KanbanCard {
+            id: row.get(0)?,
+            column_id: row.get(1)?,
+            title: row.get(2)?,
+            description: row.get(3)?,
+            sort_order: row.get(4)?,
+            created_at: row.get(5)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn add_kanban_card(conn: &Connection, column_id: i64, title: &str, description: &str) -> rusqlite::Result<i64> {
+    let max_order: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(sort_order), -1) FROM kanban_cards WHERE column_id = ?1",
+        params![column_id], |row| row.get(0),
+    )?;
+    conn.execute(
+        "INSERT INTO kanban_cards (column_id, title, description, sort_order) VALUES (?1, ?2, ?3, ?4)",
+        params![column_id, title, description, max_order + 1],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn update_kanban_card(conn: &Connection, id: i64, title: &str, description: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE kanban_cards SET title = ?1, description = ?2 WHERE id = ?3",
+        params![title, description, id],
+    )?;
+    Ok(())
+}
+
+pub fn delete_kanban_card(conn: &Connection, id: i64) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM kanban_cards WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+pub fn move_kanban_card(conn: &Connection, id: i64, new_column_id: i64, new_sort_order: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE kanban_cards SET column_id = ?1, sort_order = ?2 WHERE id = ?3",
+        params![new_column_id, new_sort_order, id],
+    )?;
+    Ok(())
+}
+
+pub fn reorder_kanban_cards(conn: &Connection, ids: &[i64]) -> rusqlite::Result<()> {
+    for (i, id) in ids.iter().enumerate() {
+        conn.execute(
+            "UPDATE kanban_cards SET sort_order = ?1 WHERE id = ?2",
+            params![i as i64, id],
+        )?;
+    }
+    Ok(())
 }

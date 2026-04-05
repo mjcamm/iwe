@@ -1,5 +1,5 @@
 <script>
-  let { comments = [], activeNoteId = null, hasEditorSelection = false, ondelete, onupdate, onselectnote, onupdatehighlight } = $props();
+  let { comments = [], planningNotes = [], activeNoteId = null, hasEditorSelection = false, ondelete, onupdate, onselectnote, onupdatehighlight, onupdateplanning, ondeleteplanning } = $props();
 
   let editText = $state('');
   let textareaEl = $state(null);
@@ -91,32 +91,53 @@
   {:else}
     <!-- List view: all notes -->
     <div class="notes-header">
-      <span class="notes-label">Notes</span>
+      <span class="notes-label">Inline Notes</span>
       <span class="notes-count">{comments.length}</span>
     </div>
 
-    {#if comments.length === 0}
+    {#if comments.length === 0 && planningNotes.length === 0}
       <div class="notes-empty">
         <i class="bi bi-chat-left-text" style="font-size: 1.5rem; opacity: 0.3;"></i>
         <p>No notes yet</p>
         <p class="notes-empty-hint">Right-click in the editor to add a note</p>
       </div>
     {:else}
-      <div class="notes-list">
-        {#each comments as comment (comment.id)}
-          <button class="note-item" onclick={() => onselectnote?.(comment.id)}>
-            <div class="note-item-color"></div>
-            <div class="note-item-content">
-              {#if comment.note_text}
-                <span class="note-item-text">{comment.note_text.length > 80 ? comment.note_text.slice(0, 80) + '...' : comment.note_text}</span>
-              {:else}
-                <span class="note-item-empty">Empty note</span>
-              {/if}
-              <span class="note-item-date">{formatDate(comment.created_at)}</span>
-            </div>
-          </button>
-        {/each}
-      </div>
+      {#if comments.length > 0}
+        <div class="notes-list">
+          {#each comments as comment (comment.id)}
+            <button class="note-item" onclick={() => onselectnote?.(comment.id)}>
+              <div class="note-item-color"></div>
+              <div class="note-item-content">
+                {#if comment.note_text}
+                  <span class="note-item-text">{comment.note_text.length > 80 ? comment.note_text.slice(0, 80) + '...' : comment.note_text}</span>
+                {:else}
+                  <span class="note-item-empty">Empty note</span>
+                {/if}
+                <span class="note-item-date">{formatDate(comment.created_at)}</span>
+              </div>
+            </button>
+          {/each}
+        </div>
+      {/if}
+
+      {#if planningNotes.length > 0}
+        <div class="planning-section">
+          <div class="notes-header" style="padding-top: 0.5rem;">
+            <span class="notes-label">Kanban Notes</span>
+            <span class="notes-count">{planningNotes.length}</span>
+          </div>
+          <div class="notes-list">
+            {#each planningNotes as pn (pn.id)}
+              <div class="planning-note-item">
+                <div class="note-item-color" style="background: rgba(45, 106, 94, 0.5);"></div>
+                <div class="note-item-content">
+                  <span class="note-item-text">{pn.description ? (pn.description.length > 80 ? pn.description.slice(0, 80) + '...' : pn.description) : '(empty)'}</span>
+                </div>
+              </div>
+            {/each}
+          </div>
+        </div>
+      {/if}
     {/if}
   {/if}
 </div>
@@ -326,5 +347,25 @@
     background: #a04040;
     border-color: #a04040;
     color: #fff;
+  }
+
+  /* Planning notes */
+  .planning-section {
+    border-top: 1px solid var(--iwe-border-light, #f0ede8);
+    margin-top: 0.3rem;
+  }
+  .planning-note-item {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.45rem 0.5rem;
+    border-radius: var(--iwe-radius-sm, 4px);
+    font-family: var(--iwe-font-ui);
+    color: var(--iwe-text-secondary);
+  }
+  .planning-note-desc {
+    font-size: 0.72rem;
+    color: var(--iwe-text-faint);
+    line-height: 1.3;
   }
 </style>

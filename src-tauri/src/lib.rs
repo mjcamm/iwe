@@ -69,6 +69,13 @@ fn delete_chapter(state: tauri::State<'_, AppState>, id: i64) -> Result<(), Stri
     db::delete_chapter(conn, id).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn reorder_chapters(state: tauri::State<'_, AppState>, ids: Vec<i64>) -> Result<(), String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::reorder_chapters(conn, &ids).map_err(|e| e.to_string())
+}
+
 // ---- Entity commands ----
 
 #[tauri::command]
@@ -168,17 +175,17 @@ fn get_entity_free_notes(state: tauri::State<'_, AppState>, entity_id: i64) -> R
 }
 
 #[tauri::command]
-fn add_entity_free_note(state: tauri::State<'_, AppState>, entity_id: i64, text: String) -> Result<i64, String> {
+fn add_entity_free_note(state: tauri::State<'_, AppState>, entity_id: i64, title: String, text: String) -> Result<i64, String> {
     let guard = state.db.lock().map_err(|e| e.to_string())?;
     let conn = guard.as_ref().ok_or("No project open")?;
-    db::add_entity_free_note(conn, entity_id, &text).map_err(|e| e.to_string())
+    db::add_entity_free_note(conn, entity_id, &title, &text).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn update_entity_free_note(state: tauri::State<'_, AppState>, id: i64, text: String) -> Result<(), String> {
+fn update_entity_free_note(state: tauri::State<'_, AppState>, id: i64, title: String, text: String) -> Result<(), String> {
     let guard = state.db.lock().map_err(|e| e.to_string())?;
     let conn = guard.as_ref().ok_or("No project open")?;
-    db::update_entity_free_note(conn, id, &text).map_err(|e| e.to_string())
+    db::update_entity_free_note(conn, id, &title, &text).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -189,10 +196,147 @@ fn delete_entity_free_note(state: tauri::State<'_, AppState>, id: i64) -> Result
 }
 
 #[tauri::command]
+fn move_entity_free_note(state: tauri::State<'_, AppState>, id: i64, new_entity_id: i64) -> Result<(), String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::move_entity_free_note(conn, id, new_entity_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn reorder_entity_free_notes(state: tauri::State<'_, AppState>, ids: Vec<i64>) -> Result<(), String> {
     let guard = state.db.lock().map_err(|e| e.to_string())?;
     let conn = guard.as_ref().ok_or("No project open")?;
     db::reorder_entity_free_notes(conn, &ids).map_err(|e| e.to_string())
+}
+
+// ---- Chapter planning notes (kanban) ----
+
+#[tauri::command]
+fn get_chapter_planning_notes(state: tauri::State<'_, AppState>, chapter_id: i64) -> Result<Vec<db::ChapterPlanningNote>, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::get_chapter_planning_notes(conn, chapter_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_all_chapter_planning_notes(state: tauri::State<'_, AppState>) -> Result<Vec<db::ChapterPlanningNote>, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::get_all_chapter_planning_notes(conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn add_chapter_planning_note(state: tauri::State<'_, AppState>, chapter_id: i64, title: String, description: String) -> Result<i64, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::add_chapter_planning_note(conn, chapter_id, &title, &description).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn update_chapter_planning_note(state: tauri::State<'_, AppState>, id: i64, title: String, description: String) -> Result<(), String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::update_chapter_planning_note(conn, id, &title, &description).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_chapter_planning_note(state: tauri::State<'_, AppState>, id: i64) -> Result<(), String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::delete_chapter_planning_note(conn, id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn reorder_chapter_planning_notes(state: tauri::State<'_, AppState>, ids: Vec<i64>) -> Result<(), String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::reorder_chapter_planning_notes(conn, &ids).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn move_chapter_planning_note(state: tauri::State<'_, AppState>, id: i64, new_chapter_id: i64) -> Result<(), String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::move_chapter_planning_note(conn, id, new_chapter_id).map_err(|e| e.to_string())
+}
+
+// ---- Kanban freeform board ----
+
+#[tauri::command]
+fn get_kanban_columns(state: tauri::State<'_, AppState>) -> Result<Vec<db::KanbanColumn>, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::get_kanban_columns(conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn add_kanban_column(state: tauri::State<'_, AppState>, title: String) -> Result<i64, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::add_kanban_column(conn, &title).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn update_kanban_column(state: tauri::State<'_, AppState>, id: i64, title: String) -> Result<(), String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::update_kanban_column(conn, id, &title).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_kanban_column(state: tauri::State<'_, AppState>, id: i64) -> Result<(), String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::delete_kanban_column(conn, id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn reorder_kanban_columns(state: tauri::State<'_, AppState>, ids: Vec<i64>) -> Result<(), String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::reorder_kanban_columns(conn, &ids).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_all_kanban_cards(state: tauri::State<'_, AppState>) -> Result<Vec<db::KanbanCard>, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::get_all_kanban_cards(conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn add_kanban_card(state: tauri::State<'_, AppState>, column_id: i64, title: String, description: String) -> Result<i64, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::add_kanban_card(conn, column_id, &title, &description).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn update_kanban_card(state: tauri::State<'_, AppState>, id: i64, title: String, description: String) -> Result<(), String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::update_kanban_card(conn, id, &title, &description).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_kanban_card(state: tauri::State<'_, AppState>, id: i64) -> Result<(), String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::delete_kanban_card(conn, id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn move_kanban_card(state: tauri::State<'_, AppState>, id: i64, new_column_id: i64, new_sort_order: i64) -> Result<(), String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::move_kanban_card(conn, id, new_column_id, new_sort_order).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn reorder_kanban_cards(state: tauri::State<'_, AppState>, ids: Vec<i64>) -> Result<(), String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::reorder_kanban_cards(conn, &ids).map_err(|e| e.to_string())
 }
 
 // ---- Writing stats ----
@@ -726,6 +870,7 @@ pub fn run() {
             update_chapter_content,
             rename_chapter,
             delete_chapter,
+            reorder_chapters,
             get_entities,
             create_entity,
             update_entity,
@@ -740,7 +885,26 @@ pub fn run() {
             add_entity_free_note,
             update_entity_free_note,
             delete_entity_free_note,
+            move_entity_free_note,
             reorder_entity_free_notes,
+            get_chapter_planning_notes,
+            get_all_chapter_planning_notes,
+            add_chapter_planning_note,
+            update_chapter_planning_note,
+            delete_chapter_planning_note,
+            reorder_chapter_planning_notes,
+            move_chapter_planning_note,
+            get_kanban_columns,
+            add_kanban_column,
+            update_kanban_column,
+            delete_kanban_column,
+            reorder_kanban_columns,
+            get_all_kanban_cards,
+            add_kanban_card,
+            update_kanban_card,
+            delete_kanban_card,
+            move_kanban_card,
+            reorder_kanban_cards,
             log_writing_activity,
             get_daily_stats,
             get_all_daily_stats,

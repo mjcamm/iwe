@@ -1,7 +1,7 @@
 <script>
   import { onMount } from 'svelte';
   import { beforeNavigate } from '$app/navigation';
-  import { getSettings, saveSettings, getChapters, getChapter, addChapter, updateChapterContent, renameChapter, deleteChapter, getEntities, createEntity, updateEntity, deleteEntity, setEntityVisible, addAlias, removeAlias, scanAllChapters, getNavHistory, pushNavEntry, truncateNavAfter, addEntityNote, logWritingActivity, setSpellLanguage, getAllChapterWordCounts, getChapterComments, addComment, updateComment, deleteComment, addStateMarker, deleteStateMarker, getStateMarker, getChapterDialogue } from '$lib/db.js';
+  import { getSettings, saveSettings, getChapters, getChapter, addChapter, updateChapterContent, renameChapter, deleteChapter, getEntities, createEntity, updateEntity, deleteEntity, setEntityVisible, addAlias, removeAlias, scanAllChapters, getNavHistory, pushNavEntry, truncateNavAfter, addEntityNote, logWritingActivity, setSpellLanguage, getAllChapterWordCounts, getChapterComments, addComment, updateComment, deleteComment, addStateMarker, deleteStateMarker, getStateMarker, getChapterDialogue, getChapterPlanningNotes as fetchChapterPlanningNotes } from '$lib/db.js';
   import ChapterNav from '$lib/components/ChapterNav.svelte';
   import Editor from '$lib/components/Editor.svelte';
   import EntityPanel from '$lib/components/EntityPanel.svelte';
@@ -320,6 +320,7 @@
   let rightPanelTab = $state('entities'); // 'entities' | 'search' | 'analysis' | 'notes'
   let chapterComments = $state([]); // comments from DB for current chapter
   let resolvedComments = $state([]); // comments with positions from editor
+  let chapterPlanningNotes = $state([]); // planning notes for current chapter
   let activeNoteId = $state(null); // selected note in detail view
 
   let pendingEntityName = $state(null);
@@ -512,12 +513,17 @@
   // ---- Comments / notes ----
 
   async function loadComments() {
-    if (!activeChapter) { resolvedComments = []; return; }
+    if (!activeChapter) { resolvedComments = []; chapterPlanningNotes = []; return; }
     try {
       chapterComments = await getChapterComments(activeChapter.id);
     } catch (e) {
       console.warn('[comments] load failed:', e);
       chapterComments = [];
+    }
+    try {
+      chapterPlanningNotes = await fetchChapterPlanningNotes(activeChapter.id);
+    } catch (e) {
+      chapterPlanningNotes = [];
     }
     refreshResolvedComments();
     // Apply highlight decorations in the editor
@@ -989,6 +995,7 @@
       {:else if rightPanelTab === 'notes'}
         <NotesPanel
           comments={resolvedComments}
+          planningNotes={chapterPlanningNotes}
           {activeNoteId}
           hasEditorSelection={!!selectedText?.trim()}
           ondelete={handleDeleteComment}

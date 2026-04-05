@@ -25,6 +25,7 @@
   let activeSection = $derived.by(() => {
     const path = $page.url.pathname;
     const base = `/project/${encodeURIComponent(data.filename)}`;
+    if (path.endsWith('/kanban') || path.includes('/kanban/')) return 'kanban';
     if (path.endsWith('/palettes') || path.includes('/palettes/')) return 'palettes';
     if (path.endsWith('/stats') || path.includes('/stats/')) return 'stats';
     if (path.endsWith('/timeflow') || path.includes('/timeflow/')) return 'timeflow';
@@ -147,6 +148,9 @@
 
       <span class="toolbar-spacer"></span>
 
+      <a href="{basePath}/kanban" class="nav-tab" class:active={activeSection === 'kanban'}>
+        <i class="bi bi-kanban"></i> Kanban
+      </a>
       <a href={basePath} class="nav-tab" class:active={activeSection === 'editor'}>
         <i class="bi bi-pencil-square"></i> Editor
       </a>

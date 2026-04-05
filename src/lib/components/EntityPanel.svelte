@@ -494,13 +494,13 @@
 
   async function addFreeNote() {
     if (!viewEntity || !newNoteText.trim()) return;
-    await addEntityFreeNote(viewEntity.id, newNoteText.trim());
+    await addEntityFreeNote(viewEntity.id, '', newNoteText.trim());
     newNoteText = '';
     viewFreeNotes = await getEntityFreeNotes(viewEntity.id);
   }
 
   async function saveFreeNote(note) {
-    await updateEntityFreeNote(note.id, note.text);
+    await updateEntityFreeNote(note.id, note.title || '', note.text);
   }
 
   async function removeFreeNote(id) {
