@@ -12,6 +12,7 @@ pub struct Chapter {
     pub title: String,
     pub content: Vec<u8>,
     pub sort_order: i64,
+    pub deleted: bool,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -214,6 +215,14 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         );
     ")?;
 
+    // Migration: add deleted column to chapters (soft delete)
+    let has_chapter_deleted: bool = conn
+        .prepare("SELECT deleted FROM chapters LIMIT 0")
+        .is_ok();
+    if !has_chapter_deleted {
+        conn.execute_batch("ALTER TABLE chapters ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0;")?;
+    }
+
     // Migration: add title column to entity_free_notes
     let has_free_note_title: bool = conn
         .prepare("SELECT title FROM entity_free_notes LIMIT 0")
@@ -265,7 +274,7 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
 
 pub fn list_chapters(conn: &Connection) -> rusqlite::Result<Vec<Chapter>> {
     let mut stmt = conn.prepare(
-        "SELECT id, title, content, sort_order, created_at, updated_at FROM chapters ORDER BY sort_order ASC"
+        "SELECT id, title, content, sort_order, COALESCE(deleted, 0), created_at, updated_at FROM chapters WHERE COALESCE(deleted, 0) = 0 ORDER BY sort_order ASC"
     )?;
     let rows = stmt.query_map([], |row| {
         Ok(Chapter {
@@ -273,8 +282,27 @@ pub fn list_chapters(conn: &Connection) -> rusqlite::Result<Vec<Chapter>> {
             title: row.get(1)?,
             content: row.get(2)?,
             sort_order: row.get(3)?,
-            created_at: row.get(4)?,
-            updated_at: row.get(5)?,
+            deleted: row.get::<_, i64>(4)? != 0,
+            created_at: row.get(5)?,
+            updated_at: row.get(6)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn list_deleted_chapters(conn: &Connection) -> rusqlite::Result<Vec<Chapter>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, title, content, sort_order, COALESCE(deleted, 0), created_at, updated_at FROM chapters WHERE COALESCE(deleted, 0) = 1 ORDER BY updated_at DESC"
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(Chapter {
+            id: row.get(0)?,
+            title: row.get(1)?,
+            content: row.get(2)?,
+            sort_order: row.get(3)?,
+            deleted: row.get::<_, i64>(4)? != 0,
+            created_at: row.get(5)?,
+            updated_at: row.get(6)?,
         })
     })?;
     rows.collect()
@@ -282,7 +310,7 @@ pub fn list_chapters(conn: &Connection) -> rusqlite::Result<Vec<Chapter>> {
 
 pub fn get_chapter(conn: &Connection, id: i64) -> rusqlite::Result<Option<Chapter>> {
     let mut stmt = conn.prepare(
-        "SELECT id, title, content, sort_order, created_at, updated_at FROM chapters WHERE id = ?1"
+        "SELECT id, title, content, sort_order, COALESCE(deleted, 0), created_at, updated_at FROM chapters WHERE id = ?1"
     )?;
     let mut rows = stmt.query_map(params![id], |row| {
         Ok(Chapter {
@@ -290,14 +318,25 @@ pub fn get_chapter(conn: &Connection, id: i64) -> rusqlite::Result<Option<Chapte
             title: row.get(1)?,
             content: row.get(2)?,
             sort_order: row.get(3)?,
-            created_at: row.get(4)?,
-            updated_at: row.get(5)?,
+            deleted: row.get::<_, i64>(4)? != 0,
+            created_at: row.get(5)?,
+            updated_at: row.get(6)?,
         })
     })?;
     match rows.next() {
         Some(row) => Ok(Some(row?)),
         None => Ok(None),
     }
+}
+
+pub fn soft_delete_chapter(conn: &Connection, id: i64) -> rusqlite::Result<()> {
+    conn.execute("UPDATE chapters SET deleted = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+pub fn restore_chapter(conn: &Connection, id: i64) -> rusqlite::Result<()> {
+    conn.execute("UPDATE chapters SET deleted = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?1", params![id])?;
+    Ok(())
 }
 
 pub fn add_chapter(conn: &Connection, title: &str) -> rusqlite::Result<i64> {
@@ -328,7 +367,8 @@ pub fn rename_chapter(conn: &Connection, id: i64, title: &str) -> rusqlite::Resu
 }
 
 pub fn delete_chapter(conn: &Connection, id: i64) -> rusqlite::Result<()> {
-    conn.execute("DELETE FROM chapters WHERE id = ?1", params![id])?;
+    // Soft delete — never actually remove chapter data
+    conn.execute("UPDATE chapters SET deleted = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?1", params![id])?;
     Ok(())
 }
 

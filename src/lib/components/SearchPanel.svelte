@@ -4,6 +4,24 @@
   let { entities = [], ongotochapter } = $props();
 
   let subTab = $state('text'); // 'text' | 'dialogue' | 'relationship'
+  let selectorOpen = $state(false);
+
+  const searchTools = [
+    { group: 'Search', items: [
+      { id: 'text', icon: 'bi-fonts', label: 'Text Search' },
+      { id: 'dialogue', icon: 'bi-chat-quote', label: 'Dialogue Search' },
+      { id: 'relationship', icon: 'bi-diagram-3', label: 'Relationship Search' },
+    ]},
+  ];
+
+  let activeTool = $derived(
+    searchTools.flatMap(g => g.items).find(t => t.id === subTab)
+  );
+
+  function selectTool(id) {
+    subTab = id;
+    selectorOpen = false;
+  }
 
   // ---- Text search state ----
   let textQuery = $state('');
@@ -184,17 +202,38 @@
 </script>
 
 <div class="search-panel">
-  <!-- Sub-tabs -->
-  <div class="search-sub-tabs">
-    <button class="search-sub-tab" class:active={subTab === 'text'} onclick={() => subTab = 'text'}>
-      <i class="bi bi-fonts"></i> Text
+  <!-- Tool selector dropdown -->
+  <div class="tool-selector-wrap">
+    <button class="tool-selector-btn" onclick={() => selectorOpen = !selectorOpen}>
+      {#if activeTool}
+        <i class="bi {activeTool.icon}"></i>
+        <span class="tool-selector-label">{activeTool.label}</span>
+      {/if}
+      <i class="bi bi-chevron-down tool-selector-chevron" class:open={selectorOpen}></i>
     </button>
-    <button class="search-sub-tab" class:active={subTab === 'dialogue'} onclick={() => subTab = 'dialogue'}>
-      <i class="bi bi-chat-quote"></i> Dialogue
-    </button>
-    <button class="search-sub-tab" class:active={subTab === 'relationship'} onclick={() => subTab = 'relationship'}>
-      <i class="bi bi-diagram-3"></i> Relation
-    </button>
+    {#if selectorOpen}
+      <!-- svelte-ignore a11y_click_events_have_key_events -->
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div class="tool-selector-backdrop" onclick={() => selectorOpen = false}></div>
+      <div class="tool-selector-dropdown">
+        {#each searchTools as group}
+          <div class="tool-group-label">{group.group}</div>
+          {#each group.items as tool (tool.id)}
+            <button
+              class="tool-option"
+              class:active={subTab === tool.id}
+              onclick={() => selectTool(tool.id)}
+            >
+              <i class="bi {tool.icon}"></i>
+              <span>{tool.label}</span>
+              {#if subTab === tool.id}
+                <i class="bi bi-check2 tool-option-check"></i>
+              {/if}
+            </button>
+          {/each}
+        {/each}
+      </div>
+    {/if}
   </div>
 
   {#if subTab === 'text'}
@@ -495,20 +534,50 @@
     font-family: var(--iwe-font-ui);
   }
 
-  /* Sub-tabs */
-  .search-sub-tabs {
-    display: flex; flex-shrink: 0;
+  /* Tool selector dropdown */
+  .tool-selector-wrap {
+    position: relative; flex-shrink: 0;
     border-bottom: 1px solid var(--iwe-border);
   }
-  .search-sub-tab {
-    flex: 1; display: flex; align-items: center; justify-content: center; gap: 0.3rem;
-    padding: 0.45rem 0.5rem;
-    font-family: var(--iwe-font-ui); font-size: 0.75rem; font-weight: 500;
-    background: none; border: none; border-bottom: 2px solid transparent;
-    color: var(--iwe-text-muted); cursor: pointer; transition: all 150ms;
+  .tool-selector-btn {
+    display: flex; align-items: center; gap: 0.4rem;
+    width: 100%; padding: 0.5rem 0.75rem;
+    font-family: var(--iwe-font-ui); font-size: 0.8rem; font-weight: 500;
+    background: none; border: none; color: var(--iwe-text);
+    cursor: pointer; transition: background 100ms;
   }
-  .search-sub-tab:hover { color: var(--iwe-text-secondary); background: var(--iwe-bg-hover); }
-  .search-sub-tab.active { color: var(--iwe-text); border-bottom-color: var(--iwe-accent); }
+  .tool-selector-btn:hover { background: var(--iwe-bg-hover); }
+  .tool-selector-label { flex: 1; text-align: left; }
+  .tool-selector-chevron {
+    font-size: 0.65rem; color: var(--iwe-text-faint);
+    transition: transform 150ms;
+  }
+  .tool-selector-chevron.open { transform: rotate(180deg); }
+  .tool-selector-backdrop {
+    position: fixed; inset: 0; z-index: 99;
+  }
+  .tool-selector-dropdown {
+    position: absolute; top: 100%; left: 0; right: 0; z-index: 100;
+    background: var(--iwe-bg); border: 1px solid var(--iwe-border);
+    border-top: none; border-radius: 0 0 var(--iwe-radius-sm) var(--iwe-radius-sm);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+    padding: 0.25rem 0;
+  }
+  .tool-group-label {
+    font-size: 0.6rem; font-weight: 700; color: var(--iwe-text-faint);
+    text-transform: uppercase; letter-spacing: 0.06em;
+    padding: 0.5rem 0.75rem 0.2rem;
+  }
+  .tool-option {
+    display: flex; align-items: center; gap: 0.4rem;
+    width: 100%; padding: 0.4rem 0.75rem 0.4rem 1.1rem;
+    font-family: var(--iwe-font-ui); font-size: 0.8rem;
+    background: none; border: none; color: var(--iwe-text-secondary);
+    cursor: pointer; text-align: left; transition: all 100ms;
+  }
+  .tool-option:hover { background: var(--iwe-bg-hover); color: var(--iwe-text); }
+  .tool-option.active { color: var(--iwe-accent); font-weight: 500; }
+  .tool-option-check { margin-left: auto; font-size: 0.75rem; }
 
   /* Form */
   .search-form {

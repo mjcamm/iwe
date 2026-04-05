@@ -76,6 +76,20 @@ fn reorder_chapters(state: tauri::State<'_, AppState>, ids: Vec<i64>) -> Result<
     db::reorder_chapters(conn, &ids).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn get_deleted_chapters(state: tauri::State<'_, AppState>) -> Result<Vec<db::Chapter>, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::list_deleted_chapters(conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn restore_chapter(state: tauri::State<'_, AppState>, id: i64) -> Result<(), String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::restore_chapter(conn, id).map_err(|e| e.to_string())
+}
+
 // ---- Entity commands ----
 
 #[tauri::command]
@@ -871,6 +885,8 @@ pub fn run() {
             rename_chapter,
             delete_chapter,
             reorder_chapters,
+            get_deleted_chapters,
+            restore_chapter,
             get_entities,
             create_entity,
             update_entity,

@@ -122,6 +122,14 @@ export async function reorderChapters(ids) {
   return invoke('reorder_chapters', { ids });
 }
 
+export async function getDeletedChapters() {
+  return invoke('get_deleted_chapters');
+}
+
+export async function restoreChapter(id) {
+  return invoke('restore_chapter', { id });
+}
+
 // --- Entity operations ---
 
 export async function getEntities() {

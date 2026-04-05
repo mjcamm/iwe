@@ -340,8 +340,10 @@
   }
 
   function truncate(text, max = 80) {
-    if (!text || text.length <= max) return text || '';
-    return text.slice(0, max).trim() + '...';
+    if (!text) return '';
+    const firstLine = text.split('\n')[0];
+    if (firstLine.length <= max) return firstLine;
+    return firstLine.slice(0, max).trim() + '...';
   }
 </script>
 
