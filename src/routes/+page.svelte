@@ -16,6 +16,7 @@
   let spellLang = $state('en_US');
   let semanticIndexDelay = $state(30);
   let typewriterMode = $state(false);
+  let backupInterval = $state(60);
 
   // Navigation
   let activeView = $state('projects');
@@ -34,6 +35,9 @@
     }
     if (settings.typewriterMode !== undefined) {
       typewriterMode = settings.typewriterMode;
+    }
+    if (settings.backupInterval !== undefined) {
+      backupInterval = settings.backupInterval;
       try { await setSpellLanguage(spellLang); } catch {}
     }
     loading = false;
@@ -51,6 +55,13 @@
     typewriterMode = e.target.checked;
     const settings = await getSettings();
     settings.typewriterMode = typewriterMode;
+    await saveSettings(settings);
+  }
+
+  async function handleBackupIntervalChange(e) {
+    backupInterval = parseInt(e.target.value) || 0;
+    const settings = await getSettings();
+    settings.backupInterval = backupInterval;
     await saveSettings(settings);
   }
 
@@ -246,6 +257,21 @@
                 <button class="btn-author btn-author-subtle btn-author-sm" onclick={pickFolder}>Change</button>
               </div>
             </div>
+          </div>
+
+          <div class="settings-section">
+            <h3 class="settings-heading">Backups</h3>
+            <div class="settings-row">
+              <label class="settings-label">Backup interval (minutes)</label>
+              <input class="settings-input" type="number" min="0" max="1440" step="5" value={backupInterval} onchange={handleBackupIntervalChange} />
+            </div>
+            <p class="settings-hint">How often to automatically back up the project while writing. Set to 0 to disable automatic backups. Backups are stored in a "backups" folder next to your project file, with semantic index data stripped to save space.</p>
+            {#if projectsDir}
+              <p class="settings-hint">
+                Backups location: <button class="settings-link" onclick={() => { import('@tauri-apps/plugin-opener').then(m => m.openPath(projectsDir + '/backups')).catch(() => {}); }}>{projectsDir}/backups</button>
+              </p>
+            {/if}
+            <p class="settings-hint">Backups within 7 days are kept in full. Older backups are pruned to 1 per day.</p>
           </div>
 
           <div class="settings-section settings-credits">
@@ -455,6 +481,13 @@
     color: var(--iwe-text); width: 80px; text-align: center;
   }
   .settings-input:focus { border-color: var(--iwe-accent); outline: none; }
+  .settings-link {
+    background: none; border: none; cursor: pointer;
+    color: var(--iwe-accent); font-family: var(--iwe-font-ui);
+    font-size: 0.75rem; font-style: italic; padding: 0;
+    text-decoration: underline; text-underline-offset: 2px;
+  }
+  .settings-link:hover { opacity: 0.8; }
   .settings-checkbox {
     width: 18px; height: 18px; accent-color: var(--iwe-accent);
     cursor: pointer;

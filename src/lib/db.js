@@ -318,6 +318,16 @@ export async function rebuildSemanticIndex() {
   return invoke('rebuild_semantic_index');
 }
 
+// ---- Backup settings ----
+
+export async function getBackupInterval() {
+  return invoke('get_backup_interval');
+}
+
+export async function setBackupInterval(minutes) {
+  return invoke('set_backup_interval', { minutes });
+}
+
 export async function getSemanticIndexStatus() {
   return invoke('get_semantic_index_status');
 }

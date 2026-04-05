@@ -1,7 +1,7 @@
 <script>
   import { onMount } from 'svelte';
   import { beforeNavigate } from '$app/navigation';
-  import { getSettings, saveSettings, getChapters, getChapter, addChapter, updateChapterContent, renameChapter, deleteChapter, getEntities, createEntity, updateEntity, deleteEntity, setEntityVisible, addAlias, removeAlias, scanAllChapters, getNavHistory, pushNavEntry, truncateNavAfter, addEntityNote, logWritingActivity, setSpellLanguage, getAllChapterWordCounts, getChapterComments, addComment, updateComment, deleteComment, addStateMarker, deleteStateMarker, getStateMarker, getChapterDialogue, getChapterPlanningNotes as fetchChapterPlanningNotes, markChapterDirty, runSemanticIndexing } from '$lib/db.js';
+  import { getSettings, saveSettings, getChapters, getChapter, addChapter, updateChapterContent, renameChapter, deleteChapter, getEntities, createEntity, updateEntity, deleteEntity, setEntityVisible, addAlias, removeAlias, scanAllChapters, getNavHistory, pushNavEntry, truncateNavAfter, addEntityNote, logWritingActivity, setSpellLanguage, getAllChapterWordCounts, getChapterComments, addComment, updateComment, deleteComment, addStateMarker, deleteStateMarker, getStateMarker, getChapterDialogue, getChapterPlanningNotes as fetchChapterPlanningNotes, markChapterDirty, runSemanticIndexing, setBackupInterval } from '$lib/db.js';
   import ChapterNav from '$lib/components/ChapterNav.svelte';
   import Editor from '$lib/components/Editor.svelte';
   import EntityPanel from '$lib/components/EntityPanel.svelte';
@@ -231,6 +231,9 @@
     }
     if (settings.typewriterMode) {
       typewriterMode = settings.typewriterMode;
+    }
+    if (settings.backupInterval !== undefined) {
+      setBackupInterval(settings.backupInterval).catch(() => {});
     }
 
     projectTitle = data.filename.replace('.iwe', '');

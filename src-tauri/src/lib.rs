@@ -15,6 +15,178 @@ use rusqlite::Connection;
 use std::sync::Mutex;
 use tauri::Manager;
 
+// ---- Backup helpers ----
+
+fn chrono_now() -> String {
+    use std::time::SystemTime;
+    let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default();
+    let secs = now.as_secs();
+    // Format as ISO-ish: YYYY-MM-DD-HH-MM-SS (using simple arithmetic, no chrono crate)
+    let days = secs / 86400;
+    let time_of_day = secs % 86400;
+    let hours = time_of_day / 3600;
+    let minutes = (time_of_day % 3600) / 60;
+    let seconds = time_of_day % 60;
+    // Approximate date from epoch days (good enough for comparison)
+    // Use a proper calculation
+    let (year, month, day) = epoch_days_to_date(days as i64);
+    format!("{:04}-{:02}-{:02}-{:02}-{:02}-{:02}", year, month, day, hours, minutes, seconds)
+}
+
+fn epoch_days_to_date(days: i64) -> (i64, i64, i64) {
+    // Algorithm from http://howardhinnant.github.io/date_algorithms.html
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m as i64, d as i64)
+}
+
+fn time_diff_minutes(a: &str, b: &str) -> i64 {
+    // Parse YYYY-MM-DD-HH-MM-SS timestamps and compute rough difference in minutes
+    fn parse_ts(s: &str) -> Option<i64> {
+        let parts: Vec<&str> = s.split('-').collect();
+        if parts.len() < 6 { return None; }
+        let y: i64 = parts[0].parse().ok()?;
+        let mo: i64 = parts[1].parse().ok()?;
+        let d: i64 = parts[2].parse().ok()?;
+        let h: i64 = parts[3].parse().ok()?;
+        let mi: i64 = parts[4].parse().ok()?;
+        // Rough: days since epoch * 1440 + hours*60 + minutes
+        let days = y * 365 + mo * 30 + d; // approximate, good enough for interval comparison
+        Some(days * 1440 + h * 60 + mi)
+    }
+    match (parse_ts(a), parse_ts(b)) {
+        (Some(a), Some(b)) => (b - a).abs(),
+        _ => i64::MAX, // if parse fails, trigger backup
+    }
+}
+
+fn run_backup(db_path: &str) -> Result<(), String> {
+    use std::path::Path;
+
+    let path = Path::new(db_path);
+    let parent = path.parent().ok_or("No parent directory")?;
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("project");
+
+    // Create backup dir: {parent}/backups/{bookname}/
+    let backup_dir = parent.join("backups").join(stem);
+    std::fs::create_dir_all(&backup_dir).map_err(|e| format!("mkdir failed: {e}"))?;
+
+    // Timestamp for filename
+    let timestamp = chrono_now();
+    let backup_filename = format!("{}-{}.iwe", stem, timestamp);
+    let backup_path = backup_dir.join(&backup_filename);
+
+    // Copy the file
+    std::fs::copy(db_path, &backup_path).map_err(|e| format!("copy failed: {e}"))?;
+    log::info!("[backup] created: {}", backup_path.display());
+
+    // Open the copy and flush semantic data
+    {
+        let conn = Connection::open(&backup_path).map_err(|e| format!("open backup: {e}"))?;
+        conn.execute("DELETE FROM semantic_embeddings", []).ok();
+        conn.execute("DELETE FROM semantic_index_status", []).ok();
+        conn.execute("VACUUM", []).ok();
+    }
+    log::info!("[backup] flushed semantic data from backup");
+
+    // Cleanup old backups
+    cleanup_old_backups(&backup_dir);
+
+    Ok(())
+}
+
+fn cleanup_old_backups(backup_dir: &std::path::Path) {
+    let now = chrono_now();
+    let now_parts: Vec<&str> = now.split('-').collect();
+    if now_parts.len() < 3 { return; }
+
+    let entries: Vec<_> = match std::fs::read_dir(backup_dir) {
+        Ok(e) => e.filter_map(|e| e.ok()).collect(),
+        Err(_) => return,
+    };
+
+    // Collect backup files with their dates
+    let mut files_by_date: std::collections::HashMap<String, Vec<(String, std::path::PathBuf)>> =
+        std::collections::HashMap::new();
+
+    for entry in &entries {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.ends_with(".iwe") { continue; }
+
+        // Extract timestamp: {stem}-YYYY-MM-DD-HH-MM-SS.iwe
+        // Find the date part by looking for the pattern
+        let parts: Vec<&str> = name.trim_end_matches(".iwe").split('-').collect();
+        if parts.len() < 6 { continue; }
+        let len = parts.len();
+        let date_key = format!("{}-{}-{}", parts[len - 6], parts[len - 5], parts[len - 4]);
+        let time_key = format!("{}-{}-{}", parts[len - 3], parts[len - 2], parts[len - 1]);
+        let full_ts = format!("{}-{}", date_key, time_key);
+
+        // Check if older than 7 days (rough: compare date strings)
+        let days_old = rough_days_old(&date_key, &now);
+        if days_old <= 7 { continue; } // Keep all backups within 7 days
+
+        files_by_date
+            .entry(date_key)
+            .or_default()
+            .push((full_ts, entry.path()));
+    }
+
+    // For each date with multiple backups, keep the earliest, delete the rest
+    for (_date, mut files) in files_by_date {
+        if files.len() <= 1 { continue; }
+        files.sort_by(|a, b| a.0.cmp(&b.0)); // Sort by timestamp
+        // Keep first (earliest), delete rest
+        for (_, path) in files.into_iter().skip(1) {
+            if let Err(e) = std::fs::remove_file(&path) {
+                log::warn!("[backup] cleanup failed for {}: {}", path.display(), e);
+            } else {
+                log::info!("[backup] cleaned up old backup: {}", path.display());
+            }
+        }
+    }
+}
+
+fn rough_days_old(date_str: &str, now_str: &str) -> i64 {
+    fn parse_date(s: &str) -> Option<i64> {
+        let parts: Vec<&str> = s.split('-').collect();
+        if parts.len() < 3 { return None; }
+        let y: i64 = parts[0].parse().ok()?;
+        let m: i64 = parts[1].parse().ok()?;
+        let d: i64 = parts[2].parse().ok()?;
+        Some(y * 365 + m * 30 + d)
+    }
+    match (parse_date(date_str), parse_date(&now_str[..10])) {
+        (Some(a), Some(b)) => (b - a).abs(),
+        _ => 0,
+    }
+}
+
+// ---- Backup commands ----
+
+#[tauri::command]
+fn get_backup_interval(state: tauri::State<'_, AppState>) -> Result<i64, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    let (interval, _) = db::get_backup_settings(conn).map_err(|e| e.to_string())?;
+    Ok(interval)
+}
+
+#[tauri::command]
+fn set_backup_interval(state: tauri::State<'_, AppState>, minutes: i64) -> Result<(), String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::update_backup_interval(conn, minutes).map_err(|e| e.to_string())
+}
+
 // ---- Project commands ----
 
 #[tauri::command]
@@ -55,7 +227,33 @@ fn add_chapter(state: tauri::State<'_, AppState>, title: String) -> Result<i64, 
 fn update_chapter_content(state: tauri::State<'_, AppState>, id: i64, content: Vec<u8>) -> Result<(), String> {
     let guard = state.db.lock().map_err(|e| e.to_string())?;
     let conn = guard.as_ref().ok_or("No project open")?;
-    db::update_chapter_content(conn, id, &content).map_err(|e| e.to_string())
+    db::update_chapter_content(conn, id, &content).map_err(|e| e.to_string())?;
+
+    // Check if backup is due
+    if let Ok((interval, last_backup)) = db::get_backup_settings(conn) {
+        if interval > 0 {
+            let now = chrono_now();
+            let should_backup = if last_backup.is_empty() {
+                true
+            } else {
+                let elapsed = time_diff_minutes(&last_backup, &now);
+                elapsed >= interval
+            };
+            if should_backup {
+                db::set_last_backup_at(conn, &now).ok();
+                let db_path = state.db_path.lock().ok().and_then(|g| g.clone());
+                if let Some(path) = db_path {
+                    std::thread::spawn(move || {
+                        if let Err(e) = run_backup(&path) {
+                            log::warn!("[backup] failed: {}", e);
+                        }
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -882,6 +1080,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .invoke_handler(tauri::generate_handler![
+            get_backup_interval,
+            set_backup_interval,
             open_project,
             get_chapters,
             get_chapter,

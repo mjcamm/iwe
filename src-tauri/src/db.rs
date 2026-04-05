@@ -224,6 +224,15 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         conn.execute_batch("ALTER TABLE chapters ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0;")?;
     }
 
+    // Migration: add backup columns to writing_settings
+    let has_backup_interval: bool = conn
+        .prepare("SELECT backup_interval_minutes FROM writing_settings LIMIT 0")
+        .is_ok();
+    if !has_backup_interval {
+        conn.execute_batch("ALTER TABLE writing_settings ADD COLUMN backup_interval_minutes INTEGER NOT NULL DEFAULT 60;")?;
+        conn.execute_batch("ALTER TABLE writing_settings ADD COLUMN last_backup_at TEXT NOT NULL DEFAULT '';")?;
+    }
+
     // Migration: add title column to entity_free_notes
     let has_free_note_title: bool = conn
         .prepare("SELECT title FROM entity_free_notes LIMIT 0")
@@ -862,6 +871,29 @@ pub fn update_writing_settings(conn: &Connection, daily_goal: i64, session_gap_m
     conn.execute(
         "UPDATE writing_settings SET daily_goal = ?1, session_gap_minutes = ?2 WHERE id = 1",
         params![daily_goal, session_gap_minutes],
+    )?;
+    Ok(())
+}
+
+pub fn get_backup_settings(conn: &Connection) -> rusqlite::Result<(i64, String)> {
+    conn.query_row(
+        "SELECT COALESCE(backup_interval_minutes, 60), COALESCE(last_backup_at, '') FROM writing_settings WHERE id = 1",
+        [], |row| Ok((row.get(0)?, row.get(1)?))
+    )
+}
+
+pub fn update_backup_interval(conn: &Connection, minutes: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE writing_settings SET backup_interval_minutes = ?1 WHERE id = 1",
+        params![minutes],
+    )?;
+    Ok(())
+}
+
+pub fn set_last_backup_at(conn: &Connection, timestamp: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE writing_settings SET last_backup_at = ?1 WHERE id = 1",
+        params![timestamp],
     )?;
     Ok(())
 }
