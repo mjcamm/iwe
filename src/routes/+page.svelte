@@ -14,6 +14,8 @@
 
   // Settings
   let spellLang = $state('en_US');
+  let semanticIndexDelay = $state(30);
+  let typewriterMode = $state(false);
 
   // Navigation
   let activeView = $state('projects');
@@ -26,6 +28,12 @@
     const settings = await getSettings();
     if (settings.spellLanguage) {
       spellLang = settings.spellLanguage;
+    }
+    if (settings.semanticIndexDelay !== undefined) {
+      semanticIndexDelay = settings.semanticIndexDelay;
+    }
+    if (settings.typewriterMode !== undefined) {
+      typewriterMode = settings.typewriterMode;
       try { await setSpellLanguage(spellLang); } catch {}
     }
     loading = false;
@@ -37,6 +45,20 @@
     settings.spellLanguage = spellLang;
     await saveSettings(settings);
     try { await setSpellLanguage(spellLang); } catch {}
+  }
+
+  async function handleTypewriterToggle(e) {
+    typewriterMode = e.target.checked;
+    const settings = await getSettings();
+    settings.typewriterMode = typewriterMode;
+    await saveSettings(settings);
+  }
+
+  async function handleSemanticDelayChange(e) {
+    semanticIndexDelay = parseInt(e.target.value) || 0;
+    const settings = await getSettings();
+    settings.semanticIndexDelay = semanticIndexDelay;
+    await saveSettings(settings);
   }
 
   async function pickFolder() {
@@ -198,6 +220,24 @@
           </div>
 
           <div class="settings-section">
+            <h3 class="settings-heading">Editor</h3>
+            <div class="settings-row">
+              <label class="settings-label">Typewriter mode</label>
+              <input class="settings-checkbox" type="checkbox" checked={typewriterMode} onchange={handleTypewriterToggle} />
+            </div>
+            <p class="settings-hint">Keeps the cursor vertically centered on screen as you type, like a typewriter. The page scrolls to keep your writing position in the middle of the editor.</p>
+          </div>
+
+          <div class="settings-section">
+            <h3 class="settings-heading">Descriptive Search</h3>
+            <div class="settings-row">
+              <label class="settings-label">Indexing delay (seconds)</label>
+              <input class="settings-input" type="number" min="0" max="300" step="5" value={semanticIndexDelay} onchange={handleSemanticDelayChange} />
+            </div>
+            <p class="settings-hint">How many seconds of inactivity before re-indexing a chapter for meaning search. Set to 0 to disable automatic indexing (you can still rebuild manually).</p>
+          </div>
+
+          <div class="settings-section">
             <h3 class="settings-heading">Storage</h3>
             <div class="settings-row">
               <label class="settings-label">Projects folder</label>
@@ -206,6 +246,12 @@
                 <button class="btn-author btn-author-subtle btn-author-sm" onclick={pickFolder}>Change</button>
               </div>
             </div>
+          </div>
+
+          <div class="settings-section settings-credits">
+            <h3 class="settings-heading">Licenses</h3>
+            <p class="settings-hint">Descriptive Search powered by all-mpnet-base-v2 (Apache 2.0) — sentence-transformers/all-mpnet-base-v2</p>
+            <p class="settings-hint">ONNX Runtime (MIT License) — microsoft/onnxruntime</p>
           </div>
         </div>
       {/if}
@@ -402,6 +448,22 @@
     color: var(--iwe-text); cursor: pointer;
   }
   .settings-select:focus { border-color: var(--iwe-accent); outline: none; }
+  .settings-input {
+    font-family: var(--iwe-font-ui); font-size: 0.85rem;
+    background: var(--iwe-bg); border: 1px solid var(--iwe-border);
+    border-radius: var(--iwe-radius-sm); padding: 0.35rem 0.6rem;
+    color: var(--iwe-text); width: 80px; text-align: center;
+  }
+  .settings-input:focus { border-color: var(--iwe-accent); outline: none; }
+  .settings-checkbox {
+    width: 18px; height: 18px; accent-color: var(--iwe-accent);
+    cursor: pointer;
+  }
+  .settings-hint {
+    font-family: var(--iwe-font-ui); font-size: 0.75rem;
+    color: var(--iwe-text-faint); font-style: italic;
+    margin: 0.3rem 0 0; line-height: 1.4;
+  }
   .settings-path-row {
     display: flex; align-items: center; gap: 0.5rem;
   }

@@ -53,7 +53,11 @@
       "Bash(node -e \"const t = require\\(''@tiptap/core''\\); console.log\\(typeof t.generateHTML\\)\")",
       "WebFetch(domain:discuss.prosemirror.net)",
       "Bash(grep -n \"ongotochapter\" src/lib/components/*.svelte src/routes/project/\\\\[filename\\\\]/+page.svelte)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(grep -n \"fn try_extract_tensor\\\\|fn try_extract_raw\" ~/.cargo/registry/src/index.crates.io-*/ort-2.0.0-rc.12/src/value/impl_tensor/extract.rs)",
+      "Bash(grep -n \"pub struct Shape\\\\|impl.*Index.*Shape\\\\|pub fn.*shape\" ~/.cargo/registry/src/index.crates.io-*/ort-2.0.0-rc.12/src/value/mod.rs)",
+      "Bash(grep -rn \"pub struct Shape\" ~/.cargo/registry/src/index.crates.io-*/ort-2.0.0-rc.12/src/)",
+      "Bash(grep:*)"
     ]
   }
 }

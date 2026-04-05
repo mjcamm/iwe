@@ -1,9 +1,11 @@
 <script>
-  import { relationshipSearch, textSearch, dialogueSearch } from '$lib/db.js';
+  import { onMount } from 'svelte';
+  import { relationshipSearch, textSearch, dialogueSearch, semanticSearch, rebuildSemanticIndex, getSemanticIndexStatus } from '$lib/db.js';
+  import { listen } from '@tauri-apps/api/event';
 
   let { entities = [], ongotochapter } = $props();
 
-  let subTab = $state('text'); // 'text' | 'dialogue' | 'relationship'
+  let subTab = $state('text'); // 'text' | 'dialogue' | 'relationship' | 'semantic'
   let selectorOpen = $state(false);
 
   const searchTools = [
@@ -11,6 +13,7 @@
       { id: 'text', icon: 'bi-fonts', label: 'Text Search' },
       { id: 'dialogue', icon: 'bi-chat-quote', label: 'Dialogue Search' },
       { id: 'relationship', icon: 'bi-diagram-3', label: 'Relationship Search' },
+      { id: 'semantic', icon: 'bi-stars', label: 'Descriptive Search' },
     ]},
   ];
 
@@ -194,6 +197,82 @@
       map.get(r.chapter_id).results.push(r);
     }
     return [...map.entries()].map(([id, data]) => ({ chapterId: id, ...data }));
+  });
+
+  // ---- Semantic search state ----
+  let semQuery = $state('');
+  let semGranularity = $state('sentence');
+  let semResults = $state(null);
+  let semSearching = $state(false);
+  let semIndexStatus = $state(null);
+  let semRebuilding = $state(false);
+  let semThreshold = $state(50); // minimum score % to show
+
+  async function runMeaningSearch() {
+    if (!semQuery.trim()) return;
+    semSearching = true;
+    try {
+      semResults = await semanticSearch(semQuery.trim(), semGranularity, 20);
+    } catch (e) {
+      console.warn('[semantic] search failed:', e);
+      semResults = [];
+    }
+    semSearching = false;
+  }
+
+  async function loadIndexStatus() {
+    try {
+      semIndexStatus = await getSemanticIndexStatus();
+    } catch { semIndexStatus = null; }
+  }
+
+  async function handleRebuildIndex() {
+    semRebuilding = true;
+    try {
+      await rebuildSemanticIndex();
+      loadIndexStatus();
+    } catch (e) {
+      console.warn('[semantic] rebuild failed:', e);
+      semRebuilding = false;
+    }
+    // semRebuilding is cleared by the semantic-index-updated event listener
+  }
+
+  let semProgress = $state(null); // { done, total } during indexing
+
+  let semFiltered = $derived(
+    semResults ? semResults.filter(r => Math.round(r.score * 100) >= semThreshold) : []
+  );
+
+  let semGrouped = $derived(() => {
+    const map = new Map();
+    for (const r of semFiltered) {
+      if (!map.has(r.chapter_id)) {
+        map.set(r.chapter_id, { chapterId: r.chapter_id, title: r.chapter_title, results: [] });
+      }
+      map.get(r.chapter_id).results.push(r);
+    }
+    return [...map.values()];
+  });
+
+  // Load index status when switching to semantic tab
+  $effect(() => {
+    if (subTab === 'semantic') loadIndexStatus();
+  });
+
+  // Listen for indexing events
+  onMount(() => {
+    listen('semantic-index-updated', () => {
+      console.log('[semantic] index updated event received');
+      loadIndexStatus();
+      semProgress = null;
+      semRebuilding = false;
+    });
+    listen('semantic-index-progress', (event) => {
+      console.log('[semantic] progress:', event.payload);
+      semProgress = event.payload;
+      loadIndexStatus();
+    });
   });
 
   function escapeHtml(text) {
@@ -525,6 +604,104 @@
         {/each}
       {/if}
     </div>
+
+  {:else if subTab === 'semantic'}
+    <!-- Meaning Search -->
+    <div class="search-form">
+      <div class="search-input-row">
+        <input
+          class="search-input"
+          type="text"
+          placeholder="Describe what you're looking for..."
+          bind:value={semQuery}
+          onkeydown={e => { if (e.key === 'Enter') runMeaningSearch(); }}
+        />
+        <button class="search-go-btn" onclick={runMeaningSearch} disabled={!semQuery.trim() || semSearching}>
+          {#if semSearching}
+            <i class="bi bi-hourglass-split"></i>
+          {:else}
+            <i class="bi bi-search"></i>
+          {/if}
+        </button>
+      </div>
+      <div class="search-modes">
+        <button class="mode-btn" class:active={semGranularity === 'sentence'} onclick={() => semGranularity = 'sentence'}>
+          Sentences
+        </button>
+        <button class="mode-btn" class:active={semGranularity === 'paragraph'} onclick={() => semGranularity = 'paragraph'}>
+          Paragraphs
+        </button>
+      </div>
+      <div class="sem-status">
+        {#if semProgress}
+          <span class="sem-status-text">
+            <i class="bi bi-hourglass-split"></i>
+            Indexing chapter {semProgress.done}/{semProgress.total}...
+          </span>
+        {:else if semIndexStatus}
+          <span class="sem-status-text">
+            {semIndexStatus.indexed_chapters}/{semIndexStatus.total_chapters} chapters indexed
+            &middot; {semIndexStatus.total_embeddings.toLocaleString()} embeddings
+            {#if semIndexStatus.pending > 0}
+              &middot; <strong>{semIndexStatus.pending} pending</strong>
+            {/if}
+          </span>
+        {/if}
+        <button class="sem-rebuild-btn" onclick={handleRebuildIndex} disabled={semRebuilding || !!semProgress}>
+          <i class="bi bi-arrow-clockwise"></i>
+          {semRebuilding || semProgress ? 'Indexing...' : 'Rebuild Index'}
+        </button>
+      </div>
+
+      {#if semResults && semResults.length > 0}
+        <div class="sem-threshold">
+          <label class="sem-threshold-label">
+            Min relevance: <strong>{semThreshold}%</strong>
+          </label>
+          <input type="range" class="sem-threshold-slider" min="0" max="80" step="5" bind:value={semThreshold} />
+          <span class="sem-threshold-count">{semFiltered.length} result{semFiltered.length !== 1 ? 's' : ''}</span>
+        </div>
+      {/if}
+    </div>
+
+    <div class="search-results">
+      {#if semSearching}
+        <div class="search-empty">Searching...</div>
+      {:else if semResults === null}
+        <div class="search-empty">
+          <p>Describe a scene, emotion, or concept in your own words and find matching passages in your manuscript.</p>
+          <p class="search-empty-hint">Works best for finding scenes, themes, and descriptions — e.g. "the moment of betrayal", "descriptions of the house", "characters feeling afraid". For exact words or names, use Text Search instead.</p>
+          <p class="search-empty-hint">The index builds automatically as you write. Click "Rebuild Index" to re-index everything.</p>
+        </div>
+      {:else if semFiltered.length === 0}
+        <div class="search-empty">No matches above {semThreshold}% relevance.</div>
+      {:else}
+        <div class="search-result-count">
+          {semFiltered.length} match{semFiltered.length !== 1 ? 'es' : ''}
+          across {semGrouped().length} chapter{semGrouped().length !== 1 ? 's' : ''}
+        </div>
+        {#each semGrouped() as chapter (chapter.chapterId)}
+          <div class="search-chapter">
+            <div class="search-chapter-header">
+              <span class="search-chapter-title">{chapter.title}</span>
+              <span class="search-chapter-count">{chapter.results.length}</span>
+            </div>
+            {#each chapter.results as result}
+              <button
+                class="search-slab"
+                onclick={() => ongotochapter?.(result.chapter_id, result.segment_text.slice(0, 40), result.char_start)}
+                title="Jump to this match"
+              >
+                <span class="slab-text">
+                  &ldquo;{result.segment_text.length > 150 ? result.segment_text.slice(0, 150) + '...' : result.segment_text}&rdquo;
+                </span>
+                <span class="sem-score">{Math.round(result.score * 100)}%</span>
+              </button>
+            {/each}
+          </div>
+        {/each}
+      {/if}
+    </div>
   {/if}
 </div>
 
@@ -801,5 +978,50 @@
   :global(.search-highlight) {
     background: #fde68a; color: var(--iwe-text); font-weight: 600;
     border-radius: 2px; padding: 0 2px;
+  }
+
+  /* Semantic search */
+  .sem-threshold {
+    display: flex; align-items: center; gap: 0.5rem;
+    padding: 0.3rem 0.6rem;
+    border-top: 1px solid var(--iwe-border-light);
+  }
+  .sem-threshold-label {
+    font-family: var(--iwe-font-ui); font-size: 0.7rem;
+    color: var(--iwe-text-muted); white-space: nowrap;
+  }
+  .sem-threshold-label strong { color: var(--iwe-accent); }
+  .sem-threshold-slider {
+    flex: 1; height: 4px; accent-color: var(--iwe-accent, #2d6a5e);
+  }
+  .sem-threshold-count {
+    font-family: var(--iwe-font-ui); font-size: 0.65rem;
+    color: var(--iwe-text-faint); white-space: nowrap;
+  }
+  .sem-status {
+    display: flex; align-items: center; gap: 0.5rem;
+    padding: 0.4rem 0.6rem;
+    border-top: 1px solid var(--iwe-border-light);
+  }
+  .sem-status-text {
+    font-size: 0.7rem; color: var(--iwe-text-faint);
+    flex: 1;
+  }
+  .sem-rebuild-btn {
+    font-family: var(--iwe-font-ui); font-size: 0.7rem;
+    padding: 0.2rem 0.5rem; border: 1px solid var(--iwe-border);
+    border-radius: var(--iwe-radius-sm); cursor: pointer;
+    background: none; color: var(--iwe-text-muted);
+    display: flex; align-items: center; gap: 0.25rem;
+    transition: all 100ms; white-space: nowrap;
+  }
+  .sem-rebuild-btn:hover:not(:disabled) { border-color: var(--iwe-accent); color: var(--iwe-accent); }
+  .sem-rebuild-btn:disabled { opacity: 0.5; cursor: default; }
+  .sem-score {
+    font-family: var(--iwe-font-ui); font-size: 0.65rem;
+    font-weight: 600; color: var(--iwe-accent);
+    background: rgba(45, 106, 94, 0.08);
+    padding: 0.1rem 0.35rem; border-radius: 3px;
+    flex-shrink: 0;
   }
 </style>

@@ -18,7 +18,7 @@
   import WordModal from './WordModal.svelte';
   import PalettePickerModal from './PalettePickerModal.svelte';
 
-  let { openTabs, activeTabId, chapter, onselecttab, onclosetab, onchange, onselectionchange, onentityclick, onquickadd, onready, onaddcomment, oncommentclick, onaddstatefact, onstateclick, viewedEntityIds = new Set() } = $props();
+  let { openTabs, activeTabId, chapter, onselecttab, onclosetab, onchange, onselectionchange, onentityclick, onquickadd, onready, onaddcomment, oncommentclick, onaddstatefact, onstateclick, viewedEntityIds = new Set(), typewriterMode = false } = $props();
 
   let element = $state();
   // Official Svelte 5 pattern: wrap editor in object so reassignment triggers reactivity
@@ -31,6 +31,28 @@
   let scanPosMap = $state([]);
   let scanTimer = null;
   let applyingDecorations = false;
+
+  // Typewriter mode — keep cursor vertically centered
+  let typewriterScrollTimer = null;
+  function typewriterScroll(editor) {
+    if (!typewriterMode || !editor || !element) return;
+    clearTimeout(typewriterScrollTimer);
+    typewriterScrollTimer = setTimeout(() => {
+      const { from } = editor.state.selection;
+      try {
+        const coords = editor.view.coordsAtPos(from);
+        const scrollEl = element.closest('.editor-scroll');
+        if (!scrollEl) return;
+        const rect = scrollEl.getBoundingClientRect();
+        const cursorY = coords.top - rect.top;
+        const centerY = rect.height / 2;
+        const offset = cursorY - centerY;
+        if (Math.abs(offset) > 10) {
+          scrollEl.scrollTo({ top: scrollEl.scrollTop + offset, behavior: 'smooth' });
+        }
+      } catch {}
+    }, 16);
+  }
 
   // Spell check state
   let spellErrors = $state([]); // [{ word, start, end, suggestions }]
@@ -664,6 +686,7 @@
           const { from, to } = editor.state.selection;
           const text = from !== to ? editor.state.doc.textBetween(from, to, ' ') : '';
           onselectionchange?.(text, from, to);
+          typewriterScroll(editor);
         }
         // Update comment highlights when doc changes
         if (transaction.docChanged) {

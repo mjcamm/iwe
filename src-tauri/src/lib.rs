@@ -1,5 +1,6 @@
 mod analysis;
 mod db;
+mod semantic;
 mod text_utils;
 mod palettes;
 mod scanner;
@@ -22,6 +23,8 @@ fn open_project(state: tauri::State<'_, AppState>, filepath: String) -> Result<(
     db::init_schema(&conn).map_err(|e| e.to_string())?;
     let mut guard = state.db.lock().map_err(|e| e.to_string())?;
     *guard = Some(conn);
+    let mut path_guard = state.db_path.lock().map_err(|e| e.to_string())?;
+    *path_guard = Some(filepath);
     Ok(())
 }
 
@@ -870,7 +873,9 @@ pub fn run() {
     tauri::Builder::default()
         .manage(AppState {
             db: Mutex::new(None),
+            db_path: Mutex::new(None),
         })
+        .manage(semantic::SemanticState::new())
         .manage(spell_state)
         .manage(synonym_state)
         .plugin(tauri_plugin_opener::init())
@@ -1012,6 +1017,11 @@ pub fn run() {
             palettes::search_word_groups,
             palettes::search_palette_entries,
             palettes::get_active_groups,
+            semantic::mark_chapter_dirty,
+            semantic::run_semantic_indexing,
+            semantic::rebuild_semantic_index,
+            semantic::semantic_search,
+            semantic::get_semantic_index_status,
         ])
         .setup(|app| {
             if cfg!(debug_assertions) {

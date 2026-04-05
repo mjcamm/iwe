@@ -300,6 +300,28 @@ export async function reorderKanbanCards(ids) {
   return invoke('reorder_kanban_cards', { ids });
 }
 
+// ---- Semantic search ----
+
+export async function semanticSearch(query, granularity = 'sentence', topN = 20) {
+  return invoke('semantic_search', { query, granularity, topN });
+}
+
+export async function markChapterDirty(chapterId) {
+  return invoke('mark_chapter_dirty', { chapterId });
+}
+
+export async function runSemanticIndexing() {
+  return invoke('run_semantic_indexing');
+}
+
+export async function rebuildSemanticIndex() {
+  return invoke('rebuild_semantic_index');
+}
+
+export async function getSemanticIndexStatus() {
+  return invoke('get_semantic_index_status');
+}
+
 export async function textSearch(query, caseSensitive = false, wholeWord = false, useRegex = false, fuzzy = false) {
   return invoke('text_search', { query, caseSensitive, wholeWord, useRegex, fuzzy });
 }

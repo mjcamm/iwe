@@ -4,6 +4,7 @@ use std::sync::Mutex;
 
 pub struct AppState {
     pub db: Mutex<Option<Connection>>,
+    pub db_path: Mutex<Option<String>>,
 }
 
 #[derive(Serialize, Clone)]
@@ -267,6 +268,29 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_kanban_cards_column ON kanban_cards(column_id);
     ")?;
 
+    // Semantic search embeddings
+    conn.execute_batch("
+        CREATE TABLE IF NOT EXISTS semantic_embeddings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chapter_id INTEGER NOT NULL,
+            granularity TEXT NOT NULL,
+            segment_text TEXT NOT NULL,
+            char_start INTEGER NOT NULL,
+            char_end INTEGER NOT NULL,
+            embedding BLOB NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (chapter_id) REFERENCES chapters(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_semantic_chapter ON semantic_embeddings(chapter_id);
+        CREATE INDEX IF NOT EXISTS idx_semantic_granularity ON semantic_embeddings(chapter_id, granularity);
+
+        CREATE TABLE IF NOT EXISTS semantic_index_status (
+            chapter_id INTEGER PRIMARY KEY,
+            content_hash TEXT NOT NULL,
+            indexed_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+    ")?;
+
     Ok(())
 }
 
@@ -369,6 +393,9 @@ pub fn rename_chapter(conn: &Connection, id: i64, title: &str) -> rusqlite::Resu
 pub fn delete_chapter(conn: &Connection, id: i64) -> rusqlite::Result<()> {
     // Soft delete — never actually remove chapter data
     conn.execute("UPDATE chapters SET deleted = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?1", params![id])?;
+    // Clean up semantic embeddings for deleted chapter
+    conn.execute("DELETE FROM semantic_embeddings WHERE chapter_id = ?1", params![id]).ok();
+    conn.execute("DELETE FROM semantic_index_status WHERE chapter_id = ?1", params![id]).ok();
     Ok(())
 }
 

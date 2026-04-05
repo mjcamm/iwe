@@ -33,3 +33,5 @@ genpdf = "0.2.0"
 spellbook = "0.4.0"
 yrs = "0.21"
 phf = { version = "0.11", features = ["macros"] }
+ort = { version = "2.0.0-rc.12", features = ["ndarray"] }
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }

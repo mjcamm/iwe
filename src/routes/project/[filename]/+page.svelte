@@ -1,7 +1,7 @@
 <script>
   import { onMount } from 'svelte';
   import { beforeNavigate } from '$app/navigation';
-  import { getSettings, saveSettings, getChapters, getChapter, addChapter, updateChapterContent, renameChapter, deleteChapter, getEntities, createEntity, updateEntity, deleteEntity, setEntityVisible, addAlias, removeAlias, scanAllChapters, getNavHistory, pushNavEntry, truncateNavAfter, addEntityNote, logWritingActivity, setSpellLanguage, getAllChapterWordCounts, getChapterComments, addComment, updateComment, deleteComment, addStateMarker, deleteStateMarker, getStateMarker, getChapterDialogue, getChapterPlanningNotes as fetchChapterPlanningNotes } from '$lib/db.js';
+  import { getSettings, saveSettings, getChapters, getChapter, addChapter, updateChapterContent, renameChapter, deleteChapter, getEntities, createEntity, updateEntity, deleteEntity, setEntityVisible, addAlias, removeAlias, scanAllChapters, getNavHistory, pushNavEntry, truncateNavAfter, addEntityNote, logWritingActivity, setSpellLanguage, getAllChapterWordCounts, getChapterComments, addComment, updateComment, deleteComment, addStateMarker, deleteStateMarker, getStateMarker, getChapterDialogue, getChapterPlanningNotes as fetchChapterPlanningNotes, markChapterDirty, runSemanticIndexing } from '$lib/db.js';
   import ChapterNav from '$lib/components/ChapterNav.svelte';
   import Editor from '$lib/components/Editor.svelte';
   import EntityPanel from '$lib/components/EntityPanel.svelte';
@@ -10,12 +10,20 @@
   import SearchPanel from '$lib/components/SearchPanel.svelte';
   import AnalysisPanel from '$lib/components/AnalysisPanel.svelte';
   import { addToast } from '$lib/toast.js';
+  import { listen } from '@tauri-apps/api/event';
 
   let { data } = $props();
 
   let projectLoading = $state(true);
   let editorReady = $state(false);
   let projectTitle = $state('');
+  let semanticIndexing = $state(false);
+  let semanticIndexChapter = $state('');
+  let semanticTimer = null;
+  let semanticCountdownTimer = null;
+  let semanticCountdown = $state(0); // seconds remaining until indexing
+  let semanticIndexDelay = 30; // seconds, loaded from settings
+  let typewriterMode = $state(false);
   let chapters = $state([]);
   let openTabs = $state([]);
   let activeTabId = $state(null);
@@ -218,6 +226,12 @@
     if (settings.spellLanguage) {
       try { await setSpellLanguage(settings.spellLanguage); } catch {}
     }
+    if (settings.semanticIndexDelay !== undefined) {
+      semanticIndexDelay = settings.semanticIndexDelay;
+    }
+    if (settings.typewriterMode) {
+      typewriterMode = settings.typewriterMode;
+    }
 
     projectTitle = data.filename.replace('.iwe', '');
     chapters = await getChapters();
@@ -252,6 +266,11 @@
       const p = event.detail;
       handleGoToChapter(p.chapterId, p.searchText, p.charPosition || 0);
     });
+
+    // Listen for semantic indexing events
+    listen('semantic-index-started', () => { semanticIndexing = true; semanticIndexChapter = ''; semanticCountdown = 0; clearInterval(semanticCountdownTimer); clearTimeout(semanticTimer); });
+    listen('semantic-index-progress', (e) => { semanticIndexing = true; semanticIndexChapter = e.payload?.chapter || ''; });
+    listen('semantic-index-updated', () => { semanticIndexing = false; semanticIndexChapter = ''; });
 
     // Set up scroll listener for auto-checkpointing
     setTimeout(() => {
@@ -838,6 +857,25 @@
         const manuscriptTotal = Object.values(wordCounts).reduce((a, b) => a + b, 0);
         logWritingActivity(activeChapter.id, currentWords, manuscriptTotal, delta).catch(e => console.error('[stats] log failed:', e));
       }
+
+      // Trigger semantic re-indexing after inactivity period
+      if (semanticIndexDelay > 0) {
+        markChapterDirty(activeChapter.id).catch(() => {});
+        clearTimeout(semanticTimer);
+        clearInterval(semanticCountdownTimer);
+        semanticCountdown = semanticIndexDelay;
+        semanticCountdownTimer = setInterval(() => {
+          semanticCountdown--;
+          if (semanticCountdown <= 0) clearInterval(semanticCountdownTimer);
+        }, 1000);
+        semanticTimer = setTimeout(() => {
+          semanticCountdown = 0;
+          clearInterval(semanticCountdownTimer);
+          semanticIndexing = true;
+          semanticIndexChapter = '';
+          runSemanticIndexing().catch(() => {});
+        }, semanticIndexDelay * 1000);
+      }
     }, 500);
   }
 
@@ -922,6 +960,7 @@
         onaddstatefact={handleAddStateFact}
         onstateclick={handleStateMarkerClick}
         {viewedEntityIds}
+        {typewriterMode}
       />
     </div>
 
@@ -1016,6 +1055,18 @@
       <span>{currentWords.toLocaleString()} words</span>
     {/if}
     <span class="status-spacer"></span>
+    {#if semanticIndexing}
+      <span class="status-indexing">
+        <span class="indexing-spinner"></span>
+        indexing{semanticIndexChapter ? ` ${semanticIndexChapter}` : ''}
+      </span>
+      <span class="status-sep">&middot;</span>
+    {:else if semanticCountdown > 0}
+      <span class="status-pending">
+        index pending {semanticCountdown}s
+      </span>
+      <span class="status-sep">&middot;</span>
+    {/if}
     <span>{totalWords.toLocaleString()} total</span>
   </div>
 </div>
@@ -1144,4 +1195,19 @@
   .status-chapter { font-weight: 500; }
   .status-sep { color: var(--iwe-text-faint); }
   .status-spacer { flex: 1; }
+  .status-indexing {
+    display: inline-flex; align-items: center; gap: 0.3rem;
+    color: var(--iwe-accent); font-size: 0.7rem; font-weight: 500;
+  }
+  .indexing-spinner {
+    width: 8px; height: 8px;
+    border: 1.5px solid var(--iwe-border);
+    border-top-color: var(--iwe-accent);
+    border-radius: 50%;
+    animation: idx-spin 0.8s linear infinite;
+  }
+  @keyframes idx-spin { to { transform: rotate(360deg); } }
+  .status-pending {
+    font-size: 0.7rem; color: var(--iwe-text-faint);
+  }
 </style>
