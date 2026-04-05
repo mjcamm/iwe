@@ -1062,6 +1062,92 @@ fn resolve_entity_state_at(
         .map_err(|e| e.to_string())
 }
 
+// ---- Format profiles & pages ----
+
+#[tauri::command]
+fn get_format_profiles(state: tauri::State<'_, AppState>) -> Result<Vec<db::FormatProfile>, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::list_format_profiles(conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_format_profile(state: tauri::State<'_, AppState>, id: i64) -> Result<Option<db::FormatProfile>, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::get_format_profile(conn, id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn add_format_profile(state: tauri::State<'_, AppState>, name: String, target_type: String, trim_width_in: f64, trim_height_in: f64) -> Result<i64, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::add_format_profile(conn, &name, &target_type, trim_width_in, trim_height_in).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn update_format_profile(
+    state: tauri::State<'_, AppState>,
+    id: i64, name: String, target_type: String,
+    trim_width_in: f64, trim_height_in: f64,
+    margin_top_in: f64, margin_bottom_in: f64,
+    margin_outside_in: f64, margin_inside_in: f64,
+    font_body: String, font_size_pt: f64, line_spacing: f64,
+) -> Result<(), String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::update_format_profile(conn, id, &name, &target_type, trim_width_in, trim_height_in, margin_top_in, margin_bottom_in, margin_outside_in, margin_inside_in, &font_body, font_size_pt, line_spacing).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_format_profile(state: tauri::State<'_, AppState>, id: i64) -> Result<(), String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::delete_format_profile(conn, id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn seed_format_profiles(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::seed_default_profiles(conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_format_pages(state: tauri::State<'_, AppState>, profile_id: i64) -> Result<Vec<db::FormatPage>, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::list_format_pages(conn, profile_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn add_format_page(state: tauri::State<'_, AppState>, profile_id: i64, page_role: String, title: String, position: String) -> Result<i64, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::add_format_page(conn, profile_id, &page_role, &title, &position).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn update_format_page(state: tauri::State<'_, AppState>, id: i64, page_role: String, title: String, content: String, position: String, include_in: String) -> Result<(), String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::update_format_page(conn, id, &page_role, &title, &content, &position, &include_in).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_format_page(state: tauri::State<'_, AppState>, id: i64) -> Result<(), String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::delete_format_page(conn, id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn reorder_format_pages(state: tauri::State<'_, AppState>, ids: Vec<i64>) -> Result<(), String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::reorder_format_pages(conn, &ids).map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Initialize spell checker and synonym state at startup
@@ -1222,6 +1308,17 @@ pub fn run() {
             semantic::rebuild_semantic_index,
             semantic::semantic_search,
             semantic::get_semantic_index_status,
+            get_format_profiles,
+            get_format_profile,
+            add_format_profile,
+            update_format_profile,
+            delete_format_profile,
+            seed_format_profiles,
+            get_format_pages,
+            add_format_page,
+            update_format_page,
+            delete_format_page,
+            reorder_format_pages,
         ])
         .setup(|app| {
             if cfg!(debug_assertions) {

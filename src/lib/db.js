@@ -683,3 +683,49 @@ export async function getChapterWordCount(id) {
 export async function getAllChapterWordCounts() {
   return invoke('get_all_chapter_word_counts');
 }
+
+// --- Format profiles & pages ---
+
+export async function getFormatProfiles() {
+  return invoke('get_format_profiles');
+}
+
+export async function getFormatProfile(id) {
+  return invoke('get_format_profile', { id });
+}
+
+export async function addFormatProfile(name, targetType, trimWidthIn, trimHeightIn) {
+  return invoke('add_format_profile', { name, targetType, trimWidthIn, trimHeightIn });
+}
+
+export async function updateFormatProfile(id, name, targetType, trimWidthIn, trimHeightIn, marginTopIn, marginBottomIn, marginOutsideIn, marginInsideIn, fontBody, fontSizePt, lineSpacing) {
+  return invoke('update_format_profile', { id, name, targetType, trimWidthIn, trimHeightIn, marginTopIn, marginBottomIn, marginOutsideIn, marginInsideIn, fontBody, fontSizePt, lineSpacing });
+}
+
+export async function deleteFormatProfile(id) {
+  return invoke('delete_format_profile', { id });
+}
+
+export async function seedFormatProfiles() {
+  return invoke('seed_format_profiles');
+}
+
+export async function getFormatPages(profileId) {
+  return invoke('get_format_pages', { profileId });
+}
+
+export async function addFormatPage(profileId, pageRole, title, position) {
+  return invoke('add_format_page', { profileId, pageRole, title, position });
+}
+
+export async function updateFormatPage(id, pageRole, title, content, position, includeIn) {
+  return invoke('update_format_page', { id, pageRole, title, content, position, includeIn });
+}
+
+export async function deleteFormatPage(id) {
+  return invoke('delete_format_page', { id });
+}
+
+export async function reorderFormatPages(ids) {
+  return invoke('reorder_format_pages', { ids });
+}

@@ -300,6 +300,39 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         );
     ")?;
 
+    // Format profiles & pages (book formatting/layout)
+    conn.execute_batch("
+        CREATE TABLE IF NOT EXISTS format_profiles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            target_type TEXT NOT NULL DEFAULT 'print',
+            trim_width_in REAL NOT NULL DEFAULT 6.0,
+            trim_height_in REAL NOT NULL DEFAULT 9.0,
+            margin_top_in REAL NOT NULL DEFAULT 0.875,
+            margin_bottom_in REAL NOT NULL DEFAULT 0.875,
+            margin_outside_in REAL NOT NULL DEFAULT 0.625,
+            margin_inside_in REAL NOT NULL DEFAULT 0.875,
+            font_body TEXT NOT NULL DEFAULT 'Liberation Serif',
+            font_size_pt REAL NOT NULL DEFAULT 11.0,
+            line_spacing REAL NOT NULL DEFAULT 1.4,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS format_pages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            profile_id INTEGER NOT NULL REFERENCES format_profiles(id) ON DELETE CASCADE,
+            page_role TEXT NOT NULL DEFAULT 'custom',
+            title TEXT NOT NULL DEFAULT '',
+            content TEXT NOT NULL DEFAULT '',
+            position TEXT NOT NULL DEFAULT 'front',
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            include_in TEXT NOT NULL DEFAULT 'both',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_format_pages_profile ON format_pages(profile_id);
+    ")?;
+
     Ok(())
 }
 
@@ -1600,6 +1633,226 @@ pub fn reorder_kanban_cards(conn: &Connection, ids: &[i64]) -> rusqlite::Result<
     for (i, id) in ids.iter().enumerate() {
         conn.execute(
             "UPDATE kanban_cards SET sort_order = ?1 WHERE id = ?2",
+            params![i as i64, id],
+        )?;
+    }
+    Ok(())
+}
+
+// ---- Format profiles & pages ----
+
+#[derive(Serialize, Clone)]
+pub struct FormatProfile {
+    pub id: i64,
+    pub name: String,
+    pub target_type: String,
+    pub trim_width_in: f64,
+    pub trim_height_in: f64,
+    pub margin_top_in: f64,
+    pub margin_bottom_in: f64,
+    pub margin_outside_in: f64,
+    pub margin_inside_in: f64,
+    pub font_body: String,
+    pub font_size_pt: f64,
+    pub line_spacing: f64,
+    pub sort_order: i64,
+    pub created_at: String,
+}
+
+#[derive(Serialize, Clone)]
+pub struct FormatPage {
+    pub id: i64,
+    pub profile_id: i64,
+    pub page_role: String,
+    pub title: String,
+    pub content: String,
+    pub position: String,
+    pub sort_order: i64,
+    pub include_in: String,
+    pub created_at: String,
+}
+
+fn read_profile(row: &rusqlite::Row) -> rusqlite::Result<FormatProfile> {
+    Ok(FormatProfile {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        target_type: row.get(2)?,
+        trim_width_in: row.get(3)?,
+        trim_height_in: row.get(4)?,
+        margin_top_in: row.get(5)?,
+        margin_bottom_in: row.get(6)?,
+        margin_outside_in: row.get(7)?,
+        margin_inside_in: row.get(8)?,
+        font_body: row.get(9)?,
+        font_size_pt: row.get(10)?,
+        line_spacing: row.get(11)?,
+        sort_order: row.get(12)?,
+        created_at: row.get(13)?,
+    })
+}
+
+fn read_format_page(row: &rusqlite::Row) -> rusqlite::Result<FormatPage> {
+    Ok(FormatPage {
+        id: row.get(0)?,
+        profile_id: row.get(1)?,
+        page_role: row.get(2)?,
+        title: row.get(3)?,
+        content: row.get(4)?,
+        position: row.get(5)?,
+        sort_order: row.get(6)?,
+        include_in: row.get(7)?,
+        created_at: row.get(8)?,
+    })
+}
+
+const PROFILE_COLS: &str = "id, name, target_type, trim_width_in, trim_height_in, margin_top_in, margin_bottom_in, margin_outside_in, margin_inside_in, font_body, font_size_pt, line_spacing, sort_order, created_at";
+const FORMAT_PAGE_COLS: &str = "id, profile_id, page_role, title, content, position, sort_order, include_in, created_at";
+
+pub fn list_format_profiles(conn: &Connection) -> rusqlite::Result<Vec<FormatProfile>> {
+    let mut stmt = conn.prepare(&format!("SELECT {} FROM format_profiles ORDER BY sort_order ASC", PROFILE_COLS))?;
+    let rows = stmt.query_map([], |row| read_profile(row))?;
+    rows.collect()
+}
+
+pub fn get_format_profile(conn: &Connection, id: i64) -> rusqlite::Result<Option<FormatProfile>> {
+    let mut stmt = conn.prepare(&format!("SELECT {} FROM format_profiles WHERE id = ?1", PROFILE_COLS))?;
+    let mut rows = stmt.query_map(params![id], |row| read_profile(row))?;
+    Ok(rows.next().transpose()?)
+}
+
+pub fn add_format_profile(
+    conn: &Connection,
+    name: &str,
+    target_type: &str,
+    trim_width_in: f64,
+    trim_height_in: f64,
+) -> rusqlite::Result<i64> {
+    let max_order: i64 = conn
+        .query_row("SELECT COALESCE(MAX(sort_order), -1) FROM format_profiles", [], |r| r.get(0))?;
+    conn.execute(
+        "INSERT INTO format_profiles (name, target_type, trim_width_in, trim_height_in, sort_order) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![name, target_type, trim_width_in, trim_height_in, max_order + 1],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn update_format_profile(
+    conn: &Connection,
+    id: i64,
+    name: &str,
+    target_type: &str,
+    trim_width_in: f64,
+    trim_height_in: f64,
+    margin_top_in: f64,
+    margin_bottom_in: f64,
+    margin_outside_in: f64,
+    margin_inside_in: f64,
+    font_body: &str,
+    font_size_pt: f64,
+    line_spacing: f64,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE format_profiles SET name=?1, target_type=?2, trim_width_in=?3, trim_height_in=?4, margin_top_in=?5, margin_bottom_in=?6, margin_outside_in=?7, margin_inside_in=?8, font_body=?9, font_size_pt=?10, line_spacing=?11 WHERE id=?12",
+        params![name, target_type, trim_width_in, trim_height_in, margin_top_in, margin_bottom_in, margin_outside_in, margin_inside_in, font_body, font_size_pt, line_spacing, id],
+    )?;
+    Ok(())
+}
+
+pub fn delete_format_profile(conn: &Connection, id: i64) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM format_profiles WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+pub fn seed_default_profiles(conn: &Connection) -> rusqlite::Result<()> {
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM format_profiles", [], |r| r.get(0))?;
+    if count > 0 {
+        return Ok(());
+    }
+
+    // Seed 3 default profiles
+    let profiles = [
+        ("6×9 Paperback", "print", 6.0, 9.0),
+        ("5.5×8.5 Paperback", "print", 5.5, 8.5),
+        ("Ebook", "ebook", 6.0, 9.0),
+    ];
+    for (i, (name, target, w, h)) in profiles.iter().enumerate() {
+        conn.execute(
+            "INSERT INTO format_profiles (name, target_type, trim_width_in, trim_height_in, sort_order) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![name, target, w, h, i as i64],
+        )?;
+        let profile_id = conn.last_insert_rowid();
+
+        // Seed default front matter: title page, copyright, TOC
+        let pages = [
+            ("title", "Title Page", "front", 0),
+            ("copyright", "Copyright", "front", 1),
+            ("toc", "Table of Contents", "front", 2),
+        ];
+        for (role, title, pos, order) in &pages {
+            conn.execute(
+                "INSERT INTO format_pages (profile_id, page_role, title, position, sort_order) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![profile_id, role, title, pos, order],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+// Format pages CRUD
+
+pub fn list_format_pages(conn: &Connection, profile_id: i64) -> rusqlite::Result<Vec<FormatPage>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {} FROM format_pages WHERE profile_id = ?1 ORDER BY sort_order ASC",
+        FORMAT_PAGE_COLS
+    ))?;
+    let rows = stmt.query_map(params![profile_id], |row| read_format_page(row))?;
+    rows.collect()
+}
+
+pub fn add_format_page(
+    conn: &Connection,
+    profile_id: i64,
+    page_role: &str,
+    title: &str,
+    position: &str,
+) -> rusqlite::Result<i64> {
+    let max_order: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(sort_order), -1) FROM format_pages WHERE profile_id = ?1 AND position = ?2",
+        params![profile_id, position],
+        |r| r.get(0),
+    )?;
+    conn.execute(
+        "INSERT INTO format_pages (profile_id, page_role, title, position, sort_order) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![profile_id, page_role, title, position, max_order + 1],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn update_format_page(
+    conn: &Connection,
+    id: i64,
+    page_role: &str,
+    title: &str,
+    content: &str,
+    position: &str,
+    include_in: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE format_pages SET page_role=?1, title=?2, content=?3, position=?4, include_in=?5 WHERE id=?6",
+        params![page_role, title, content, position, include_in, id],
+    )?;
+    Ok(())
+}
+
+pub fn delete_format_page(conn: &Connection, id: i64) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM format_pages WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+pub fn reorder_format_pages(conn: &Connection, ids: &[i64]) -> rusqlite::Result<()> {
+    for (i, id) in ids.iter().enumerate() {
+        conn.execute(
+            "UPDATE format_pages SET sort_order = ?1 WHERE id = ?2",
             params![i as i64, id],
         )?;
     }

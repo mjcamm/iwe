@@ -29,6 +29,7 @@
     if (path.endsWith('/palettes') || path.includes('/palettes/')) return 'palettes';
     if (path.endsWith('/stats') || path.includes('/stats/')) return 'stats';
     if (path.endsWith('/timeflow') || path.includes('/timeflow/')) return 'timeflow';
+    if (path.endsWith('/format') || path.includes('/format/')) return 'format';
     return 'editor';
   });
 
@@ -162,6 +163,9 @@
       </a>
       <a href="{basePath}/timeflow" class="nav-tab" class:active={activeSection === 'timeflow'}>
         <i class="bi bi-clock-history"></i> Time Flow
+      </a>
+      <a href="{basePath}/format" class="nav-tab" class:active={activeSection === 'format'}>
+        <i class="bi bi-type"></i> Formatting
       </a>
     </div>
 
