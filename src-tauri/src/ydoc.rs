@@ -57,6 +57,14 @@ pub fn extract_text_with_breaks(doc: &Doc) -> String {
     }
 }
 
+/// Extract text with paragraph breaks from raw Y.Doc state bytes.
+pub fn extract_text_with_breaks_from_bytes(state_bytes: &[u8]) -> String {
+    match load_doc(state_bytes) {
+        Ok(doc) => extract_text_with_breaks(&doc),
+        Err(_) => String::new(),
+    }
+}
+
 fn walk_fragment<T: ReadTxn>(txn: &T, fragment: &XmlFragmentRef, out: &mut String) {
     for child in fragment.children(txn) {
         walk_xml_out(txn, &child, out);

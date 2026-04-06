@@ -57,7 +57,11 @@
       "Bash(grep -n \"fn try_extract_tensor\\\\|fn try_extract_raw\" ~/.cargo/registry/src/index.crates.io-*/ort-2.0.0-rc.12/src/value/impl_tensor/extract.rs)",
       "Bash(grep -n \"pub struct Shape\\\\|impl.*Index.*Shape\\\\|pub fn.*shape\" ~/.cargo/registry/src/index.crates.io-*/ort-2.0.0-rc.12/src/value/mod.rs)",
       "Bash(grep -rn \"pub struct Shape\" ~/.cargo/registry/src/index.crates.io-*/ort-2.0.0-rc.12/src/)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Bash(cargo search:*)",
+      "Bash(gh api:*)",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(d.get\\('default_branch','?'\\), d.get\\('message','ok'\\)\\)\")",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); [print\\(i['full_name'], i['default_branch']\\) for i in d.get\\('items',[]\\)]\")"
     ]
   }
 }

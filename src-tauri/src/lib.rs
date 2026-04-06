@@ -1,5 +1,6 @@
 mod analysis;
 mod db;
+mod format;
 mod semantic;
 mod text_utils;
 mod palettes;
@@ -1308,6 +1309,8 @@ pub fn run() {
             semantic::rebuild_semantic_index,
             semantic::semantic_search,
             semantic::get_semantic_index_status,
+            format::render_preview_pages,
+            format::render_single_page,
             get_format_profiles,
             get_format_profile,
             add_format_profile,

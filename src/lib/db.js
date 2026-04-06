@@ -729,3 +729,11 @@ export async function deleteFormatPage(id) {
 export async function reorderFormatPages(ids) {
   return invoke('reorder_format_pages', { ids });
 }
+
+export async function renderPreviewPages(profileId) {
+  return invoke('render_preview_pages', { profileId });
+}
+
+export async function renderSinglePage(profileId, pageIndex) {
+  return invoke('render_single_page', { profileId, pageIndex });
+}

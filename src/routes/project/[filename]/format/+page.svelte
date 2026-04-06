@@ -6,23 +6,10 @@
     getChapters, getFormatProfiles, getFormatPages, getSettings, saveSettings,
     seedFormatProfiles, updateFormatProfile, addFormatPage,
     updateFormatPage, deleteFormatPage, reorderFormatPages,
+    renderPreviewPages,
   } from '$lib/db.js';
-  import { createChapterDoc, destroyDoc } from '$lib/ydoc.js';
-  import { yDocToProsemirrorJSON } from 'y-prosemirror';
-  import { generateHTML } from '@tiptap/core';
-  import StarterKit from '@tiptap/starter-kit';
-  import TextAlign from '@tiptap/extension-text-align';
-  import Superscript from '@tiptap/extension-superscript';
-  import Subscript from '@tiptap/extension-subscript';
 
   const flipDurationMs = 150;
-
-  const exportExtensions = [
-    StarterKit.configure({ heading: { levels: [1, 2, 3] }, history: false }),
-    TextAlign.configure({ types: ['heading', 'paragraph'] }),
-    Superscript,
-    Subscript,
-  ];
 
   // Target format presets
   const TARGET_PRESETS = {
@@ -110,29 +97,13 @@
   let activeProfileId = $state(null);
   let sidebarMode = $state('pages');
   let chapters = $state([]);
-  let chapterHtmls = $state({}); // id -> html string
   let formatPages = $state([]); // FormatPage[] for active profile
   let selectedPresetLabel = $state(null); // tracks which target card is selected
 
-  // Assembled page list for sidebar (front matter + chapters + back matter)
-  let pageList = $derived.by(() => {
-    const front = formatPages
-      .filter(p => p.position === 'front')
-      .sort((a, b) => a.sort_order - b.sort_order)
-      .map(p => ({ ...p, type: 'format-page' }));
-    const chapterItems = chapters.map((ch, i) => ({
-      id: `ch-${ch.id}`,
-      _chapterId: ch.id,
-      title: ch.title,
-      type: 'chapter',
-      sort_order: i,
-    }));
-    const back = formatPages
-      .filter(p => p.position === 'back')
-      .sort((a, b) => a.sort_order - b.sort_order)
-      .map(p => ({ ...p, type: 'format-page' }));
-    return [...front, ...chapterItems, ...back];
-  });
+  // Typst-rendered preview pages (array of blob URLs)
+  let previewPages = $state([]); // string[] of blob URLs
+  let rendering = $state(false);
+  let renderError = $state(null);
 
   // DnD items for front and back sections
   let frontItems = $state([]);
@@ -153,29 +124,41 @@
   });
 
   let activeProfile = $derived(profiles.find(p => p.id === activeProfileId) || null);
-
-  // Page dimensions for preview (in inches)
-  let trimWidth = $derived(activeProfile?.trim_width_in ?? 6);
-  let trimHeight = $derived(activeProfile?.trim_height_in ?? 9);
   let isEbook = $derived(activeProfile?.target_type === 'ebook');
-
-  // Preview scaling: fit page into available space
-  const PREVIEW_SCALE = 96; // pixels per inch for preview
-  let pageWidthPx = $derived(trimWidth * PREVIEW_SCALE);
-  let pageHeightPx = $derived(trimHeight * PREVIEW_SCALE);
 
   // Preview scroll ref
   let previewContainer;
-  let scrollTarget = $state(null);
 
-  function chapterToHtml(chapter) {
+  // Convert PNG byte arrays from Rust into blob URLs for <img> display.
+  function pngBytesToBlobUrls(pngArrays) {
+    // Revoke old URLs to prevent memory leaks
+    for (const url of previewPages) {
+      URL.revokeObjectURL(url);
+    }
+    return pngArrays.map(bytes => {
+      const arr = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+      const blob = new Blob([arr], { type: 'image/png' });
+      return URL.createObjectURL(blob);
+    });
+  }
+
+  async function renderPreview() {
+    if (!activeProfileId) return;
+    if (isEbook) {
+      previewPages = [];
+      return;
+    }
+    rendering = true;
+    renderError = null;
     try {
-      const { doc, xmlFragment } = createChapterDoc(chapter.content);
-      const json = yDocToProsemirrorJSON(doc, 'prosemirror');
-      destroyDoc(doc);
-      return generateHTML(json, exportExtensions);
+      const pngs = await renderPreviewPages(activeProfileId);
+      previewPages = pngBytesToBlobUrls(pngs);
     } catch (e) {
-      return '<p>(empty)</p>';
+      console.error('[format] render failed:', e);
+      renderError = String(e);
+      previewPages = [];
+    } finally {
+      rendering = false;
     }
   }
 
@@ -190,13 +173,6 @@
     profiles = profs;
     chapters = chaps;
 
-    // Generate HTML for all chapters
-    const htmlMap = {};
-    for (const ch of chaps) {
-      htmlMap[ch.id] = chapterToHtml(ch);
-    }
-    chapterHtmls = htmlMap;
-
     // Select first profile if none selected
     if (!activeProfileId && profs.length > 0) {
       activeProfileId = profs[0].id;
@@ -207,6 +183,9 @@
       syncPresetLabel(profs.find(p => p.id === activeProfileId));
     }
     loading = false;
+
+    // Kick off rendering after load
+    renderPreview();
   }
 
   function syncPresetLabel(prof) {
@@ -220,6 +199,7 @@
     activeProfileId = id;
     formatPages = await getFormatPages(id);
     syncPresetLabel(profiles.find(p => p.id === id));
+    renderPreview();
   }
 
   async function selectTarget(preset, type) {
@@ -233,9 +213,9 @@
       prof.margin_outside_in, prof.margin_inside_in,
       prof.font_body, prof.font_size_pt, prof.line_spacing,
     );
-    // Reload profiles
     profiles = await getFormatProfiles();
     selectedPresetLabel = preset.label;
+    renderPreview();
   }
 
   async function handleAddPage(position) {
@@ -276,9 +256,8 @@
     formatPages = await getFormatPages(activeProfileId);
   }
 
-  function scrollToSection(id) {
-    scrollTarget = id;
-    const el = document.getElementById(`preview-${id}`);
+  function scrollToPage(index) {
+    const el = document.getElementById(`preview-page-${index}`);
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 
@@ -294,51 +273,38 @@
   <div class="format-layout">
     <!-- Center: Page preview -->
     <div class="preview-area" bind:this={previewContainer}>
-      <div class="preview-scroll">
-        <!-- Front matter pages -->
-        {#each pageList as item (item.type === 'chapter' ? item.id : `fp-${item.id}`)}
-          {#if item.type === 'format-page'}
-            <div class="preview-page-wrap" id="preview-fp-{item.id}">
-              <div class="preview-page" class:ebook-frame={isEbook}
-                style="width: {pageWidthPx}px; height: {pageHeightPx}px;">
-                <div class="page-content format-page-content">
-                  <h3 class="page-title">{item.title || roleLabel(item.page_role)}</h3>
-                  {#if item.page_role === 'toc'}
-                    <div class="toc-placeholder">
-                      {#each chapters as ch, i}
-                        <div class="toc-entry">
-                          <span class="toc-chapter">{ch.title}</span>
-                          <span class="toc-dots"></span>
-                          <span class="toc-page">{i + 1}</span>
-                        </div>
-                      {/each}
-                    </div>
-                  {:else if item.content}
-                    <div class="page-text">{item.content}</div>
-                  {:else}
-                    <div class="page-placeholder">{roleLabel(item.page_role)}</div>
-                  {/if}
-                </div>
-              </div>
-              <div class="page-number">{roleLabel(item.page_role)}</div>
+      {#if isEbook}
+        <div class="ebook-placeholder">
+          <i class="bi bi-phone" style="font-size: 2rem;"></i>
+          <p>Ebook preview coming soon</p>
+          <p class="ebook-hint">Ebooks use reflowable HTML — no fixed pages to preview.</p>
+        </div>
+      {:else if rendering}
+        <div class="render-loading">
+          <div class="loader"></div>
+          <p>Rendering pages...</p>
+        </div>
+      {:else if renderError}
+        <div class="render-error">
+          <i class="bi bi-exclamation-triangle"></i>
+          <p>Rendering failed</p>
+          <pre class="error-detail">{renderError}</pre>
+          <button class="retry-btn" onclick={renderPreview}>Retry</button>
+        </div>
+      {:else if previewPages.length === 0}
+        <div class="render-loading">
+          <p>No pages to display</p>
+        </div>
+      {:else}
+        <div class="preview-scroll">
+          {#each previewPages as url, i}
+            <div class="preview-page-wrap" id="preview-page-{i}">
+              <img class="preview-page-img" src={url} alt="Page {i + 1}" draggable="false" />
+              <div class="page-number">{i + 1}</div>
             </div>
-          {:else}
-            <!-- Chapter page -->
-            <div class="preview-page-wrap" id="preview-{item.id}">
-              <div class="preview-page" class:ebook-frame={isEbook}
-                style="width: {pageWidthPx}px; height: {pageHeightPx}px;">
-                <div class="page-content">
-                  <h2 class="chapter-title">{item.title}</h2>
-                  <div class="chapter-body">
-                    {@html chapterHtmls[item._chapterId] || '<p>(empty)</p>'}
-                  </div>
-                </div>
-              </div>
-              <div class="page-number">{item.title}</div>
-            </div>
-          {/if}
-        {/each}
-      </div>
+          {/each}
+        </div>
+      {/if}
     </div>
 
     <!-- Resize handle -->
@@ -383,7 +349,7 @@
               onfinalize={handleFrontFinalize}>
               {#each frontItems as item (item.id)}
                 <div class="page-list-item format-page-item" animate:flip={{ duration: flipDurationMs }}
-                  onclick={() => scrollToSection(`fp-${item.id}`)}>
+                  onclick={() => scrollToPage(0)}>
                   <i class="bi bi-grip-vertical drag-handle"></i>
                   <span class="page-item-title">{item.title || roleLabel(item.page_role)}</span>
                   <span class="page-item-role">{roleLabel(item.page_role)}</span>
@@ -399,7 +365,7 @@
             <div class="page-group-label">Chapters</div>
             {#each chapters as ch (ch.id)}
               <div class="page-list-item chapter-item"
-                onclick={() => scrollToSection(`ch-${ch.id}`)}>
+                onclick={() => scrollToPage(0)}>
                 <span class="page-item-title">{ch.title}</span>
               </div>
             {/each}
@@ -418,7 +384,7 @@
               onfinalize={handleBackFinalize}>
               {#each backItems as item (item.id)}
                 <div class="page-list-item format-page-item" animate:flip={{ duration: flipDurationMs }}
-                  onclick={() => scrollToSection(`fp-${item.id}`)}>
+                  onclick={() => scrollToPage(0)}>
                   <i class="bi bi-grip-vertical drag-handle"></i>
                   <span class="page-item-title">{item.title || roleLabel(item.page_role)}</span>
                   <span class="page-item-role">{roleLabel(item.page_role)}</span>
@@ -506,75 +472,57 @@
   }
   .preview-scroll {
     display: flex; flex-direction: column; align-items: center; gap: 1.5rem;
+    padding-bottom: 2rem;
   }
   .preview-page-wrap {
     display: flex; flex-direction: column; align-items: center; gap: 0.4rem;
   }
-  .preview-page {
-    background: #fff;
+  .preview-page-img {
+    display: block;
     box-shadow: 0 2px 12px rgba(0,0,0,0.12), 0 0 0 1px rgba(0,0,0,0.06);
-    overflow: hidden;
-    position: relative;
-  }
-  .preview-page.ebook-frame {
-    border-radius: 8px;
-    border: 2px solid #333;
-    box-shadow: 0 4px 20px rgba(0,0,0,0.2);
-  }
-  .page-content {
-    padding: 0.75in;
-    height: 100%;
-    overflow: hidden;
-    font-family: 'Liberation Serif', 'Georgia', serif;
-    font-size: 10px;
-    line-height: 1.5;
-    color: #222;
-  }
-  .format-page-content {
-    display: flex; flex-direction: column; align-items: center; justify-content: center;
-    text-align: center;
-  }
-  .page-title {
-    font-family: 'Libre Baskerville', 'Georgia', serif;
-    font-size: 16px; font-weight: 400;
-    margin: 0 0 1rem 0; color: #222;
-  }
-  .chapter-title {
-    font-family: 'Libre Baskerville', 'Georgia', serif;
-    font-size: 14px; font-weight: 400;
-    margin: 0 0 1.5rem 0; text-align: center; color: #222;
-  }
-  .chapter-body {
-    font-size: 9px; line-height: 1.5; color: #333;
-  }
-  .chapter-body :global(p) {
-    margin: 0 0 0.5em 0; text-indent: 1.5em;
-  }
-  .chapter-body :global(p:first-child) { text-indent: 0; }
-  .chapter-body :global(h1), .chapter-body :global(h2), .chapter-body :global(h3) {
-    font-size: 11px; margin: 1em 0 0.5em; font-family: 'Libre Baskerville', serif;
-  }
-  .page-placeholder {
-    font-family: var(--iwe-font-ui); font-size: 12px;
-    color: var(--iwe-text-muted); font-style: italic;
+    background: #fff;
+    max-width: 100%;
+    height: auto;
   }
   .page-number {
     font-family: var(--iwe-font-ui); font-size: 0.7rem;
     color: var(--iwe-text-muted); text-align: center;
   }
 
-  /* TOC placeholder */
-  .toc-placeholder { width: 100%; text-align: left; margin-top: 1rem; }
-  .toc-entry {
-    display: flex; align-items: baseline; gap: 0.3rem;
-    font-size: 10px; margin-bottom: 0.4rem; color: #333;
+  /* Ebook placeholder */
+  .ebook-placeholder {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    height: 100%; gap: 0.5rem;
+    font-family: var(--iwe-font-ui); color: var(--iwe-text-muted);
   }
-  .toc-chapter { white-space: nowrap; }
-  .toc-dots {
-    flex: 1; border-bottom: 1px dotted #999;
-    margin: 0 0.3rem; position: relative; top: -2px;
+  .ebook-placeholder p { margin: 0; }
+  .ebook-hint { font-size: 0.78rem; font-style: italic; }
+
+  /* Render states */
+  .render-loading {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    height: 100%; gap: 0.8rem;
+    font-family: var(--iwe-font-ui); color: var(--iwe-text-muted);
   }
-  .toc-page { white-space: nowrap; font-size: 9px; color: #666; }
+  .render-error {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    height: 100%; gap: 0.6rem;
+    font-family: var(--iwe-font-ui); color: var(--iwe-text-muted);
+  }
+  .render-error i { font-size: 1.5rem; color: #d97706; }
+  .error-detail {
+    font-size: 0.72rem; max-width: 500px; overflow-x: auto;
+    background: var(--iwe-bg); padding: 0.5rem 0.8rem;
+    border-radius: var(--iwe-radius-sm); border: 1px solid var(--iwe-border);
+    white-space: pre-wrap; word-break: break-word;
+  }
+  .retry-btn {
+    font-family: var(--iwe-font-ui); font-size: 0.8rem;
+    padding: 0.35rem 0.9rem; border: 1px solid var(--iwe-accent);
+    border-radius: var(--iwe-radius-sm); background: none;
+    color: var(--iwe-accent); cursor: pointer; transition: all 150ms;
+  }
+  .retry-btn:hover { background: var(--iwe-accent); color: #fff; }
 
   /* Resize handle */
   .resize-handle {
