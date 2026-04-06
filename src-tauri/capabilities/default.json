@@ -11,11 +11,14 @@
     "timeflow*",
     "pacing*",
     "readability*",
-    "paragraphs*"
+    "paragraphs*",
+    "import*",
+    "analyse*"
   ],
   "permissions": [
     "core:default",
     "core:window:allow-create",
+    "core:window:allow-close",
     "core:webview:allow-create-webview-window",
     "opener:default",
     "dialog:default",

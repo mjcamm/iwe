@@ -3,6 +3,8 @@
   import { goto } from '$app/navigation';
   import { open } from '@tauri-apps/plugin-dialog';
   import { revealItemInDir } from '@tauri-apps/plugin-opener';
+  import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
+  import { listen } from '@tauri-apps/api/event';
   import { getProjectsDir, setProjectsDir, listProjects, createProject, deleteProject, getSettings, saveSettings, setSpellLanguage } from '$lib/db.js';
   import WordPalettes from '$lib/components/WordPalettes.svelte';
 
@@ -20,6 +22,20 @@
 
   // Navigation
   let activeView = $state('projects');
+  const isDev = import.meta.env.DEV;
+
+  function handleAnalyseProject(e, project) {
+    e.preventDefault();
+    e.stopPropagation();
+    const label = 'analyse-' + Date.now();
+    new WebviewWindow(label, {
+      url: '/analyse?filepath=' + encodeURIComponent(project.filepath),
+      title: 'Analyse — ' + project.title,
+      width: 1100,
+      height: 800,
+      resizable: true
+    });
+  }
 
   onMount(async () => {
     projectsDir = await getProjectsDir();
@@ -41,7 +57,29 @@
       try { await setSpellLanguage(spellLang); } catch {}
     }
     loading = false;
+
+    // Refresh project list when an import completes
+    await listen('projects-changed', async () => {
+      projects = await listProjects();
+    });
   });
+
+  async function handleImport() {
+    const selected = await open({
+      title: 'Import manuscript',
+      filters: [{ name: 'Manuscript', extensions: ['docx', 'epub'] }]
+    });
+    if (!selected) return;
+    const path = typeof selected === 'string' ? selected : selected.path;
+    const label = 'import-' + Date.now();
+    new WebviewWindow(label, {
+      url: '/import?path=' + encodeURIComponent(path),
+      title: 'Import manuscript',
+      width: 1100,
+      height: 800,
+      resizable: true
+    });
+  }
 
   async function handleSpellLangChange(e) {
     spellLang = e.target.value;
@@ -172,6 +210,7 @@
             {:else}
               <div class="action-row">
                 <button class="btn-author btn-author-primary" onclick={() => showNewForm = true}>+ New Manuscript</button>
+                <button class="btn-author btn-author-subtle" onclick={handleImport}>Import…</button>
                 <div class="action-links">
                   <button class="btn-text" onclick={async () => { projects = await listProjects(); }}>Refresh</button>
                   <span class="dot-sep"></span>
@@ -196,6 +235,9 @@
                       <span class="project-file">{project.filename}</span>
                     </div>
                   </a>
+                  {#if isDev}
+                    <button class="project-analyse" onclick={e => handleAnalyseProject(e, project)} title="Analyse (dev only)">⚗</button>
+                  {/if}
                   <button class="project-delete" onclick={e => handleDelete(e, project)} title="Delete">&times;</button>
                 </li>
               {/each}
@@ -436,10 +478,17 @@
   .project-file { font-size: 0.7rem; color: var(--iwe-text-faint); }
   .project-delete {
     background: none; border: none; color: var(--iwe-text-faint);
-    font-size: 1.4rem; cursor: pointer; padding: 0.5rem 0.75rem;
+    font-size: 2.6rem; cursor: pointer; padding: 0.7rem 1.1rem;
     opacity: 0; transition: all 150ms; line-height: 1;
   }
   .project-delete:hover { color: var(--iwe-danger); }
+  .project-analyse {
+    background: none; border: none; color: var(--iwe-text-faint);
+    font-size: 2rem; cursor: pointer; padding: 0.7rem 0.9rem;
+    opacity: 0; transition: all 150ms; line-height: 1;
+  }
+  .project-item:hover .project-analyse { opacity: 1; }
+  .project-analyse:hover { color: var(--iwe-accent); }
   .home-empty {
     text-align: center; padding: 3rem 1rem;
     font-family: var(--iwe-font-prose); color: var(--iwe-text-muted);

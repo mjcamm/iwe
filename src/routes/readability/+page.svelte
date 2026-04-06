@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte';
-  import { readabilityAnalysis } from '$lib/db.js';
+  import { readabilityAnalysis, getLibraryBook, getProjectSetting } from '$lib/db.js';
   import { emitTo } from '@tauri-apps/api/event';
   import { getCurrentWindow } from '@tauri-apps/api/window';
 
@@ -11,6 +11,10 @@
   let smoothing = $state(5);
   let overviewCanvas = $state(null);
 
+  // Comparison book state
+  let compareBook = $state(null);          // { title, chapters: [{ grade_level, total_words }], manuscript_grade }
+  let standardiseLength = $state(true);
+
   let chartMeta = {};
 
   onMount(async () => {
@@ -19,10 +23,111 @@
     } catch (e) {
       console.warn('Readability analysis failed:', e);
     }
+    // Load comparison book from the project's saved setting
+    let compareId = null;
+    try {
+      const stored = await getProjectSetting('comparative_book_id');
+      if (stored != null && stored !== '') compareId = parseInt(stored, 10);
+    } catch (e) {
+      console.warn('Failed to read comparative_book_id setting:', e);
+    }
+    if (compareId && !Number.isNaN(compareId)) {
+      try {
+        const book = await getLibraryBook(compareId);
+        if (book) {
+          const analyses = JSON.parse(book.analysesJson || '{}');
+          const r = analyses.readability;
+          if (r && Array.isArray(r.chapters)) {
+            compareBook = {
+              title: book.title,
+              author: book.author,
+              manuscript_grade: r.manuscript_grade,
+              chapters: r.chapters.map(c => ({
+                grade_level: c.grade_level,
+                total_words: c.total_words || 0
+              }))
+            };
+          }
+        }
+      } catch (e) {
+        console.warn('Failed to load comparison book:', e);
+      }
+    }
     loading = false;
   });
 
+  /**
+   * Standardise: bucket the comparison book's chapters into N word-weighted slices
+   * matching the user's chapter boundaries (by % of total words). Returns one
+   * grade per user chapter — a word-weighted average of the comparison book's
+   * grades over the equivalent slice of its prose.
+   */
+  function standardisedComparisonGrades(userChapters, compChapters) {
+    if (!compChapters || compChapters.length === 0) return [];
+    const userWords = userChapters.map(c => c.total_words || 0);
+    const compWords = compChapters.map(c => c.total_words || 0);
+    const userTotal = userWords.reduce((a, b) => a + b, 0) || 1;
+    const compTotal = compWords.reduce((a, b) => a + b, 0) || 1;
+
+    const compRanges = [];
+    let cum = 0;
+    for (let i = 0; i < compChapters.length; i++) {
+      const start = cum / compTotal;
+      cum += compWords[i];
+      const end = cum / compTotal;
+      compRanges.push([start, end]);
+    }
+
+    console.groupCollapsed(
+      `[readability] standardised comparison: ${userChapters.length} user chapters vs ${compChapters.length} comp chapters`
+    );
+    console.log(`User total words: ${userTotal.toLocaleString()}, Comp total words: ${compTotal.toLocaleString()}`);
+
+    const out = [];
+    let userCum = 0;
+    for (let u = 0; u < userChapters.length; u++) {
+      const sliceStart = userCum / userTotal;
+      userCum += userWords[u];
+      const sliceEnd = userCum / userTotal;
+
+      let weightedSum = 0;
+      let weightTotal = 0;
+      const contributors = [];
+      for (let c = 0; c < compChapters.length; c++) {
+        const [cs, ce] = compRanges[c];
+        const overlap = Math.max(0, Math.min(sliceEnd, ce) - Math.max(sliceStart, cs));
+        if (overlap > 0) {
+          const w = overlap * compTotal;
+          weightedSum += compChapters[c].grade_level * w;
+          weightTotal += w;
+          contributors.push({
+            compChapterIdx: c,
+            grade: compChapters[c].grade_level,
+            weightWords: Math.round(w)
+          });
+        }
+      }
+      const avg = weightTotal > 0 ? weightedSum / weightTotal : 0;
+
+      console.groupCollapsed(
+        `User #${u + 1} "${userChapters[u].chapter_title}" — ` +
+        `slice ${(sliceStart * 100).toFixed(1)}%–${(sliceEnd * 100).toFixed(1)}% — ` +
+        `weighted avg ${avg.toFixed(2)}`
+      );
+      console.table(contributors);
+      console.groupEnd();
+
+      out.push(avg);
+    }
+    console.log('Final standardised series:', out.map(v => +v.toFixed(2)));
+    console.groupEnd();
+    return out;
+  }
+
   $effect(() => {
+    // Re-draw when data, comparison, or standardise toggle change
+    void compareBook;
+    void standardiseLength;
     if (!data) return;
     if (overviewCanvas) drawOverviewBar(overviewCanvas);
     for (const ch of data.chapters) {
@@ -58,18 +163,28 @@
     const ctx = canvas.getContext('2d');
     const dpr = window.devicePixelRatio || 1;
     const containerW = canvas.parentElement?.clientWidth || 700;
-    const logicalW = Math.max(containerW, 400);
 
     const chapters = data.chapters;
+
+    // Comparison only shown when checkbox is ticked.
+    const showComparison = !!compareBook && standardiseLength;
+    const compChapters = showComparison ? compareBook.chapters : [];
+    const slotCount = chapters.length;
+
     const padTop = 25;
-    const padBottom = 60;
+    const padBottom = 140;
     const padLeft = 40;
-    const padRight = 15;
+    const padRight = 60; // extra room for legend / overflow labels
     const chartH = 200;
     const logicalH = padTop + chartH + padBottom;
+
+    const minBarSlot = 40; // px per slot — keeps bars readable
+    const naturalW = padLeft + padRight + slotCount * minBarSlot;
+    const logicalW = Math.max(containerW, naturalW, 400);
+
     const drawW = logicalW - padLeft - padRight;
-    const barGap = 6;
-    const barW = Math.max(8, (drawW - barGap * (chapters.length - 1)) / chapters.length);
+    const barGap = 4;
+    const barW = Math.max(6, (drawW - barGap * (slotCount - 1)) / slotCount);
 
     canvas.width = logicalW * dpr;
     canvas.height = logicalH * dpr;
@@ -81,8 +196,16 @@
     ctx.fillStyle = '#faf8f5';
     ctx.fillRect(0, 0, logicalW, logicalH);
 
-    // Find max grade for scale
-    const maxGrade = Math.max(12, ...chapters.map(c => Math.ceil(c.grade_level) + 2));
+    // Compute comparison series (standardised against user chapter slices)
+    let compSeries = null;
+    if (showComparison) {
+      compSeries = standardisedComparisonGrades(chapters, compChapters);
+    }
+
+    // Find max grade for scale (include comparison grades)
+    const compMax = compSeries ? Math.max(...compSeries.filter(v => v != null)) : 0;
+    const maxGrade = Math.max(12, Math.ceil(compMax) + 2,
+      ...chapters.map(c => Math.ceil(c.grade_level) + 2));
 
     // Y-axis grid lines + labels
     ctx.strokeStyle = '#e5e1da';
@@ -128,6 +251,7 @@
     for (let i = 0; i < chapters.length; i++) {
       const ch = chapters[i];
       const x = padLeft + i * (barW + barGap);
+      // Suppress duplicate code path — slot index === chapter index for user bars
       const colH = Math.max(2, (ch.grade_level / maxGrade) * chartH);
       const y = padTop + chartH - colH;
 
@@ -138,20 +262,95 @@
 
       // Grade value above bar
       ctx.fillStyle = '#2d2a26';
-      ctx.font = 'bold 11px Source Sans 3, system-ui';
+      ctx.font = 'bold 13px Source Sans 3, system-ui';
       ctx.textAlign = 'center';
-      ctx.fillText(ch.grade_level.toFixed(1), x + barW / 2, y - 5);
+      ctx.fillText(ch.grade_level.toFixed(1), x + barW / 2, y - 6);
 
-      // Chapter label below (rotated)
+      // Chapter label below (rotated steeply for vertical readability)
       ctx.save();
       ctx.translate(x + barW / 2, padTop + chartH + 8);
-      ctx.rotate(Math.PI / 4);
+      ctx.rotate(-Math.PI / 2.4); // ~75° upward
       ctx.fillStyle = '#6b6560';
-      ctx.font = '10px Source Sans 3, system-ui';
-      ctx.textAlign = 'left';
-      const label = ch.chapter_title.length > 18 ? ch.chapter_title.slice(0, 18) + '...' : ch.chapter_title;
-      ctx.fillText(label, 0, 0);
+      ctx.font = '13px Source Sans 3, system-ui';
+      ctx.textAlign = 'right';
+      const label = ch.chapter_title.length > 36 ? ch.chapter_title.slice(0, 36) + '…' : ch.chapter_title;
+      ctx.fillText(label, 0, 4);
       ctx.restore();
+    }
+
+    // Comparison overlay — orange line + dots
+    if (compSeries && compSeries.length > 0) {
+      const orange = '#a85a04';
+      // Slot positions for the comparison series
+      const slotX = (i) => padLeft + i * (barW + barGap) + barW / 2;
+
+      ctx.strokeStyle = orange;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      let started = false;
+      for (let i = 0; i < compSeries.length; i++) {
+        const v = compSeries[i];
+        if (v == null || isNaN(v)) continue;
+        const x = slotX(i);
+        const y = padTop + chartH * (1 - v / maxGrade);
+        if (!started) { ctx.moveTo(x, y); started = true; }
+        else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+
+      // Dots + value labels — avoid colliding with the green bar's value label
+      for (let i = 0; i < compSeries.length; i++) {
+        const v = compSeries[i];
+        if (v == null || isNaN(v)) continue;
+        const userGrade = chapters[i].grade_level;
+        const x = slotX(i);
+        const y = padTop + chartH * (1 - v / maxGrade);
+        ctx.fillStyle = orange;
+        ctx.beginPath();
+        ctx.arc(x, y, 3.5, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Green bar value sits at (greenBarTopY - 5). Push orange label out of the way.
+        const greenBarTopY = padTop + chartH * (1 - userGrade / maxGrade);
+        const defaultLabelY = y + 14;
+        let labelY;
+        const greenLabelY = greenBarTopY - 5;
+
+        if (Math.abs(defaultLabelY - greenLabelY) < 12) {
+          // Collision — put orange label above the dot instead
+          labelY = y - 8;
+        } else {
+          labelY = defaultLabelY;
+        }
+
+        // White rounded box behind label so it's readable on the green bar
+        ctx.font = 'bold 12px Source Sans 3, system-ui';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        const labelText = v.toFixed(1);
+        const tw = ctx.measureText(labelText).width;
+        const boxW = tw + 8;
+        const boxH = 16;
+        const boxX = x - boxW / 2;
+        const boxY = labelY - boxH / 2 + 1;
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.95)';
+        ctx.strokeStyle = orange;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.roundRect(boxX, boxY, boxW, boxH, 3);
+        ctx.fill();
+        ctx.stroke();
+        ctx.fillStyle = orange;
+        ctx.fillText(labelText, x, labelY + 1);
+        ctx.textBaseline = 'alphabetic';
+      }
+
+      // Legend
+      ctx.font = '11px Source Sans 3, system-ui';
+      ctx.textAlign = 'left';
+      ctx.fillStyle = orange;
+      ctx.fillRect(padLeft, 6, 14, 2);
+      ctx.fillText(`${compareBook.title} (standardised)`, padLeft + 20, 11);
     }
   }
 
@@ -404,8 +603,15 @@
     <p class="rd-desc">Flesch-Kincaid grade level measures how complex your prose is. Consistency matters more than any single number — large jumps between chapters create a jarring reading experience.</p>
     {#if data && !loading}
       <div class="rd-manuscript">
-        <div class="rd-grade-big">
-          Grade {data.manuscript_grade.toFixed(1)}
+        <div class="rd-grade-col">
+          <div class="rd-grade-big">
+            Grade {data.manuscript_grade.toFixed(1)}
+          </div>
+          {#if compareBook && compareBook.manuscript_grade != null}
+            <div class="rd-grade-compare">
+              vs <strong>{compareBook.title}</strong> — Grade {compareBook.manuscript_grade.toFixed(1)}
+            </div>
+          {/if}
         </div>
         <div class="rd-grade-label">{gradeLabel(data.manuscript_grade)}</div>
         <div class="rd-grade-stats">
@@ -420,6 +626,12 @@
           <input type="range" class="smooth-slider" bind:value={smoothing} min="1" max="20" step="1" />
           <span class="smooth-val">{smoothing === 1 ? 'Off' : smoothing + ' pt'}</span>
         </label>
+        {#if compareBook}
+          <label class="cmp-label">
+            <input type="checkbox" bind:checked={standardiseLength} />
+            Standardise comparison book length vs <strong>{compareBook.title}</strong>
+          </label>
+        {/if}
       </div>
     {/if}
   </header>
@@ -431,22 +643,6 @@
       <h2 class="rd-section-title">Per Chapter</h2>
       <div class="overview-chart-wrap">
         <canvas bind:this={overviewCanvas}></canvas>
-      </div>
-      <div class="rd-chapter-list">
-        {#each data.chapters as ch (ch.chapter_id)}
-          <div class="rd-chapter-row">
-            <span class="rd-ch-title">{ch.chapter_title}</span>
-            <span class="rd-ch-grade">
-              {ch.grade_level.toFixed(1)}
-            </span>
-            <span class="rd-ch-detail">
-              avg {ch.avg_words_per_sentence} words/sent &middot;
-              {ch.total_words.toLocaleString()} words &middot;
-              {ch.total_sentences.toLocaleString()} sentences &middot;
-              {ch.total_syllables.toLocaleString()} syllables
-            </span>
-          </div>
-        {/each}
       </div>
     </div>
 
@@ -512,10 +708,16 @@
     display: flex; align-items: baseline; gap: 0.8rem; flex-wrap: wrap;
     margin-bottom: 0.8rem;
   }
+  .rd-grade-col { display: flex; flex-direction: column; }
   .rd-grade-big {
     font-family: 'Libre Baskerville', Georgia, serif;
     font-size: 2.4rem; font-weight: 700; color: #2d2a26;
+    line-height: 1.1;
   }
+  .rd-grade-compare {
+    font-size: 0.78rem; color: #9e9891; margin-top: 0.15rem;
+  }
+  .rd-grade-compare strong { color: #a85a04; font-weight: 600; }
   .rd-grade-label {
     font-size: 0.85rem; color: #6b6560; font-style: italic;
   }
@@ -524,15 +726,15 @@
   }
 
   .rd-controls {
-    display: flex; align-items: center; gap: 1rem;
+    display: flex; align-items: center; gap: 0.6rem;
+    flex-wrap: wrap;
   }
   .smooth-label {
-    display: flex; align-items: center; gap: 0.5rem;
-    font-size: 0.75rem; font-weight: 600; color: #6b6560;
-    text-transform: uppercase; letter-spacing: 0.04em;
+    display: inline-flex; align-items: center; gap: 0.5rem;
+    font-size: 0.92rem; font-weight: 600; color: #6b6560;
   }
-  .smooth-slider { accent-color: #2d6a5e; width: 100px; }
-  .smooth-val { font-size: 0.75rem; color: #9e9891; min-width: 35px; }
+  .smooth-slider { accent-color: #2d6a5e; width: 120px; }
+  .smooth-val { font-size: 0.9rem; color: #9e9891; min-width: 42px; }
 
   .rd-loading {
     flex: 1; display: flex; align-items: center; justify-content: center;
@@ -550,8 +752,23 @@
     border: 1px solid #e5e1da; border-radius: 6px;
     background: #faf8f5; padding: 0.5rem;
     margin-bottom: 1rem;
+    overflow-x: auto;
+    width: 100%;
   }
   .overview-chart-wrap canvas { display: block; }
+  .cmp-label {
+    display: inline-flex; align-items: center; gap: 0.45rem;
+    font-size: 0.92rem; color: #6b6560; cursor: pointer;
+    white-space: nowrap;
+  }
+  .cmp-label input {
+    accent-color: #a85a04; cursor: pointer;
+    width: 16px; height: 16px;
+  }
+  .cmp-name {
+    font-size: 0.92rem; color: #9e9891; white-space: nowrap;
+  }
+  .cmp-name strong { color: #a85a04; font-weight: 600; }
 
   .rd-chapter-list {
     display: flex; flex-direction: column; gap: 0;

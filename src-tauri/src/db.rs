@@ -241,6 +241,14 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         conn.execute_batch("ALTER TABLE entity_free_notes ADD COLUMN title TEXT NOT NULL DEFAULT '';")?;
     }
 
+    // Generic project key/value settings (e.g. comparative book id)
+    conn.execute_batch("
+        CREATE TABLE IF NOT EXISTS project_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL DEFAULT ''
+        );
+    ")?;
+
     // Kanban: chapter planning notes
     conn.execute_batch("
         CREATE TABLE IF NOT EXISTS chapter_planning_notes (
@@ -321,7 +329,6 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
 
         CREATE TABLE IF NOT EXISTS format_pages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            profile_id INTEGER NOT NULL REFERENCES format_profiles(id) ON DELETE CASCADE,
             page_role TEXT NOT NULL DEFAULT 'custom',
             title TEXT NOT NULL DEFAULT '',
             content TEXT NOT NULL DEFAULT '',
@@ -330,8 +337,58 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             include_in TEXT NOT NULL DEFAULT 'both',
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
-        CREATE INDEX IF NOT EXISTS idx_format_pages_profile ON format_pages(profile_id);
+
+        CREATE TABLE IF NOT EXISTS format_page_exclusions (
+            page_id INTEGER NOT NULL REFERENCES format_pages(id) ON DELETE CASCADE,
+            profile_id INTEGER NOT NULL REFERENCES format_profiles(id) ON DELETE CASCADE,
+            PRIMARY KEY (page_id, profile_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_format_page_exclusions_profile ON format_page_exclusions(profile_id);
     ")?;
+
+    // Migration: drop profile_id from format_pages if it exists (old schema).
+    // Recreate the table, keeping only pages from the FIRST profile (deduplication).
+    let has_profile_id: bool = conn
+        .prepare("SELECT profile_id FROM format_pages LIMIT 0")
+        .is_ok();
+    if has_profile_id {
+        log::info!("[migration] format_pages: dropping profile_id column, deduplicating");
+        // Find the first profile id (lowest sort_order)
+        let first_profile: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM format_profiles ORDER BY sort_order ASC, id ASC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .ok();
+
+        conn.execute_batch("
+            CREATE TABLE format_pages_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                page_role TEXT NOT NULL DEFAULT 'custom',
+                title TEXT NOT NULL DEFAULT '',
+                content TEXT NOT NULL DEFAULT '',
+                position TEXT NOT NULL DEFAULT 'front',
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                include_in TEXT NOT NULL DEFAULT 'both',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+        ")?;
+
+        if let Some(pid) = first_profile {
+            conn.execute(
+                "INSERT INTO format_pages_new (id, page_role, title, content, position, sort_order, include_in, created_at)
+                 SELECT id, page_role, title, content, position, sort_order, include_in, created_at
+                 FROM format_pages WHERE profile_id = ?1",
+                params![pid],
+            )?;
+        }
+
+        conn.execute_batch("
+            DROP TABLE format_pages;
+            ALTER TABLE format_pages_new RENAME TO format_pages;
+        ")?;
+    }
 
     Ok(())
 }
@@ -1662,7 +1719,6 @@ pub struct FormatProfile {
 #[derive(Serialize, Clone)]
 pub struct FormatPage {
     pub id: i64,
-    pub profile_id: i64,
     pub page_role: String,
     pub title: String,
     pub content: String,
@@ -1670,6 +1726,12 @@ pub struct FormatPage {
     pub sort_order: i64,
     pub include_in: String,
     pub created_at: String,
+}
+
+#[derive(Serialize, Clone)]
+pub struct PageExclusion {
+    pub page_id: i64,
+    pub profile_id: i64,
 }
 
 fn read_profile(row: &rusqlite::Row) -> rusqlite::Result<FormatProfile> {
@@ -1694,19 +1756,18 @@ fn read_profile(row: &rusqlite::Row) -> rusqlite::Result<FormatProfile> {
 fn read_format_page(row: &rusqlite::Row) -> rusqlite::Result<FormatPage> {
     Ok(FormatPage {
         id: row.get(0)?,
-        profile_id: row.get(1)?,
-        page_role: row.get(2)?,
-        title: row.get(3)?,
-        content: row.get(4)?,
-        position: row.get(5)?,
-        sort_order: row.get(6)?,
-        include_in: row.get(7)?,
-        created_at: row.get(8)?,
+        page_role: row.get(1)?,
+        title: row.get(2)?,
+        content: row.get(3)?,
+        position: row.get(4)?,
+        sort_order: row.get(5)?,
+        include_in: row.get(6)?,
+        created_at: row.get(7)?,
     })
 }
 
 const PROFILE_COLS: &str = "id, name, target_type, trim_width_in, trim_height_in, margin_top_in, margin_bottom_in, margin_outside_in, margin_inside_in, font_body, font_size_pt, line_spacing, sort_order, created_at";
-const FORMAT_PAGE_COLS: &str = "id, profile_id, page_role, title, content, position, sort_order, include_in, created_at";
+const FORMAT_PAGE_COLS: &str = "id, page_role, title, content, position, sort_order, include_in, created_at";
 
 pub fn list_format_profiles(conn: &Connection) -> rusqlite::Result<Vec<FormatProfile>> {
     let mut stmt = conn.prepare(&format!("SELECT {} FROM format_profiles ORDER BY sort_order ASC", PROFILE_COLS))?;
@@ -1780,50 +1841,75 @@ pub fn seed_default_profiles(conn: &Connection) -> rusqlite::Result<()> {
             "INSERT INTO format_profiles (name, target_type, trim_width_in, trim_height_in, sort_order) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![name, target, w, h, i as i64],
         )?;
-        let profile_id = conn.last_insert_rowid();
+    }
 
-        // Seed default front matter: title page, copyright, TOC
-        let pages = [
-            ("title", "Title Page", "front", 0),
-            ("copyright", "Copyright", "front", 1),
-            ("toc", "Table of Contents", "front", 2),
-        ];
-        for (role, title, pos, order) in &pages {
-            conn.execute(
-                "INSERT INTO format_pages (profile_id, page_role, title, position, sort_order) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![profile_id, role, title, pos, order],
-            )?;
-        }
+    // Seed 3 default project-level pages (no profile_id, no exclusions)
+    let pages = [
+        ("title", "Title Page", "front", 0),
+        ("copyright", "Copyright", "front", 1),
+        ("toc", "Table of Contents", "front", 2),
+    ];
+    for (role, title, pos, order) in &pages {
+        conn.execute(
+            "INSERT INTO format_pages (page_role, title, position, sort_order) VALUES (?1, ?2, ?3, ?4)",
+            params![role, title, pos, order],
+        )?;
     }
     Ok(())
 }
 
-// Format pages CRUD
+/// Duplicate a profile, including all its exclusions.
+pub fn duplicate_format_profile(
+    conn: &Connection,
+    source_id: i64,
+    new_name: &str,
+) -> rusqlite::Result<i64> {
+    let max_order: i64 = conn
+        .query_row("SELECT COALESCE(MAX(sort_order), -1) FROM format_profiles", [], |r| r.get(0))?;
 
-pub fn list_format_pages(conn: &Connection, profile_id: i64) -> rusqlite::Result<Vec<FormatPage>> {
+    conn.execute(
+        "INSERT INTO format_profiles (name, target_type, trim_width_in, trim_height_in, margin_top_in, margin_bottom_in, margin_outside_in, margin_inside_in, font_body, font_size_pt, line_spacing, sort_order)
+         SELECT ?1, target_type, trim_width_in, trim_height_in, margin_top_in, margin_bottom_in, margin_outside_in, margin_inside_in, font_body, font_size_pt, line_spacing, ?2
+         FROM format_profiles WHERE id = ?3",
+        params![new_name, max_order + 1, source_id],
+    )?;
+    let new_id = conn.last_insert_rowid();
+
+    // Copy exclusions
+    conn.execute(
+        "INSERT INTO format_page_exclusions (page_id, profile_id)
+         SELECT page_id, ?1 FROM format_page_exclusions WHERE profile_id = ?2",
+        params![new_id, source_id],
+    )?;
+
+    Ok(new_id)
+}
+
+// ---- Format pages CRUD (project-level) ----
+
+pub fn list_format_pages(conn: &Connection) -> rusqlite::Result<Vec<FormatPage>> {
     let mut stmt = conn.prepare(&format!(
-        "SELECT {} FROM format_pages WHERE profile_id = ?1 ORDER BY sort_order ASC",
+        "SELECT {} FROM format_pages ORDER BY position ASC, sort_order ASC",
         FORMAT_PAGE_COLS
     ))?;
-    let rows = stmt.query_map(params![profile_id], |row| read_format_page(row))?;
+    let rows = stmt.query_map([], |row| read_format_page(row))?;
     rows.collect()
 }
 
 pub fn add_format_page(
     conn: &Connection,
-    profile_id: i64,
     page_role: &str,
     title: &str,
     position: &str,
 ) -> rusqlite::Result<i64> {
     let max_order: i64 = conn.query_row(
-        "SELECT COALESCE(MAX(sort_order), -1) FROM format_pages WHERE profile_id = ?1 AND position = ?2",
-        params![profile_id, position],
+        "SELECT COALESCE(MAX(sort_order), -1) FROM format_pages WHERE position = ?1",
+        params![position],
         |r| r.get(0),
     )?;
     conn.execute(
-        "INSERT INTO format_pages (profile_id, page_role, title, position, sort_order) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![profile_id, page_role, title, position, max_order + 1],
+        "INSERT INTO format_pages (page_role, title, position, sort_order) VALUES (?1, ?2, ?3, ?4)",
+        params![page_role, title, position, max_order + 1],
     )?;
     Ok(conn.last_insert_rowid())
 }
@@ -1857,4 +1943,44 @@ pub fn reorder_format_pages(conn: &Connection, ids: &[i64]) -> rusqlite::Result<
         )?;
     }
     Ok(())
+}
+
+// ---- Page exclusions ----
+
+pub fn add_page_exclusion(conn: &Connection, page_id: i64, profile_id: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO format_page_exclusions (page_id, profile_id) VALUES (?1, ?2)",
+        params![page_id, profile_id],
+    )?;
+    Ok(())
+}
+
+pub fn remove_page_exclusion(conn: &Connection, page_id: i64, profile_id: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM format_page_exclusions WHERE page_id = ?1 AND profile_id = ?2",
+        params![page_id, profile_id],
+    )?;
+    Ok(())
+}
+
+/// Returns all exclusions across all profiles. Frontend filters by profile.
+pub fn list_all_page_exclusions(conn: &Connection) -> rusqlite::Result<Vec<PageExclusion>> {
+    let mut stmt = conn.prepare("SELECT page_id, profile_id FROM format_page_exclusions")?;
+    let rows = stmt.query_map([], |row| {
+        Ok(PageExclusion {
+            page_id: row.get(0)?,
+            profile_id: row.get(1)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// Returns excluded page IDs for a specific profile.
+pub fn list_excluded_page_ids_for_profile(
+    conn: &Connection,
+    profile_id: i64,
+) -> rusqlite::Result<Vec<i64>> {
+    let mut stmt = conn.prepare("SELECT page_id FROM format_page_exclusions WHERE profile_id = ?1")?;
+    let rows = stmt.query_map(params![profile_id], |row| row.get::<_, i64>(0))?;
+    rows.collect()
 }

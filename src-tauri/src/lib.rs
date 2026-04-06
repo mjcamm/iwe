@@ -1,6 +1,8 @@
 mod analysis;
 mod db;
+mod famous_books;
 mod format;
+mod import;
 mod semantic;
 mod text_utils;
 mod palettes;
@@ -198,6 +200,44 @@ fn open_project(state: tauri::State<'_, AppState>, filepath: String) -> Result<(
     *guard = Some(conn);
     let mut path_guard = state.db_path.lock().map_err(|e| e.to_string())?;
     *path_guard = Some(filepath);
+    Ok(())
+}
+
+#[tauri::command]
+fn get_project_setting(state: tauri::State<'_, AppState>, key: String) -> Result<Option<String>, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    let mut stmt = conn
+        .prepare("SELECT value FROM project_settings WHERE key = ?1")
+        .map_err(|e| e.to_string())?;
+    let mut rows = stmt.query(rusqlite::params![key]).map_err(|e| e.to_string())?;
+    if let Some(row) = rows.next().map_err(|e| e.to_string())? {
+        let v: String = row.get(0).map_err(|e| e.to_string())?;
+        Ok(Some(v))
+    } else {
+        Ok(None)
+    }
+}
+
+#[tauri::command]
+fn set_project_setting(state: tauri::State<'_, AppState>, key: String, value: String) -> Result<(), String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    conn.execute(
+        "INSERT INTO project_settings (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        rusqlite::params![key, value],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn close_project(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let mut guard = state.db.lock().map_err(|e| e.to_string())?;
+    *guard = None;
+    let mut path_guard = state.db_path.lock().map_err(|e| e.to_string())?;
+    *path_guard = None;
     Ok(())
 }
 
@@ -1115,17 +1155,17 @@ fn seed_format_profiles(state: tauri::State<'_, AppState>) -> Result<(), String>
 }
 
 #[tauri::command]
-fn get_format_pages(state: tauri::State<'_, AppState>, profile_id: i64) -> Result<Vec<db::FormatPage>, String> {
+fn get_format_pages(state: tauri::State<'_, AppState>) -> Result<Vec<db::FormatPage>, String> {
     let guard = state.db.lock().map_err(|e| e.to_string())?;
     let conn = guard.as_ref().ok_or("No project open")?;
-    db::list_format_pages(conn, profile_id).map_err(|e| e.to_string())
+    db::list_format_pages(conn).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn add_format_page(state: tauri::State<'_, AppState>, profile_id: i64, page_role: String, title: String, position: String) -> Result<i64, String> {
+fn add_format_page(state: tauri::State<'_, AppState>, page_role: String, title: String, position: String) -> Result<i64, String> {
     let guard = state.db.lock().map_err(|e| e.to_string())?;
     let conn = guard.as_ref().ok_or("No project open")?;
-    db::add_format_page(conn, profile_id, &page_role, &title, &position).map_err(|e| e.to_string())
+    db::add_format_page(conn, &page_role, &title, &position).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1147,6 +1187,34 @@ fn reorder_format_pages(state: tauri::State<'_, AppState>, ids: Vec<i64>) -> Res
     let guard = state.db.lock().map_err(|e| e.to_string())?;
     let conn = guard.as_ref().ok_or("No project open")?;
     db::reorder_format_pages(conn, &ids).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn duplicate_format_profile(state: tauri::State<'_, AppState>, source_id: i64, new_name: String) -> Result<i64, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::duplicate_format_profile(conn, source_id, &new_name).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn add_page_exclusion(state: tauri::State<'_, AppState>, page_id: i64, profile_id: i64) -> Result<(), String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::add_page_exclusion(conn, page_id, profile_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn remove_page_exclusion(state: tauri::State<'_, AppState>, page_id: i64, profile_id: i64) -> Result<(), String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::remove_page_exclusion(conn, page_id, profile_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn list_page_exclusions(state: tauri::State<'_, AppState>) -> Result<Vec<db::PageExclusion>, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::list_all_page_exclusions(conn).map_err(|e| e.to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1206,6 +1274,9 @@ pub fn run() {
             get_backup_interval,
             set_backup_interval,
             open_project,
+            close_project,
+            get_project_setting,
+            set_project_setting,
             get_chapters,
             get_chapter,
             add_chapter,
@@ -1346,17 +1417,26 @@ pub fn run() {
             semantic::semantic_search,
             semantic::get_semantic_index_status,
             format::compile_preview,
+            import::parse_import_file,
+            famous_books::list_library_books,
+            famous_books::get_library_book,
+            famous_books::save_library_book,
+            famous_books::delete_library_book,
             get_format_profiles,
             get_format_profile,
             add_format_profile,
             update_format_profile,
             delete_format_profile,
+            duplicate_format_profile,
             seed_format_profiles,
             get_format_pages,
             add_format_page,
             update_format_page,
             delete_format_page,
             reorder_format_pages,
+            add_page_exclusion,
+            remove_page_exclusion,
+            list_page_exclusions,
         ])
         .setup(|app| {
             if cfg!(debug_assertions) {
@@ -1376,6 +1456,15 @@ pub fn run() {
             ).expect("Failed to init palettes DB");
             app.manage(palettes::PaletteState {
                 db: Mutex::new(palette_conn),
+            });
+
+            // Initialize famous-books library DB
+            let library_path = app_data.join("famous_books.db");
+            let library_conn = famous_books::init_library_db(
+                library_path.to_str().expect("Invalid library path")
+            ).expect("Failed to init library DB");
+            app.manage(famous_books::LibraryState {
+                db: Mutex::new(library_conn),
             });
 
             Ok(())

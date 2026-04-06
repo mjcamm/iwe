@@ -1,5 +1,5 @@
 <script>
-  import { wordFrequency, findSimilarPhrases, textSearch, adverbAnalysis, debugDialogueSpans } from '$lib/db.js';
+  import { wordFrequency, findSimilarPhrases, textSearch, adverbAnalysis, debugDialogueSpans, listLibraryBooks, getProjectSetting, setProjectSetting } from '$lib/db.js';
   import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 
   let { ongotochapter, entities = [], ontoggledialoguehighlight, dialogueHighlightActive = false } = $props();
@@ -24,7 +24,67 @@
       { id: 'heatmap', icon: 'bi-grid-3x3-gap', label: 'Entity Heatmap' },
       { id: 'pacing', icon: 'bi-activity', label: 'Pacing Analysis' },
     ]},
+    { group: 'Comparison', items: [
+      { id: 'comparative', icon: 'bi-bookshelf', label: 'Comparative Works' },
+    ]},
   ];
+
+  // ---- Comparative Works state ----
+  let comparativeBooks = $state(null);
+  let comparativeBookId = $state(null); // null = "No comparison"
+  let comparativeLoading = $state(false);
+
+  async function loadComparativeBooks() {
+    if (comparativeBooks) return;
+    comparativeLoading = true;
+    try {
+      comparativeBooks = await listLibraryBooks();
+    } catch (e) {
+      console.warn('Failed to load library:', e);
+      comparativeBooks = [];
+    } finally {
+      comparativeLoading = false;
+    }
+  }
+
+  // Restore the saved comparison choice once on mount.
+  let comparativeRestored = $state(false);
+  async function restoreComparative() {
+    if (comparativeRestored) return;
+    try {
+      const stored = await getProjectSetting('comparative_book_id');
+      console.log('[comparative] restored from db:', stored);
+      if (stored != null && stored !== '') {
+        const id = parseInt(stored, 10);
+        if (!Number.isNaN(id)) comparativeBookId = id;
+      }
+    } catch (e) {
+      console.warn('[comparative] failed to restore:', e);
+    } finally {
+      // Set the flag AFTER the value is applied so the persist effect doesn't
+      // overwrite the stored value with `null` during initial load.
+      comparativeRestored = true;
+    }
+  }
+
+  // Persist the choice whenever the user changes it.
+  $effect(() => {
+    // Track the dependency explicitly
+    const id = comparativeBookId;
+    if (!comparativeRestored) return;
+    const value = id == null ? '' : String(id);
+    console.log('[comparative] saving to db:', value);
+    setProjectSetting('comparative_book_id', value)
+      .then(() => console.log('[comparative] save ok'))
+      .catch(e => console.warn('[comparative] save failed:', e));
+  });
+
+  $effect(() => {
+    if (subTab === 'comparative') {
+      loadComparativeBooks();
+      restoreComparative();
+    }
+  });
 
   let activeTool = $derived(
     analysisTools.flatMap(g => g.items).find(t => t.id === subTab)
@@ -767,10 +827,80 @@
         {/each}
       </div>
     {/if}
+
+  {:else if subTab === 'comparative'}
+    <div class="comp-wrap">
+      <p class="comp-desc">Pick a famous work from your analysed library to use as a benchmark. Charts in other analysis tools will overlay the comparison once selected.</p>
+      {#if comparativeLoading}
+        <div class="comp-empty">Loading library…</div>
+      {:else if !comparativeBooks || comparativeBooks.length === 0}
+        <div class="comp-empty">
+          <p>No books in your library yet.</p>
+          <p class="comp-hint">Run an analysis from the home page (dev mode) and click "Save to library" to add comparison works.</p>
+        </div>
+      {:else}
+        <label class="comp-label">Comparison work</label>
+        <select class="comp-select" bind:value={comparativeBookId}>
+          <option value={null}>— No comparison —</option>
+          {#each comparativeBooks as book}
+            <option value={book.id}>{book.title}{book.author ? ' — ' + book.author : ''}</option>
+          {/each}
+        </select>
+        {#if comparativeBookId !== null}
+          {@const sel = comparativeBooks.find(b => b.id === comparativeBookId)}
+          {#if sel}
+            <div class="comp-current">
+              <div class="comp-current-title">{sel.title}</div>
+              {#if sel.author}<div class="comp-current-author">{sel.author}</div>{/if}
+              <div class="comp-current-meta">{sel.wordCount?.toLocaleString() || 0} words · imported {sel.importedAt?.split(' ')[0] || ''}</div>
+            </div>
+          {/if}
+        {/if}
+      {/if}
+    </div>
   {/if}
 </div>
 
 <style>
+  .comp-wrap { padding: 0.4rem 0.2rem; }
+  .comp-desc {
+    font-size: 0.85rem; color: var(--iwe-text-secondary);
+    line-height: 1.5; margin: 0 0 1rem;
+  }
+  .comp-label {
+    display: block; font-size: 0.72rem; text-transform: uppercase;
+    letter-spacing: 0.06em; color: var(--iwe-text-muted);
+    margin-bottom: 0.35rem;
+  }
+  .comp-select {
+    width: 100%; font-family: inherit; font-size: 0.9rem;
+    padding: 0.5rem 0.7rem; border: 1px solid var(--iwe-border);
+    border-radius: var(--iwe-radius-sm); background: var(--iwe-bg);
+    color: var(--iwe-text);
+  }
+  .comp-current {
+    margin-top: 1rem; padding: 0.9rem 1rem;
+    background: var(--iwe-bg-hover); border-radius: var(--iwe-radius-sm);
+    border-left: 3px solid var(--iwe-accent);
+  }
+  .comp-current-title {
+    font-family: var(--iwe-font-prose); font-size: 1rem; color: var(--iwe-text);
+  }
+  .comp-current-author {
+    font-size: 0.82rem; color: var(--iwe-text-secondary); font-style: italic;
+    margin-top: 0.15rem;
+  }
+  .comp-current-meta {
+    font-size: 0.72rem; color: var(--iwe-text-faint); margin-top: 0.4rem;
+  }
+  .comp-empty {
+    padding: 1.5rem 1rem; text-align: center; color: var(--iwe-text-muted);
+    font-size: 0.88rem;
+  }
+  .comp-hint {
+    font-size: 0.78rem; color: var(--iwe-text-faint); margin-top: 0.5rem;
+  }
+
   .analysis-content {
     display: flex; flex-direction: column; height: 100%;
     font-family: var(--iwe-font-ui);

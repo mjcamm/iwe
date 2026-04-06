@@ -3,3 +3,4 @@
 /target/
 /gen/schemas
 /resources/models/model.onnx
+/resources/example-books/

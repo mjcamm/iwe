@@ -355,7 +355,16 @@ pub fn compile_preview(
 
     // 1. DB load
     let t = Instant::now();
-    let format_pages = db::list_format_pages(conn, profile_id).map_err(|e| e.to_string())?;
+    let all_format_pages = db::list_format_pages(conn).map_err(|e| e.to_string())?;
+    let excluded_ids: std::collections::HashSet<i64> =
+        db::list_excluded_page_ids_for_profile(conn, profile_id)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .collect();
+    let format_pages: Vec<FormatPage> = all_format_pages
+        .into_iter()
+        .filter(|p| !excluded_ids.contains(&p.id))
+        .collect();
     let chapters_raw = db::list_chapters(conn).map_err(|e| e.to_string())?;
     let db_load_ms = t.elapsed().as_secs_f64() * 1000.0;
 

@@ -1,11 +1,13 @@
 <script>
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { flip } from 'svelte/animate';
   import { dndzone } from 'svelte-dnd-action';
   import {
     getChapters, getFormatProfiles, getFormatPages, getSettings, saveSettings,
-    seedFormatProfiles, updateFormatProfile, addFormatPage,
+    seedFormatProfiles, addFormatProfile, updateFormatProfile, deleteFormatProfile,
+    duplicateFormatProfile, addFormatPage,
     updateFormatPage, deleteFormatPage, reorderFormatPages,
+    addPageExclusion, removePageExclusion, listPageExclusions,
     compilePreview,
   } from '$lib/db.js';
 
@@ -97,8 +99,33 @@
   let activeProfileId = $state(null);
   let sidebarMode = $state('pages');
   let chapters = $state([]);
-  let formatPages = $state([]); // FormatPage[] for active profile
+  let formatPages = $state([]); // ALL project-level pages
+  let exclusions = $state([]); // [{ page_id, profile_id }]
   let selectedPresetLabel = $state(null); // tracks which target card is selected
+
+  // Profile management UI state
+  let showProfileMenu = $state(false);
+  let showCreateProfileModal = $state(false);
+  let newProfileName = $state('');
+  let newProfileDuplicateFrom = $state(null); // profile id or null
+  let newProfileTargetType = $state('print');
+  let renamingProfileId = $state(null);
+  let renameValue = $state('');
+  let confirmDeleteProfileId = $state(null);
+
+  // Helper: is a page included in a given profile?
+  function isPageIncludedIn(pageId, profileId) {
+    return !exclusions.some(e => e.page_id === pageId && e.profile_id === profileId);
+  }
+
+  // Re-attach observer whenever the page count or compile generation changes
+  $effect(() => {
+    // Reactive deps
+    pageCount;
+    compileGeneration;
+    // Wait for DOM to render new placeholders before observing
+    queueMicrotask(() => setupObserver());
+  });
 
   // Compiled preview state
   let pageCount = $state(0);
@@ -106,6 +133,15 @@
   let renderError = $state(null);
   let lastTiming = $state(null); // CompileTiming from Rust
   let compileGeneration = $state(0); // incremented on each compile to bust img cache
+
+  // Lazy-load state — IntersectionObserver tracks visible pages, scroll-idle commits loads
+  let loadedPages = $state(new Set()); // page indices that have had src set
+  let visibleSet = new Set(); // currently intersecting (not reactive — used by handlers only)
+  let pageObserver = null;
+  let scrollIdleTimer = null;
+  let scrolling = false;
+  const SCROLL_IDLE_MS = 150;
+  const VISIBLE_BUFFER = 2; // load 2 pages above and below the visible range
 
   // DnD items for front and back sections
   let frontItems = $state([]);
@@ -131,11 +167,87 @@
   // Preview scroll ref
   let previewContainer;
 
+  // ---- Lazy loading ----
+
+  function teardownObserver() {
+    if (pageObserver) {
+      pageObserver.disconnect();
+      pageObserver = null;
+    }
+    visibleSet.clear();
+  }
+
+  function setupObserver() {
+    teardownObserver();
+    if (!previewContainer || pageCount === 0) return;
+
+    pageObserver = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        const idx = Number(entry.target.dataset.pageIndex);
+        if (entry.isIntersecting) {
+          visibleSet.add(idx);
+        } else {
+          visibleSet.delete(idx);
+        }
+      }
+      // If not currently scrolling, commit immediately (initial load case)
+      if (!scrolling) {
+        scheduleCommit();
+      }
+    }, {
+      root: previewContainer,
+      // Use a large rootMargin so pages just outside viewport count as "visible"
+      // and we get a smooth experience without waiting for them to fully enter
+      rootMargin: '200px 0px 200px 0px',
+      threshold: 0,
+    });
+
+    // Observe all current page placeholders
+    const elements = previewContainer.querySelectorAll('[data-page-index]');
+    for (const el of elements) {
+      pageObserver.observe(el);
+    }
+  }
+
+  function scheduleCommit() {
+    clearTimeout(scrollIdleTimer);
+    scrollIdleTimer = setTimeout(commitVisible, SCROLL_IDLE_MS);
+  }
+
+  function commitVisible() {
+    scrolling = false;
+    if (visibleSet.size === 0) return;
+
+    // Compute the range we want loaded: visible pages + buffer
+    const sorted = [...visibleSet].sort((a, b) => a - b);
+    const min = Math.max(0, sorted[0] - VISIBLE_BUFFER);
+    const max = Math.min(pageCount - 1, sorted[sorted.length - 1] + VISIBLE_BUFFER);
+
+    const updated = new Set(loadedPages);
+    let changed = false;
+    for (let i = min; i <= max; i++) {
+      if (!updated.has(i)) {
+        updated.add(i);
+        changed = true;
+      }
+    }
+    if (changed) {
+      loadedPages = updated;
+    }
+  }
+
+  function handlePreviewScroll() {
+    scrolling = true;
+    scheduleCommit();
+  }
+
   async function compileAndShow() {
     if (!activeProfileId) return;
     if (isEbook) {
       pageCount = 0;
       lastTiming = null;
+      teardownObserver();
+      loadedPages = new Set();
       return;
     }
     rendering = true;
@@ -145,6 +257,7 @@
       pageCount = result.page_count;
       lastTiming = result.timing;
       compileGeneration++; // bust img cache
+      loadedPages = new Set(); // reset — pages will be loaded lazily by observer
 
       console.log(
         `[format] Compile: ${result.timing.total_ms.toFixed(0)}ms | ` +
@@ -160,6 +273,10 @@
     } finally {
       rendering = false;
     }
+  }
+
+  async function reloadPages() {
+    [formatPages, exclusions] = await Promise.all([getFormatPages(), listPageExclusions()]);
   }
 
   async function loadData() {
@@ -178,10 +295,8 @@
       activeProfileId = profs[0].id;
     }
 
-    if (activeProfileId) {
-      formatPages = await getFormatPages(activeProfileId);
-      syncPresetLabel(profs.find(p => p.id === activeProfileId));
-    }
+    await reloadPages();
+    syncPresetLabel(profs.find(p => p.id === activeProfileId));
     loading = false;
 
     // Kick off rendering after load
@@ -197,7 +312,6 @@
 
   async function switchProfile(id) {
     activeProfileId = id;
-    formatPages = await getFormatPages(id);
     syncPresetLabel(profiles.find(p => p.id === id));
     compileAndShow();
   }
@@ -219,19 +333,111 @@
   }
 
   async function handleAddPage(position) {
-    if (!activeProfileId) return;
-    const id = await addFormatPage(activeProfileId, 'custom', 'New Page', position);
-    formatPages = await getFormatPages(activeProfileId);
+    await addFormatPage('custom', 'New Page', position);
+    await reloadPages();
+    compileAndShow();
   }
 
   async function handleDeletePage(id) {
     await deleteFormatPage(id);
-    formatPages = await getFormatPages(activeProfileId);
+    await reloadPages();
+    compileAndShow();
   }
 
   async function handleRoleChange(page, newRole) {
     await updateFormatPage(page.id, newRole, page.title, page.content, page.position, page.include_in);
-    formatPages = await getFormatPages(activeProfileId);
+    await reloadPages();
+  }
+
+  // Profile management
+  function openCreateProfileModal() {
+    newProfileName = '';
+    newProfileDuplicateFrom = null;
+    newProfileTargetType = 'print';
+    showCreateProfileModal = true;
+    showProfileMenu = false;
+  }
+
+  async function createProfile() {
+    const name = newProfileName.trim();
+    if (!name) return;
+
+    let newId;
+    if (newProfileDuplicateFrom) {
+      newId = await duplicateFormatProfile(newProfileDuplicateFrom, name);
+    } else {
+      // Default sizes per target type
+      const w = newProfileTargetType === 'ebook' ? 6.0 : 6.0;
+      const h = newProfileTargetType === 'ebook' ? 9.0 : 9.0;
+      newId = await addFormatProfile(name, newProfileTargetType, w, h);
+    }
+    profiles = await getFormatProfiles();
+    showCreateProfileModal = false;
+    activeProfileId = newId;
+    await reloadPages();
+    syncPresetLabel(profiles.find(p => p.id === newId));
+    compileAndShow();
+  }
+
+  async function quickDuplicateActive() {
+    if (!activeProfile) return;
+    const name = `${activeProfile.name} (copy)`;
+    const newId = await duplicateFormatProfile(activeProfile.id, name);
+    profiles = await getFormatProfiles();
+    activeProfileId = newId;
+    syncPresetLabel(profiles.find(p => p.id === newId));
+    showProfileMenu = false;
+    compileAndShow();
+  }
+
+  async function deleteActiveProfile() {
+    if (profiles.length <= 1) return;
+    const remainingProfile = profiles.find(p => p.id !== activeProfileId);
+    await deleteFormatProfile(activeProfileId);
+    profiles = await getFormatProfiles();
+    activeProfileId = remainingProfile?.id ?? null;
+    confirmDeleteProfileId = null;
+    showProfileMenu = false;
+    syncPresetLabel(profiles.find(p => p.id === activeProfileId));
+    compileAndShow();
+  }
+
+  function startRenameActive() {
+    if (!activeProfile) return;
+    renamingProfileId = activeProfile.id;
+    renameValue = activeProfile.name;
+    showProfileMenu = false;
+  }
+
+  async function commitRename() {
+    if (!renamingProfileId) return;
+    const prof = profiles.find(p => p.id === renamingProfileId);
+    if (!prof) { renamingProfileId = null; return; }
+    const name = renameValue.trim() || prof.name;
+    await updateFormatProfile(
+      prof.id, name, prof.target_type,
+      prof.trim_width_in, prof.trim_height_in,
+      prof.margin_top_in, prof.margin_bottom_in,
+      prof.margin_outside_in, prof.margin_inside_in,
+      prof.font_body, prof.font_size_pt, prof.line_spacing,
+    );
+    profiles = await getFormatProfiles();
+    renamingProfileId = null;
+  }
+
+  // Toggle a page's inclusion in a profile
+  async function togglePageInProfile(pageId, profileId) {
+    const isIncluded = isPageIncludedIn(pageId, profileId);
+    if (isIncluded) {
+      await addPageExclusion(pageId, profileId);
+    } else {
+      await removePageExclusion(pageId, profileId);
+    }
+    exclusions = await listPageExclusions();
+    // Recompile if the change affects the active profile
+    if (profileId === activeProfileId) {
+      compileAndShow();
+    }
   }
 
   // DnD handlers for front matter
@@ -242,7 +448,8 @@
     frontItems = e.detail.items;
     const ids = frontItems.map(it => it.id);
     await reorderFormatPages(ids);
-    formatPages = await getFormatPages(activeProfileId);
+    await reloadPages();
+    compileAndShow();
   }
 
   // DnD handlers for back matter
@@ -253,7 +460,8 @@
     backItems = e.detail.items;
     const ids = backItems.map(it => it.id);
     await reorderFormatPages(ids);
-    formatPages = await getFormatPages(activeProfileId);
+    await reloadPages();
+    compileAndShow();
   }
 
   function scrollToPage(index) {
@@ -262,6 +470,10 @@
   }
 
   onMount(loadData);
+  onDestroy(() => {
+    teardownObserver();
+    clearTimeout(scrollIdleTimer);
+  });
 </script>
 
 {#if loading}
@@ -273,7 +485,7 @@
   <div class="format-layout">
     <!-- Center: Preview + timing -->
     <div class="preview-column">
-    <div class="preview-area" bind:this={previewContainer}>
+    <div class="preview-area" bind:this={previewContainer} onscroll={handlePreviewScroll}>
       {#if isEbook}
         <div class="ebook-placeholder">
           <i class="bi bi-phone" style="font-size: 2rem;"></i>
@@ -299,14 +511,18 @@
       {:else}
         <div class="preview-scroll">
           {#each Array(pageCount) as _, i}
-            <div class="preview-page-wrap" id="preview-page-{i}">
-              <img
-                class="preview-page-img"
-                src="http://iwe.localhost/preview/page/{i}.svg?v={compileGeneration}"
-                alt="Page {i + 1}"
-                draggable="false"
-                loading="lazy"
-              />
+            <div class="preview-page-wrap" id="preview-page-{i}" data-page-index={i}>
+              {#if loadedPages.has(i)}
+                <img
+                  class="preview-page-img"
+                  src="http://iwe.localhost/preview/page/{i}.svg?v={compileGeneration}"
+                  alt="Page {i + 1}"
+                  draggable="false"
+                />
+              {:else}
+                <div class="preview-page-placeholder"
+                  style="width: {(activeProfile?.trim_width_in ?? 6) * 72}px; aspect-ratio: {activeProfile?.trim_width_in ?? 6} / {activeProfile?.trim_height_in ?? 9};"></div>
+              {/if}
               <div class="page-number">{i + 1}</div>
             </div>
           {/each}
@@ -339,6 +555,49 @@
 
     <!-- Right sidebar -->
     <div class="format-sidebar" style="width: {sidebarWidth}px;">
+      <!-- Profile selector -->
+      <div class="sidebar-section profile-section">
+        <div class="profile-row">
+          {#if renamingProfileId === activeProfileId}
+            <input class="profile-rename-input"
+              bind:value={renameValue}
+              onblur={commitRename}
+              onkeydown={(e) => { if (e.key === 'Enter') commitRename(); if (e.key === 'Escape') renamingProfileId = null; }}
+              autofocus />
+          {:else}
+            <select class="profile-select"
+              value={activeProfileId}
+              onchange={(e) => switchProfile(Number(e.target.value))}>
+              {#each profiles as p}
+                <option value={p.id}>{p.name}</option>
+              {/each}
+            </select>
+          {/if}
+          <button class="profile-action-btn" title="Rename" onclick={startRenameActive}>
+            <i class="bi bi-pencil"></i>
+          </button>
+          <button class="profile-action-btn" title="Duplicate" onclick={quickDuplicateActive}>
+            <i class="bi bi-files"></i>
+          </button>
+          <button class="profile-action-btn" title="New profile" onclick={openCreateProfileModal}>
+            <i class="bi bi-plus-lg"></i>
+          </button>
+          <button class="profile-action-btn danger"
+            title={profiles.length <= 1 ? 'Cannot delete the only profile' : 'Delete profile'}
+            disabled={profiles.length <= 1}
+            onclick={() => confirmDeleteProfileId = activeProfileId}>
+            <i class="bi bi-trash"></i>
+          </button>
+        </div>
+        {#if confirmDeleteProfileId === activeProfileId}
+          <div class="confirm-delete">
+            Delete "{activeProfile?.name}"?
+            <button class="confirm-yes" onclick={deleteActiveProfile}>Yes</button>
+            <button class="confirm-no" onclick={() => confirmDeleteProfileId = null}>No</button>
+          </div>
+        {/if}
+      </div>
+
       <!-- Mode selector -->
       <div class="sidebar-section mode-section">
         <div class="mode-tabs">
@@ -369,15 +628,26 @@
               onconsider={handleFrontConsider}
               onfinalize={handleFrontFinalize}>
               {#each frontItems as item (item.id)}
-                <div class="page-list-item format-page-item" animate:flip={{ duration: flipDurationMs }}
-                  onclick={() => scrollToPage(0)}>
-                  <i class="bi bi-grip-vertical drag-handle"></i>
-                  <span class="page-item-title">{item.title || roleLabel(item.page_role)}</span>
-                  <span class="page-item-role">{roleLabel(item.page_role)}</span>
-                  <button class="page-item-delete" title="Remove page"
-                    onclick={(e) => { e.stopPropagation(); handleDeletePage(item.id); }}>
-                    <i class="bi bi-x"></i>
-                  </button>
+                <div class="page-list-entry" animate:flip={{ duration: flipDurationMs }}>
+                  <div class="page-list-item format-page-item" onclick={() => scrollToPage(0)}>
+                    <i class="bi bi-grip-vertical drag-handle"></i>
+                    <span class="page-item-title">{item.title || roleLabel(item.page_role)}</span>
+                    <span class="page-item-role">{roleLabel(item.page_role)}</span>
+                    <button class="page-item-delete" title="Remove page"
+                      onclick={(e) => { e.stopPropagation(); handleDeletePage(item.id); }}>
+                      <i class="bi bi-x"></i>
+                    </button>
+                  </div>
+                  <div class="profile-pills">
+                    {#each profiles as p}
+                      <button class="profile-pill"
+                        class:included={isPageIncludedIn(item.id, p.id)}
+                        title={isPageIncludedIn(item.id, p.id) ? `Included in ${p.name}` : `Excluded from ${p.name}`}
+                        onclick={(e) => { e.stopPropagation(); togglePageInProfile(item.id, p.id); }}>
+                        {p.name}
+                      </button>
+                    {/each}
+                  </div>
                 </div>
               {/each}
             </div>
@@ -404,15 +674,26 @@
               onconsider={handleBackConsider}
               onfinalize={handleBackFinalize}>
               {#each backItems as item (item.id)}
-                <div class="page-list-item format-page-item" animate:flip={{ duration: flipDurationMs }}
-                  onclick={() => scrollToPage(0)}>
-                  <i class="bi bi-grip-vertical drag-handle"></i>
-                  <span class="page-item-title">{item.title || roleLabel(item.page_role)}</span>
-                  <span class="page-item-role">{roleLabel(item.page_role)}</span>
-                  <button class="page-item-delete" title="Remove page"
-                    onclick={(e) => { e.stopPropagation(); handleDeletePage(item.id); }}>
-                    <i class="bi bi-x"></i>
-                  </button>
+                <div class="page-list-entry" animate:flip={{ duration: flipDurationMs }}>
+                  <div class="page-list-item format-page-item" onclick={() => scrollToPage(0)}>
+                    <i class="bi bi-grip-vertical drag-handle"></i>
+                    <span class="page-item-title">{item.title || roleLabel(item.page_role)}</span>
+                    <span class="page-item-role">{roleLabel(item.page_role)}</span>
+                    <button class="page-item-delete" title="Remove page"
+                      onclick={(e) => { e.stopPropagation(); handleDeletePage(item.id); }}>
+                      <i class="bi bi-x"></i>
+                    </button>
+                  </div>
+                  <div class="profile-pills">
+                    {#each profiles as p}
+                      <button class="profile-pill"
+                        class:included={isPageIncludedIn(item.id, p.id)}
+                        title={isPageIncludedIn(item.id, p.id) ? `Included in ${p.name}` : `Excluded from ${p.name}`}
+                        onclick={(e) => { e.stopPropagation(); togglePageInProfile(item.id, p.id); }}>
+                        {p.name}
+                      </button>
+                    {/each}
+                  </div>
                 </div>
               {/each}
             </div>
@@ -464,6 +745,41 @@
       </div>
     </div>
   </div>
+
+  {#if showCreateProfileModal}
+    <div class="modal-backdrop" onclick={() => showCreateProfileModal = false}>
+      <div class="modal-card" onclick={(e) => e.stopPropagation()}>
+        <h3>New Profile</h3>
+        <label class="modal-label">Name</label>
+        <input class="modal-input" type="text" bind:value={newProfileName}
+          placeholder="e.g. 5×8 Mass Market" autofocus
+          onkeydown={(e) => { if (e.key === 'Enter') createProfile(); }} />
+
+        <label class="modal-label">Duplicate from existing profile</label>
+        <select class="modal-input" bind:value={newProfileDuplicateFrom}>
+          <option value={null}>— Start blank —</option>
+          {#each profiles as p}
+            <option value={p.id}>{p.name}</option>
+          {/each}
+        </select>
+
+        {#if !newProfileDuplicateFrom}
+          <label class="modal-label">Target type</label>
+          <div class="target-type-toggle">
+            <button class="tt-btn" class:active={newProfileTargetType === 'print'}
+              onclick={() => newProfileTargetType = 'print'}>Print</button>
+            <button class="tt-btn" class:active={newProfileTargetType === 'ebook'}
+              onclick={() => newProfileTargetType = 'ebook'}>Ebook</button>
+          </div>
+        {/if}
+
+        <div class="modal-actions">
+          <button class="modal-btn" onclick={() => showCreateProfileModal = false}>Cancel</button>
+          <button class="modal-btn primary" onclick={createProfile} disabled={!newProfileName.trim()}>Create</button>
+        </div>
+      </div>
+    </div>
+  {/if}
 {/if}
 
 <style>
@@ -508,6 +824,11 @@
     height: auto;
     box-shadow: 0 2px 12px rgba(0,0,0,0.12), 0 0 0 1px rgba(0,0,0,0.06);
     background: #fff;
+  }
+  .preview-page-placeholder {
+    background: #f5f3f0;
+    border: 1px dashed rgba(0,0,0,0.12);
+    box-shadow: 0 2px 12px rgba(0,0,0,0.06);
   }
   .page-number {
     font-family: var(--iwe-font-ui); font-size: 0.7rem;
@@ -591,6 +912,143 @@
     padding: 0.75rem 0.9rem;
     border-bottom: 1px solid var(--iwe-border);
   }
+
+  /* Profile selector */
+  .profile-section { padding: 0.6rem 0.9rem; }
+  .profile-row { display: flex; align-items: center; gap: 0.3rem; }
+  .profile-select {
+    flex: 1; padding: 0.3rem 0.5rem;
+    font-family: var(--iwe-font-ui); font-size: 0.82rem;
+    border: 1px solid var(--iwe-border); border-radius: var(--iwe-radius-sm);
+    background: var(--iwe-bg); color: var(--iwe-text); cursor: pointer;
+    min-width: 0;
+  }
+  .profile-select:focus { outline: none; border-color: var(--iwe-accent); }
+  .profile-rename-input {
+    flex: 1; padding: 0.3rem 0.5rem;
+    font-family: var(--iwe-font-ui); font-size: 0.82rem;
+    border: 1px solid var(--iwe-accent); border-radius: var(--iwe-radius-sm);
+    background: var(--iwe-bg); color: var(--iwe-text); min-width: 0;
+  }
+  .profile-rename-input:focus { outline: none; }
+  .profile-action-btn {
+    border: 1px solid transparent; background: none;
+    color: var(--iwe-text-muted); cursor: pointer;
+    padding: 0.3rem 0.4rem; font-size: 0.85rem; line-height: 1;
+    border-radius: var(--iwe-radius-sm); transition: all 120ms;
+  }
+  .profile-action-btn:hover:not(:disabled) {
+    color: var(--iwe-accent); border-color: var(--iwe-accent);
+  }
+  .profile-action-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+  .profile-action-btn.danger:hover:not(:disabled) {
+    color: #c0392b; border-color: #c0392b;
+  }
+  .confirm-delete {
+    margin-top: 0.5rem;
+    font-family: var(--iwe-font-ui); font-size: 0.78rem;
+    color: var(--iwe-text); display: flex; align-items: center; gap: 0.4rem;
+  }
+  .confirm-yes, .confirm-no {
+    border: 1px solid var(--iwe-border); background: none;
+    padding: 0.2rem 0.6rem; cursor: pointer;
+    font-family: var(--iwe-font-ui); font-size: 0.75rem;
+    border-radius: var(--iwe-radius-sm);
+  }
+  .confirm-yes { color: #c0392b; border-color: #c0392b; }
+  .confirm-yes:hover { background: #c0392b; color: #fff; }
+  .confirm-no:hover { background: var(--iwe-bg-hover); }
+
+  /* Modal */
+  .modal-backdrop {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.4);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 1000;
+  }
+  .modal-card {
+    background: var(--iwe-bg); border: 1px solid var(--iwe-border);
+    border-radius: var(--iwe-radius); padding: 1.4rem;
+    min-width: 360px; max-width: 90vw;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.25);
+    font-family: var(--iwe-font-ui);
+  }
+  .modal-card h3 {
+    margin: 0 0 1rem 0;
+    font-family: var(--iwe-font-prose); font-weight: 400;
+    color: var(--iwe-text);
+  }
+  .modal-label {
+    display: block; font-size: 0.7rem;
+    color: var(--iwe-text-muted); text-transform: uppercase;
+    letter-spacing: 0.04em; font-weight: 600;
+    margin: 0.8rem 0 0.3rem 0;
+  }
+  .modal-input {
+    width: 100%; padding: 0.45rem 0.6rem;
+    font-family: var(--iwe-font-ui); font-size: 0.85rem;
+    border: 1px solid var(--iwe-border); border-radius: var(--iwe-radius-sm);
+    background: var(--iwe-bg); color: var(--iwe-text);
+  }
+  .modal-input:focus { outline: none; border-color: var(--iwe-accent); }
+  .target-type-toggle {
+    display: flex; gap: 0.4rem;
+  }
+  .tt-btn {
+    flex: 1; padding: 0.45rem 0;
+    font-family: var(--iwe-font-ui); font-size: 0.82rem;
+    border: 1px solid var(--iwe-border); border-radius: var(--iwe-radius-sm);
+    background: var(--iwe-bg); color: var(--iwe-text-muted); cursor: pointer;
+    transition: all 120ms;
+  }
+  .tt-btn.active {
+    border-color: var(--iwe-accent); color: var(--iwe-accent);
+    background: rgba(45, 106, 94, 0.06); font-weight: 500;
+  }
+  .modal-actions {
+    display: flex; justify-content: flex-end; gap: 0.5rem;
+    margin-top: 1.4rem;
+  }
+  .modal-btn {
+    padding: 0.45rem 1rem;
+    font-family: var(--iwe-font-ui); font-size: 0.82rem;
+    border: 1px solid var(--iwe-border); border-radius: var(--iwe-radius-sm);
+    background: var(--iwe-bg); color: var(--iwe-text); cursor: pointer;
+    transition: all 120ms;
+  }
+  .modal-btn:hover:not(:disabled) { background: var(--iwe-bg-hover); }
+  .modal-btn.primary {
+    background: var(--iwe-accent); border-color: var(--iwe-accent); color: #fff;
+  }
+  .modal-btn.primary:hover:not(:disabled) {
+    background: #245a4f; border-color: #245a4f;
+  }
+  .modal-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* Profile pills (per-page inclusion) */
+  .page-list-entry {
+    margin-bottom: 0.3rem;
+  }
+  .profile-pills {
+    display: flex; flex-wrap: wrap; gap: 3px;
+    padding: 0.15rem 0.4rem 0.3rem 1.5rem;
+  }
+  .profile-pill {
+    border: 1px solid var(--iwe-border); background: none;
+    color: var(--iwe-text-muted);
+    padding: 1px 6px; border-radius: 9px;
+    font-family: var(--iwe-font-ui); font-size: 0.62rem;
+    cursor: pointer; transition: all 100ms;
+    max-width: 100%; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap;
+  }
+  .profile-pill.included {
+    background: var(--iwe-accent); border-color: var(--iwe-accent); color: #fff;
+  }
+  .profile-pill:not(.included):hover {
+    border-color: var(--iwe-accent); color: var(--iwe-accent);
+  }
+  .profile-pill.included:hover { opacity: 0.85; }
   .sidebar-label {
     font-family: var(--iwe-font-ui); font-size: 0.7rem;
     color: var(--iwe-text-muted); text-transform: uppercase;

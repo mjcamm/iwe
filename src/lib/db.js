@@ -84,6 +84,8 @@ export async function createProject(title) {
 }
 
 export async function deleteProject(filepath) {
+  // Make sure we don't hold the SQLite file open
+  try { await invoke('close_project'); } catch {}
   await remove(filepath);
 }
 
@@ -710,12 +712,28 @@ export async function seedFormatProfiles() {
   return invoke('seed_format_profiles');
 }
 
-export async function getFormatPages(profileId) {
-  return invoke('get_format_pages', { profileId });
+export async function getFormatPages() {
+  return invoke('get_format_pages');
 }
 
-export async function addFormatPage(profileId, pageRole, title, position) {
-  return invoke('add_format_page', { profileId, pageRole, title, position });
+export async function addFormatPage(pageRole, title, position) {
+  return invoke('add_format_page', { pageRole, title, position });
+}
+
+export async function duplicateFormatProfile(sourceId, newName) {
+  return invoke('duplicate_format_profile', { sourceId, newName });
+}
+
+export async function addPageExclusion(pageId, profileId) {
+  return invoke('add_page_exclusion', { pageId, profileId });
+}
+
+export async function removePageExclusion(pageId, profileId) {
+  return invoke('remove_page_exclusion', { pageId, profileId });
+}
+
+export async function listPageExclusions() {
+  return invoke('list_page_exclusions');
 }
 
 export async function updateFormatPage(id, pageRole, title, content, position, includeIn) {
@@ -732,4 +750,38 @@ export async function reorderFormatPages(ids) {
 
 export async function compilePreview(profileId) {
   return invoke('compile_preview', { profileId });
+}
+
+// --- Manuscript import (DOCX / EPUB) ---
+
+export async function parseImportFile(path, method = null) {
+  return invoke('parse_import_file', { path, method });
+}
+
+// --- Project settings (key/value) ---
+
+export async function getProjectSetting(key) {
+  return invoke('get_project_setting', { key });
+}
+
+export async function setProjectSetting(key, value) {
+  return invoke('set_project_setting', { key, value: String(value) });
+}
+
+// --- Famous-books library (dev tooling) ---
+
+export async function listLibraryBooks() {
+  return invoke('list_library_books');
+}
+
+export async function getLibraryBook(id) {
+  return invoke('get_library_book', { id });
+}
+
+export async function saveLibraryBook(title, author, source, wordCount, analysesJson) {
+  return invoke('save_library_book', { title, author, source, wordCount, analysesJson });
+}
+
+export async function deleteLibraryBook(id) {
+  return invoke('delete_library_book', { id });
 }

@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte';
-  import { paragraphLengthAnalysis } from '$lib/db.js';
+  import { paragraphLengthAnalysis, getProjectSetting, getLibraryBook } from '$lib/db.js';
   import { emitTo } from '@tauri-apps/api/event';
   import { getCurrentWindow } from '@tauri-apps/api/window';
 
@@ -8,14 +8,81 @@
   let loading = $state(true);
   let tooltip = $state(null);
 
+  // Comparison book state
+  let compareBook = $state(null);   // { title, chapters: [{ paragraphs: [{ word_count }], ... }] }
+  let showComparison = $state(true);
+
   onMount(async () => {
     try {
       data = await paragraphLengthAnalysis();
     } catch (e) {
       console.warn('Paragraph length analysis failed:', e);
     }
+    // Load comparison book from project setting
+    let compareId = null;
+    try {
+      const stored = await getProjectSetting('comparative_book_id');
+      if (stored != null && stored !== '') compareId = parseInt(stored, 10);
+    } catch (e) {
+      console.warn('Failed to read comparative_book_id setting:', e);
+    }
+    if (compareId && !Number.isNaN(compareId)) {
+      try {
+        const book = await getLibraryBook(compareId);
+        if (book) {
+          const analyses = JSON.parse(book.analysesJson || '{}');
+          const p = analyses.paragraphs;
+          if (p && Array.isArray(p.chapters)) {
+            compareBook = {
+              title: book.title,
+              author: book.author,
+              chapters: p.chapters
+            };
+          }
+        }
+      } catch (e) {
+        console.warn('Failed to load comparison book:', e);
+      }
+    }
     loading = false;
   });
+
+  // Track each chart's pixel width via a ResizeObserver action so the SVG
+  // overlay can use real pixel coordinates (no viewBox stretching).
+  let chartWidths = $state({});
+  const CHART_HEIGHT = 160;
+
+  function trackWidth(node, chapterId) {
+    const update = () => {
+      chartWidths = { ...chartWidths, [chapterId]: node.clientWidth };
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(node);
+    return {
+      destroy() { ro.disconnect(); }
+    };
+  }
+
+  /**
+   * Build pixel-space overlay points for a comparison chapter — aligned 1:1
+   * by paragraph index over the user's chapter columns. Comp paragraph i
+   * sits over user paragraph i. If comp has fewer paragraphs, the overlay
+   * stops early (rest of chart has no comparison). If comp has more, the
+   * extras are dropped.
+   */
+  function buildOverlayPoints(compChapter, userParaCount, sharedMaxWords, widthPx) {
+    if (!compChapter || !compChapter.paragraphs || compChapter.paragraphs.length === 0) return null;
+    if (!widthPx || widthPx < 10 || userParaCount < 1) return null;
+    const paras = compChapter.paragraphs.slice(0, userParaCount);
+    // The same slot-width math as the bars: gap of 3px, no padding inside .col-chart
+    const slotW = widthPx / userParaCount;
+    return paras.map((p, i) => {
+      const x = (i + 0.5) * slotW; // centre of the i-th column slot
+      const y = sharedMaxWords > 0 ? (1 - p.word_count / sharedMaxWords) * CHART_HEIGHT : CHART_HEIGHT;
+      return { x, y, words: p.word_count };
+    });
+  }
 
   function variationLabel(pct) {
     if (pct < 25) return 'Very uniform';
@@ -63,14 +130,25 @@
   <header class="pl-header">
     <h1>Paragraph Length</h1>
     <p class="pl-desc">The visual texture of your page matters. Uniform paragraph lengths create monotony — a mix of short punchy paragraphs and longer flowing ones creates rhythm. Highlighted bars indicate runs of 3+ paragraphs with similar length.</p>
+    {#if compareBook}
+      <label class="cmp-toggle">
+        <input type="checkbox" bind:checked={showComparison} />
+        Show comparison vs <strong>{compareBook.title}</strong>
+        <span class="cmp-hint">— per-chapter, matched 1:1 by chapter index</span>
+      </label>
+    {/if}
   </header>
 
   {#if loading}
     <div class="pl-loading">Analysing paragraphs...</div>
   {:else if data && data.chapters.length > 0}
     <div class="pl-content">
-      {#each data.chapters as ch (ch.chapter_id)}
-        {@const maxWords = Math.max(...ch.paragraphs.map(p => p.word_count), 1)}
+      {#each data.chapters as ch, chIdx (ch.chapter_id)}
+        {@const compChapter = (compareBook && showComparison) ? compareBook.chapters[chIdx] : null}
+        {@const ownMax = Math.max(...ch.paragraphs.map(p => p.word_count), 1)}
+        {@const compMax = compChapter ? Math.max(...compChapter.paragraphs.map(p => p.word_count), 1) : 0}
+        {@const sharedMax = Math.max(ownMax, compMax)}
+        {@const overlay = compChapter ? buildOverlayPoints(compChapter, ch.paragraphs.length, sharedMax, chartWidths[ch.chapter_id]) : null}
         <div class="chapter-section">
           <div class="chapter-heading">
             <h2 class="chapter-title">{ch.chapter_title}</h2>
@@ -79,26 +157,49 @@
               <span class="stat">avg <strong>{ch.avg_length}</strong> words</span>
               <span class="stat">variation <strong>{ch.variation_pct}%</strong></span>
               <span class="stat-label">{variationLabel(ch.variation_pct)}</span>
+              {#if compChapter}
+                <span class="cmp-stat">vs <strong>{compChapter.total_paragraphs} paras</strong>, avg <strong>{compChapter.avg_length}</strong>w</span>
+              {/if}
             </div>
           </div>
           <div class="col-chart-wrap">
-            <div class="col-chart" style="min-width: {Math.max(ch.paragraphs.length * 18, 300)}px">
-              {#each ch.paragraphs as para, i}
-                <div
-                  class="col-slot"
-                  onclick={() => goToParagraph(ch.chapter_id, para.preview, para.char_start)}
-                  onmouseenter={(e) => showTooltip(e, para, i)}
-                  onmouseleave={hideTooltip}
-                >
-                  <div class="col-bar-area">
-                    <div
-                      class="col-bar"
-                      class:mono-bar={para.monotonous}
-                      style="height: {barHeight(para.word_count, maxWords)}%"
-                    ></div>
+            <div class="col-chart-stack">
+              <div class="col-chart" use:trackWidth={ch.chapter_id} style="min-width: {Math.max(ch.paragraphs.length * 18, 300)}px">
+                {#each ch.paragraphs as para, i}
+                  <div
+                    class="col-slot"
+                    onclick={() => goToParagraph(ch.chapter_id, para.preview, para.char_start)}
+                    onmouseenter={(e) => showTooltip(e, para, i)}
+                    onmouseleave={hideTooltip}
+                  >
+                    <div class="col-bar-area">
+                      <div
+                        class="col-bar"
+                        class:mono-bar={para.monotonous}
+                        style="height: {barHeight(para.word_count, sharedMax)}%"
+                      ></div>
+                    </div>
                   </div>
-                </div>
-              {/each}
+                {/each}
+              </div>
+              {#if overlay}
+                <svg
+                  class="col-overlay"
+                  width={chartWidths[ch.chapter_id] || 0}
+                  height={CHART_HEIGHT}
+                >
+                  <polyline
+                    fill="none"
+                    stroke="#a85a04"
+                    stroke-width="1.5"
+                    stroke-linejoin="round"
+                    points={overlay.map(p => `${p.x},${p.y}`).join(' ')}
+                  />
+                  {#each overlay as p}
+                    <circle cx={p.x} cy={p.y} r="2.5" fill="#a85a04" />
+                  {/each}
+                </svg>
+              {/if}
             </div>
           </div>
         </div>
@@ -168,10 +269,29 @@
     overflow-x: auto;
   }
 
+  .col-chart-stack {
+    position: relative;
+  }
+  .col-overlay {
+    position: absolute; top: 0; left: 0;
+    pointer-events: none;
+  }
+
   .col-chart {
     display: flex; align-items: flex-end; gap: 3px;
     height: 160px;
   }
+
+  .cmp-toggle {
+    display: inline-flex; align-items: center; gap: 0.5rem;
+    margin-top: 0.7rem; font-size: 0.9rem; color: #6b6560;
+    cursor: pointer;
+  }
+  .cmp-toggle input { accent-color: #a85a04; width: 16px; height: 16px; }
+  .cmp-toggle strong { color: #a85a04; font-weight: 600; }
+  .cmp-hint { color: #9e9891; font-size: 0.82rem; }
+  .cmp-stat { color: #a85a04; font-style: italic; font-size: 0.85rem; }
+  .cmp-stat strong { color: #a85a04; font-weight: 600; }
 
   .col-slot {
     flex: 1; min-width: 10px; max-width: 40px;

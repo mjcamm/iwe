@@ -697,7 +697,7 @@ pub fn pacing_analysis(state: tauri::State<'_, AppState>) -> Result<Vec<PacingCh
         let sentence_lengths = extracted.iter().map(|s| s.word_count).collect();
         let sentence_starts = extracted.iter().map(|s| s.char_start).collect();
         let sentence_texts = extracted.iter().map(|s| {
-            if s.text.len() > 60 { s.text[..60].to_string() } else { s.text.clone() }
+            if s.text.len() > 60 { s.text.chars().take(60).collect::<String>() } else { s.text.clone() }
         }).collect();
 
         results.push(PacingChapter {
@@ -1265,7 +1265,7 @@ pub fn debug_dialogue_spans(
         .map(|s| serde_json::json!({
             "start": s.char_start,
             "end": s.char_end,
-            "text": if s.text.len() > 80 { format!("{}...", &s.text[..77]) } else { s.text.clone() },
+            "text": if s.text.chars().count() > 80 { format!("{}...", s.text.chars().take(77).collect::<String>()) } else { s.text.clone() },
         }))
         .collect();
 
@@ -1391,8 +1391,8 @@ pub fn adverb_analysis(state: tauri::State<'_, AppState>) -> Result<AdverbAnalys
                 };
                 let context: String = chars[ctx_start..ctx_end].iter().collect();
 
-                let dialogue_snippet = if span.inner_text.len() > 50 {
-                    format!("{}...", &span.inner_text[..47])
+                let dialogue_snippet = if span.inner_text.chars().count() > 50 {
+                    format!("{}...", span.inner_text.chars().take(47).collect::<String>())
                 } else {
                     span.inner_text.clone()
                 };
@@ -1554,8 +1554,8 @@ pub fn readability_analysis(state: tauri::State<'_, AppState>) -> Result<Readabi
             let grade = flesch_kincaid_grade(wc, 1, sc);
             sentence_grades.push(grade);
             sentence_starts.push(sent.char_start);
-            let text = if sent.text.len() > 60 {
-                sent.text[..60].to_string()
+            let text = if sent.text.chars().count() > 60 {
+                sent.text.chars().take(60).collect::<String>()
             } else {
                 sent.text.clone()
             };
@@ -1686,8 +1686,8 @@ pub fn paragraph_length_analysis(state: tauri::State<'_, AppState>) -> Result<Pa
                 continue;
             }
 
-            let preview = if trimmed.len() > 80 {
-                trimmed[..80].to_string()
+            let preview = if trimmed.chars().count() > 80 {
+                trimmed.chars().take(80).collect::<String>()
             } else {
                 trimmed.to_string()
             };
