@@ -733,7 +733,3 @@ export async function reorderFormatPages(ids) {
 export async function compilePreview(profileId) {
   return invoke('compile_preview', { profileId });
 }
-
-export async function getPreviewPagesSvg(pageIndices) {
-  return invoke('get_preview_pages_svg', { pageIndices });
-}

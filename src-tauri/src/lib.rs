@@ -1167,6 +1167,41 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .register_uri_scheme_protocol("iwe", |ctx, request| {
+            let path = request.uri().path();
+
+            // Parse /preview/page/{index}
+            if let Some(rest) = path.strip_prefix("/preview/page/") {
+                let index_str = rest.trim_end_matches(".svg");
+                if let Ok(page_index) = index_str.parse::<usize>() {
+                    let format_state = ctx.app_handle().state::<format::FormatState>();
+                    match format::render_page_svg(format_state.inner(), page_index) {
+                        Ok(svg) => {
+                            return tauri::http::Response::builder()
+                                .status(200)
+                                .header("Content-Type", "image/svg+xml")
+                                .header("Access-Control-Allow-Origin", "*")
+                                .body(svg.into_bytes())
+                                .unwrap();
+                        }
+                        Err(e) => {
+                            return tauri::http::Response::builder()
+                                .status(404)
+                                .header("Content-Type", "text/plain")
+                                .header("Access-Control-Allow-Origin", "*")
+                                .body(e.into_bytes())
+                                .unwrap();
+                        }
+                    }
+                }
+            }
+
+            tauri::http::Response::builder()
+                .status(404)
+                .header("Content-Type", "text/plain")
+                .body(b"Not found".to_vec())
+                .unwrap()
+        })
         .invoke_handler(tauri::generate_handler![
             get_backup_interval,
             set_backup_interval,
@@ -1311,7 +1346,6 @@ pub fn run() {
             semantic::semantic_search,
             semantic::get_semantic_index_status,
             format::compile_preview,
-            format::get_preview_pages_svg,
             get_format_profiles,
             get_format_profile,
             add_format_profile,

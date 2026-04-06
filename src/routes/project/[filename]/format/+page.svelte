@@ -6,7 +6,7 @@
     getChapters, getFormatProfiles, getFormatPages, getSettings, saveSettings,
     seedFormatProfiles, updateFormatProfile, addFormatPage,
     updateFormatPage, deleteFormatPage, reorderFormatPages,
-    compilePreview, getPreviewPagesSvg,
+    compilePreview,
   } from '$lib/db.js';
 
   const flipDurationMs = 150;
@@ -102,12 +102,10 @@
 
   // Compiled preview state
   let pageCount = $state(0);
-  let pageSvgs = $state({}); // { [index]: svgString }
   let rendering = $state(false); // true during compile
   let renderError = $state(null);
   let lastTiming = $state(null); // CompileTiming from Rust
-  let fetchingPages = $state(new Set()); // page indices currently being fetched
-  const PAGE_BUFFER = 3; // pages to pre-fetch in each direction
+  let compileGeneration = $state(0); // incremented on each compile to bust img cache
 
   // DnD items for front and back sections
   let frontItems = $state([]);
@@ -137,18 +135,16 @@
     if (!activeProfileId) return;
     if (isEbook) {
       pageCount = 0;
-      pageSvgs = {};
       lastTiming = null;
       return;
     }
     rendering = true;
     renderError = null;
-    pageSvgs = {};
-    fetchingPages = new Set();
     try {
       const result = await compilePreview(activeProfileId);
       pageCount = result.page_count;
       lastTiming = result.timing;
+      compileGeneration++; // bust img cache
 
       console.log(
         `[format] Compile: ${result.timing.total_ms.toFixed(0)}ms | ` +
@@ -164,76 +160,6 @@
     } finally {
       rendering = false;
     }
-
-    // Fetch initial visible pages
-    if (pageCount > 0) {
-      fetchPagesAround(0);
-    }
-  }
-
-  async function fetchPagesAround(centerIndex) {
-    const start = Math.max(0, centerIndex - PAGE_BUFFER);
-    const end = Math.min(pageCount - 1, centerIndex + PAGE_BUFFER);
-    const needed = [];
-    for (let i = start; i <= end; i++) {
-      if (!pageSvgs[i] && !fetchingPages.has(i)) {
-        needed.push(i);
-      }
-    }
-    if (needed.length === 0) return;
-
-    // Mark as fetching
-    const newFetching = new Set(fetchingPages);
-    for (const i of needed) newFetching.add(i);
-    fetchingPages = newFetching;
-
-    try {
-      const t0 = performance.now();
-      const result = await getPreviewPagesSvg(needed);
-      const ms = performance.now() - t0;
-      console.log(`[format] SVG batch: ${needed.length} pages in ${ms.toFixed(0)}ms (export: ${result.svg_export_ms.toFixed(0)}ms)`);
-
-      // Merge into pageSvgs
-      const updated = { ...pageSvgs };
-      for (const entry of result.pages) {
-        updated[entry.index] = entry.svg;
-      }
-      pageSvgs = updated;
-    } catch (e) {
-      console.error('[format] svg fetch failed:', e);
-    } finally {
-      const cleared = new Set(fetchingPages);
-      for (const i of needed) cleared.delete(i);
-      fetchingPages = cleared;
-    }
-  }
-
-  // Scroll-based lazy loading
-  let scrollTimer = null;
-  function handlePreviewScroll() {
-    clearTimeout(scrollTimer);
-    scrollTimer = setTimeout(() => {
-      if (!previewContainer || pageCount === 0) return;
-      const containerRect = previewContainer.getBoundingClientRect();
-      const centerY = containerRect.top + containerRect.height / 2;
-
-      // Find which page is closest to center of viewport
-      let closestIndex = 0;
-      let closestDist = Infinity;
-      for (let i = 0; i < pageCount; i++) {
-        const el = document.getElementById(`preview-page-${i}`);
-        if (!el) continue;
-        const rect = el.getBoundingClientRect();
-        const pageCenterY = rect.top + rect.height / 2;
-        const dist = Math.abs(pageCenterY - centerY);
-        if (dist < closestDist) {
-          closestDist = dist;
-          closestIndex = i;
-        }
-      }
-
-      fetchPagesAround(closestIndex);
-    }, 100);
   }
 
   async function loadData() {
@@ -347,7 +273,7 @@
   <div class="format-layout">
     <!-- Center: Preview + timing -->
     <div class="preview-column">
-    <div class="preview-area" bind:this={previewContainer} onscroll={handlePreviewScroll}>
+    <div class="preview-area" bind:this={previewContainer}>
       {#if isEbook}
         <div class="ebook-placeholder">
           <i class="bi bi-phone" style="font-size: 2rem;"></i>
@@ -374,17 +300,13 @@
         <div class="preview-scroll">
           {#each Array(pageCount) as _, i}
             <div class="preview-page-wrap" id="preview-page-{i}">
-              {#if pageSvgs[i]}
-                <div class="preview-page-svg">
-                  {@html pageSvgs[i]}
-                </div>
-              {:else}
-                <div class="preview-page-placeholder" style="aspect-ratio: {activeProfile?.trim_width_in ?? 6} / {activeProfile?.trim_height_in ?? 9};">
-                  {#if fetchingPages.has(i)}
-                    <div class="placeholder-spinner"></div>
-                  {/if}
-                </div>
-              {/if}
+              <img
+                class="preview-page-img"
+                src="http://iwe.localhost/preview/page/{i}.svg?v={compileGeneration}"
+                alt="Page {i + 1}"
+                draggable="false"
+                loading="lazy"
+              />
               <div class="page-number">{i + 1}</div>
             </div>
           {/each}
@@ -402,7 +324,6 @@
         <span title="Typst compilation">compile:{lastTiming.typst_compile_ms.toFixed(0)}</span>
         <span class="timing-sep">|</span>
         <span>{lastTiming.page_count} pages</span>
-        <span>{Object.keys(pageSvgs).length} loaded</span>
       </div>
     {/if}
     </div><!-- end preview-column -->
@@ -581,27 +502,12 @@
   .preview-page-wrap {
     display: flex; flex-direction: column; align-items: center; gap: 0.4rem;
   }
-  .preview-page-svg {
-    box-shadow: 0 2px 12px rgba(0,0,0,0.12), 0 0 0 1px rgba(0,0,0,0.06);
-    background: #fff;
-    line-height: 0;
-  }
-  .preview-page-svg :global(svg) {
+  .preview-page-img {
     display: block;
     max-width: 100%;
     height: auto;
-  }
-  .preview-page-placeholder {
-    width: 432px; /* 6in * 72 fallback, overridden by aspect-ratio */
-    background: #f5f3f0;
-    border: 1px dashed var(--iwe-border);
-    box-shadow: 0 2px 12px rgba(0,0,0,0.06);
-    display: flex; align-items: center; justify-content: center;
-  }
-  .placeholder-spinner {
-    width: 20px; height: 20px;
-    border: 2px solid var(--iwe-border); border-top-color: var(--iwe-accent);
-    border-radius: 50%; animation: spin 0.8s linear infinite;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.12), 0 0 0 1px rgba(0,0,0,0.06);
+    background: #fff;
   }
   .page-number {
     font-family: var(--iwe-font-ui); font-size: 0.7rem;

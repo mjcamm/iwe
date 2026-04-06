@@ -320,23 +320,6 @@ pub struct CompileResult {
     pub timing: CompileTiming,
 }
 
-#[derive(Serialize, Clone)]
-pub struct PageSvgResult {
-    pub svg: String,
-    pub svg_export_ms: f64,
-}
-
-#[derive(Serialize, Clone)]
-pub struct BatchSvgResult {
-    pub pages: Vec<BatchPageEntry>,
-    pub svg_export_ms: f64,
-}
-
-#[derive(Serialize, Clone)]
-pub struct BatchPageEntry {
-    pub index: usize,
-    pub svg: String,
-}
 
 // ---- Tauri commands ----
 
@@ -428,34 +411,10 @@ pub fn compile_preview(
     })
 }
 
-/// Export a batch of pages to SVG from the cached document.
-#[tauri::command]
-pub fn get_preview_pages_svg(
-    format_state: tauri::State<'_, FormatState>,
-    page_indices: Vec<usize>,
-) -> Result<BatchSvgResult, String> {
+/// Export a single page to SVG from the cached document (called by URI protocol handler).
+pub fn render_page_svg(format_state: &FormatState, page_index: usize) -> Result<String, String> {
     let doc_guard = format_state.document.lock().map_err(|e| e.to_string())?;
-    let document = doc_guard.as_ref().ok_or("No compiled document. Call compile_preview first.")?;
-
-    let t = Instant::now();
-    let mut pages = Vec::with_capacity(page_indices.len());
-    for &idx in &page_indices {
-        if let Some(page) = document.pages.get(idx) {
-            pages.push(BatchPageEntry {
-                index: idx,
-                svg: typst_svg::svg(page),
-            });
-        }
-    }
-    let svg_export_ms = t.elapsed().as_secs_f64() * 1000.0;
-
-    log::info!(
-        "[format] svg batch: {}ms for {} pages",
-        svg_export_ms as u32, pages.len(),
-    );
-
-    Ok(BatchSvgResult {
-        pages,
-        svg_export_ms,
-    })
+    let document = doc_guard.as_ref().ok_or("No compiled document")?;
+    let page = document.pages.get(page_index).ok_or("Page index out of range")?;
+    Ok(typst_svg::svg(page))
 }
