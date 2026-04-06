@@ -1,6 +1,7 @@
 <script>
   import { onMount } from 'svelte';
   import { readabilityAnalysis, getLibraryBook, getProjectSetting } from '$lib/db.js';
+  import { MIN_BAR_PX } from '$lib/chartConstants.js';
   import { emitTo } from '@tauri-apps/api/event';
   import { getCurrentWindow } from '@tauri-apps/api/window';
 
@@ -178,7 +179,7 @@
     const chartH = 200;
     const logicalH = padTop + chartH + padBottom;
 
-    const minBarSlot = 40; // px per slot — keeps bars readable
+    const minBarSlot = MIN_BAR_PX * 2.2; // matches MIN_BAR_PX with breathing room for the slot
     const naturalW = padLeft + padRight + slotCount * minBarSlot;
     const logicalW = Math.max(containerW, naturalW, 400);
 
@@ -234,7 +235,7 @@
 
     // Manuscript average line
     const avgY = padTop + chartH * (1 - data.manuscript_grade / maxGrade);
-    ctx.strokeStyle = '#d4a574';
+    ctx.strokeStyle = '#7ba89e';
     ctx.lineWidth = 1.5;
     ctx.setLineDash([5, 5]);
     ctx.beginPath();
@@ -242,7 +243,7 @@
     ctx.lineTo(logicalW - padRight, avgY);
     ctx.stroke();
     ctx.setLineDash([]);
-    ctx.fillStyle = '#d4a574';
+    ctx.fillStyle = '#7ba89e';
     ctx.textAlign = 'left';
     ctx.font = '10px Source Sans 3, system-ui';
     ctx.fillText(`avg ${data.manuscript_grade.toFixed(1)}`, logicalW - padRight + 2, avgY - 4);
@@ -441,7 +442,7 @@
     // Chapter average line
     const avg = chapter.grade_level;
     const avgY = padTop + chartH * (1 - (avg - minDisplay) / range);
-    ctx.strokeStyle = '#d4a574';
+    ctx.strokeStyle = '#7ba89e';
     ctx.lineWidth = 1;
     ctx.setLineDash([4, 4]);
     ctx.beginPath();
@@ -449,7 +450,7 @@
     ctx.lineTo(logicalW - padRight, avgY);
     ctx.stroke();
     ctx.setLineDash([]);
-    ctx.fillStyle = '#d4a574';
+    ctx.fillStyle = '#7ba89e';
     ctx.textAlign = 'left';
     ctx.font = '9px Source Sans 3, system-ui';
     ctx.fillText(`avg ${avg.toFixed(1)}`, logicalW - padRight + 2, avgY + 3);

@@ -234,9 +234,34 @@
 
   // ---- Dialogue attribution adverb state ----
   let adverbData = $state(null);
+  let adverbCompareEnabled = $state(true);
+  let adverbCompareData = $state(null); // { title, total_dialogue_spans, attributions_with_adverbs, total_instances, redundant_count, top_adverbs }
+  let adverbCompareTitle = $state('');
+
+  async function loadAdverbComparison() {
+    if (adverbCompareData) return;
+    try {
+      const stored = await getProjectSetting('comparative_book_id');
+      if (stored == null || stored === '') return;
+      const id = parseInt(stored, 10);
+      if (Number.isNaN(id)) return;
+      const book = await import('$lib/db.js').then(m => m.getLibraryBook(id));
+      if (!book) return;
+      const analyses = JSON.parse(book.analysesJson || '{}');
+      const a = analyses.adverbs;
+      if (a) {
+        adverbCompareData = a;
+        adverbCompareTitle = book.title;
+      }
+    } catch (e) {
+      console.warn('Failed to load adverb comparison:', e);
+    }
+  }
   let adverbLoading = $state(false);
   let adverbExpanded = $state(null); // filter to a specific adverb word
   let adverbShowRedundant = $state(false); // show only redundant instances
+
+  $effect(() => { if (subTab === 'adverbs') loadAdverbComparison(); });
 
   async function runAdverbScan() {
     adverbLoading = true;
@@ -721,6 +746,12 @@
       <button class="rep-scan-btn" onclick={runAdverbScan} disabled={adverbLoading}>
         {#if adverbLoading}Scanning...{:else}<i class="bi bi-pencil"></i> Scan Dialogue Tags{/if}
       </button>
+      {#if adverbCompareData}
+        <label class="cmp-toggle">
+          <input type="checkbox" bind:checked={adverbCompareEnabled} />
+          Compare vs <strong>{adverbCompareTitle}</strong>
+        </label>
+      {/if}
     </div>
 
     {#if adverbData}
@@ -744,6 +775,29 @@
           <span class="adv-stat-label">Redundant</span>
         </div>
       </div>
+
+      {#if adverbCompareEnabled && adverbCompareData}
+        {@const cmpRate = adverbCompareData.total_dialogue_spans > 0 ? (adverbCompareData.attributions_with_adverbs / adverbCompareData.total_dialogue_spans * 100) : 0}
+        <div class="cmp-row-label">vs <strong>{adverbCompareTitle}</strong></div>
+        <div class="adv-summary adv-compare-summary">
+          <div class="adv-stat">
+            <span class="adv-stat-val cmp-val">{cmpRate.toFixed(1)}%</span>
+            <span class="adv-stat-label">Tag adverb rate</span>
+          </div>
+          <div class="adv-stat">
+            <span class="adv-stat-val cmp-val">{adverbCompareData.total_instances}</span>
+            <span class="adv-stat-label">Adverbs found</span>
+          </div>
+          <div class="adv-stat">
+            <span class="adv-stat-val cmp-val">{adverbCompareData.total_dialogue_spans}</span>
+            <span class="adv-stat-label">Dialogue spans</span>
+          </div>
+          <div class="adv-stat">
+            <span class="adv-stat-val cmp-val">{adverbCompareData.redundant_count}</span>
+            <span class="adv-stat-label">Redundant</span>
+          </div>
+        </div>
+      {/if}
 
       <!-- Filter: redundant only -->
       {#if adverbData.redundant_count > 0}
@@ -772,6 +826,18 @@
             </button>
           {/each}
         </div>
+        {#if adverbCompareEnabled && adverbCompareData?.top_adverbs?.length > 0}
+          {@const cmpCount = Math.min(15, adverbData.top_adverbs.length)}
+          <div class="adv-top-label cmp-top-label">Most frequent in <strong>{adverbCompareTitle}</strong></div>
+          <div class="adv-top-list">
+            {#each adverbCompareData.top_adverbs.slice(0, cmpCount) as freq (freq.word)}
+              <span class="adv-top-pill cmp-pill">
+                {freq.word}
+                <span class="adv-pill-count">{freq.count}</span>
+              </span>
+            {/each}
+          </div>
+        {/if}
       </div>
 
       <!-- Instance list -->
@@ -1303,6 +1369,57 @@
   .adv-top-pill.active .adv-pill-dlg { color: rgba(255,255,255,0.7); }
   .adv-pill-count { font-size: 0.65rem; color: var(--iwe-text-faint); font-weight: 600; }
   .adv-pill-dlg { font-size: 0.6rem; color: #dc2626; font-weight: 500; }
+
+  /* Adverb comparison styling — orange palette */
+  .adv-summary.adv-compare-summary {
+    background: rgba(168, 90, 4, 0.08);
+    border-bottom: 1px solid rgba(168, 90, 4, 0.25);
+  }
+  .adv-compare-summary .adv-stat {
+    background: rgba(168, 90, 4, 0.05);
+    border-right: 1px solid #a85a04;
+  }
+  .adv-compare-summary .adv-stat:last-child {
+    border-right: none;
+  }
+  .adv-compare-summary .adv-stat-label {
+    color: #a85a04;
+  }
+  .adv-stat-val.cmp-val { color: #a85a04; }
+  .cmp-row-label {
+    font-size: 0.7rem; padding: 0.25rem 0.75rem 0.5rem;
+    color: #9e9891; font-style: italic;
+    background: rgba(168, 90, 4, 0.04);
+    border-bottom: 1px solid var(--iwe-border-light);
+  }
+  .cmp-row-label strong { color: #a85a04; font-weight: 600; }
+
+  .adv-top-label.cmp-top-label {
+    margin-top: 0.6rem; color: #a85a04;
+  }
+  .adv-top-label.cmp-top-label strong { color: #a85a04; }
+  .adv-top-pill.cmp-pill {
+    background: rgba(168, 90, 4, 0.10);
+    border-color: rgba(168, 90, 4, 0.30);
+    color: #a85a04;
+    cursor: default;
+  }
+  .adv-top-pill.cmp-pill:hover {
+    border-color: rgba(168, 90, 4, 0.30);
+    color: #a85a04;
+  }
+  .adv-top-pill.cmp-pill .adv-pill-count {
+    color: rgba(168, 90, 4, 0.7);
+  }
+
+  /* Generic comparison toggle (used by adverbs and other tabs) */
+  .cmp-toggle {
+    display: inline-flex; align-items: center; gap: 0.4rem;
+    margin-top: 0.5rem; font-size: 0.8rem; color: var(--iwe-text-secondary);
+    cursor: pointer;
+  }
+  .cmp-toggle input { accent-color: #a85a04; width: 14px; height: 14px; }
+  .cmp-toggle strong { color: #a85a04; font-weight: 600; }
 
   .adv-instance-list { flex: 1; overflow-y: auto; }
   .adv-result-count {

@@ -1,6 +1,7 @@
 <script>
   import { onMount } from 'svelte';
   import { paragraphLengthAnalysis, getProjectSetting, getLibraryBook } from '$lib/db.js';
+  import { MIN_BAR_PX } from '$lib/chartConstants.js';
   import { emitTo } from '@tauri-apps/api/event';
   import { getCurrentWindow } from '@tauri-apps/api/window';
 
@@ -164,7 +165,7 @@
           </div>
           <div class="col-chart-wrap">
             <div class="col-chart-stack">
-              <div class="col-chart" use:trackWidth={ch.chapter_id} style="min-width: {Math.max(ch.paragraphs.length * 18, 300)}px">
+              <div class="col-chart" use:trackWidth={ch.chapter_id} style="min-width: {Math.max(ch.paragraphs.length * MIN_BAR_PX, 300)}px">
                 {#each ch.paragraphs as para, i}
                   <div
                     class="col-slot"
@@ -314,7 +315,7 @@
     transition: height 0.3s ease;
   }
   .col-bar.mono-bar {
-    background: #d4a574;
+    background: #7ba89e;
   }
 
   .tooltip {

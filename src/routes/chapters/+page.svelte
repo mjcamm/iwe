@@ -1,15 +1,24 @@
 <script>
   import { onMount } from 'svelte';
-  import { chapterAnalysis } from '$lib/db.js';
+  import { chapterAnalysis, getProjectSetting, getLibraryBook } from '$lib/db.js';
+  import { MIN_BAR_PX, MAX_BAR_PX } from '$lib/chartConstants.js';
 
   let data = $state(null);
   let loading = $state(true);
   let wordsPerMin = $state(250);
 
+  // Comparison
+  let compareBook = $state(null);   // { title, author, chapters: [...] }
+  let showComparison = $state(true);
+
   let chapCanvas;
   let dialogueCanvas;
   let sentenceLenCanvas;
   let vocabCanvas;
+
+  // Comparison palette: dark / light orange
+  const ORANGE_DARK = '#a85a04';
+  const ORANGE_LIGHT = '#e8a35c';
 
   onMount(async () => {
     try {
@@ -17,22 +26,60 @@
     } catch (e) {
       console.warn('Chapter analysis failed:', e);
     }
+    // Load comparison
+    let compareId = null;
+    try {
+      const stored = await getProjectSetting('comparative_book_id');
+      if (stored != null && stored !== '') compareId = parseInt(stored, 10);
+    } catch (e) {
+      console.warn('Failed to read comparative_book_id:', e);
+    }
+    if (compareId && !Number.isNaN(compareId)) {
+      try {
+        const book = await getLibraryBook(compareId);
+        if (book) {
+          const analyses = JSON.parse(book.analysesJson || '{}');
+          const ch = analyses.chapter;
+          if (Array.isArray(ch)) {
+            compareBook = { title: book.title, author: book.author, chapters: ch };
+          }
+        }
+      } catch (e) {
+        console.warn('Failed to load comparison book:', e);
+      }
+    }
     loading = false;
   });
 
-  $effect(() => { if (data && chapCanvas) drawWordCountChart(); });
-  $effect(() => { if (data && dialogueCanvas) drawDialogueChart(); });
-  $effect(() => { if (data && sentenceLenCanvas) drawSentenceLenChart(); });
-  $effect(() => { if (data && vocabCanvas) drawVocabChart(); });
+  $effect(() => { void compareBook; void showComparison; if (data && chapCanvas) drawWordCountChart(); });
+  $effect(() => { void compareBook; void showComparison; if (data && dialogueCanvas) drawDialogueChart(); });
+  $effect(() => { void compareBook; void showComparison; if (data && sentenceLenCanvas) drawSentenceLenChart(); });
+  $effect(() => { void compareBook; void showComparison; if (data && vocabCanvas) drawVocabChart(); });
 
-  function drawBarChart(canvas, values, color) {
+  /**
+   * Draws a chapter bar chart. If a compareValues array is supplied, each
+   * chapter renders as a green bar + an adjacent orange comparison bar grouped
+   * together, with a larger gap between groups. Comparison data extends past
+   * the manuscript if the comparison book has more chapters.
+   */
+  function drawBarChart(canvas, values, color, compareValues = null) {
     const ctx = canvas.getContext('2d');
     const dpr = window.devicePixelRatio || 1;
     const containerW = canvas.parentElement?.clientWidth || 600;
-    const barW = Math.max(30, Math.min(60, (containerW - 80) / data.length));
+
+    const hasComp = !!compareValues && compareValues.length > 0;
+    const slotCount = hasComp ? Math.max(values.length, compareValues.length) : values.length;
+
+    const barW = hasComp
+      ? Math.max(MIN_BAR_PX, Math.min(MAX_BAR_PX * 0.6, (containerW - 100) / (slotCount * 2.5)))
+      : Math.max(MIN_BAR_PX * 1.6, Math.min(MAX_BAR_PX, (containerW - 80) / slotCount));
+    const pairGap = 1;
+    const groupGap = hasComp ? Math.max(10, barW * 0.7) : 6;
+    const groupW = hasComp ? barW * 2 + pairGap : barW;
+
     const chartH = 220;
-    const labelH = 70;
-    const logicalW = Math.max(containerW, 70 + data.length * (barW + 6));
+    const labelH = 80;
+    const logicalW = Math.max(containerW, 70 + slotCount * (groupW + groupGap));
     const logicalH = chartH + labelH + 30;
 
     canvas.width = logicalW * dpr;
@@ -43,46 +90,105 @@
     ctx.fillStyle = '#faf8f5';
     ctx.fillRect(0, 0, logicalW, logicalH);
 
-    const maxVal = Math.max(...values, 1);
+    // Shared y-scale across both books
+    const allVals = hasComp ? [...values, ...compareValues] : values;
+    const maxVal = Math.max(...allVals.filter(v => v != null), 1);
 
-    for (let i = 0; i < data.length; i++) {
-      const val = values[i];
-      const h = (val / maxVal) * chartH;
-      const x = 60 + i * (barW + 6);
-      const y = chartH - h + 15;
+    for (let i = 0; i < slotCount; i++) {
+      const groupX = 60 + i * (groupW + groupGap);
+      const ownVal = values[i];
+      const compVal = hasComp ? compareValues[i] : null;
 
-      ctx.fillStyle = color;
-      ctx.fillRect(x, y, barW, h);
-      ctx.fillStyle = '#6b6560';
-      ctx.font = '11px Source Sans 3, system-ui';
-      ctx.textAlign = 'center';
-      ctx.fillText(typeof val === 'number' && val % 1 !== 0 ? val.toFixed(1) : val.toLocaleString(), x + barW / 2, y - 5);
+      // Own (manuscript) bar
+      if (ownVal != null) {
+        const h = (ownVal / maxVal) * chartH;
+        const y = chartH - h + 15;
+        ctx.fillStyle = color;
+        ctx.fillRect(groupX, y, barW, h);
+        ctx.fillStyle = '#6b6560';
+        ctx.font = '10px Source Sans 3, system-ui';
+        ctx.textAlign = 'center';
+        ctx.fillText(formatVal(ownVal), groupX + barW / 2, y - 5);
+      }
 
+      // Comparison bar (orange)
+      if (hasComp && compVal != null) {
+        const h = (compVal / maxVal) * chartH;
+        const y = chartH - h + 15;
+        const cx = groupX + barW + pairGap;
+        ctx.fillStyle = ORANGE_DARK;
+        ctx.fillRect(cx, y, barW, h);
+        ctx.fillStyle = ORANGE_DARK;
+        ctx.font = '10px Source Sans 3, system-ui';
+        ctx.textAlign = 'center';
+        ctx.fillText(formatVal(compVal), cx + barW / 2, y - 5);
+      }
+
+      // Chapter name label — use the user's chapter title where present,
+      // otherwise the comparison's title for any extra slots
+      const titleSource = i < data.length
+        ? data[i].chapter_title
+        : (compareBook?.chapters[i]?.chapter_title || `#${i + 1}`);
       ctx.save();
-      ctx.translate(x + barW / 2, chartH + 25);
+      ctx.translate(groupX + groupW / 2, chartH + 25);
       ctx.rotate(-Math.PI / 4);
       ctx.textAlign = 'right';
-      ctx.fillStyle = '#9e9891';
-      ctx.fillText(data[i].chapter_title, 0, 0);
+      ctx.font = '11px Source Sans 3, system-ui';
+      ctx.fillStyle = i < data.length ? '#9e9891' : ORANGE_DARK;
+      const label = titleSource.length > 22 ? titleSource.slice(0, 22) + '…' : titleSource;
+      ctx.fillText(label, 0, 0);
       ctx.restore();
+    }
+
+    // Legend if comparison
+    if (hasComp) {
+      ctx.fillStyle = color; ctx.fillRect(logicalW - 240, 8, 12, 12);
+      ctx.fillStyle = '#6b6560'; ctx.font = '11px Source Sans 3, system-ui'; ctx.textAlign = 'left';
+      ctx.fillText('Manuscript', logicalW - 224, 18);
+      ctx.fillStyle = ORANGE_DARK; ctx.fillRect(logicalW - 140, 8, 12, 12);
+      ctx.fillStyle = '#6b6560'; ctx.fillText(compareBook.title, logicalW - 124, 18);
     }
   }
 
+  function formatVal(v) {
+    if (typeof v !== 'number') return String(v);
+    if (v % 1 !== 0) return v.toFixed(1);
+    return v.toLocaleString();
+  }
+
+  function compareValues(getter) {
+    if (!compareBook || !showComparison) return null;
+    return compareBook.chapters.map(c => getter(c));
+  }
+
   function drawWordCountChart() {
-    drawBarChart(chapCanvas, data.map(d => d.total_words), '#2d6a5e');
+    drawBarChart(
+      chapCanvas,
+      data.map(d => d.total_words),
+      '#2d6a5e',
+      compareValues(c => c.total_words)
+    );
   }
 
   function drawDialogueChart() {
     const ctx = dialogueCanvas.getContext('2d');
     const dpr = window.devicePixelRatio || 1;
     const containerW = dialogueCanvas.parentElement?.clientWidth || 600;
-    const singleBarW = Math.max(14, Math.min(28, (containerW - 100) / (data.length * 2.5)));
-    const pairGap = 2; // gap between dialogue & narrative bars
-    const groupGap = singleBarW * 1.2; // gap between chapter groups
-    const pairW = singleBarW * 2 + pairGap;
+
+    const hasComp = !!(compareBook && showComparison && compareBook.chapters.length > 0);
+    const slotCount = hasComp ? Math.max(data.length, compareBook.chapters.length) : data.length;
+    const barsPerGroup = hasComp ? 4 : 2;
+
+    const singleBarW = hasComp
+      ? Math.max(MIN_BAR_PX, Math.min(MAX_BAR_PX * 0.5, (containerW - 100) / (slotCount * 5)))
+      : Math.max(MIN_BAR_PX, Math.min(MAX_BAR_PX * 0.6, (containerW - 100) / (slotCount * 2.5)));
+    const pairGap = 1;
+    const groupGap = singleBarW * 1.4;
+    const groupW = singleBarW * barsPerGroup + pairGap * (barsPerGroup - 1);
+
     const chartH = 220;
     const labelH = 90;
-    const logicalW = Math.max(containerW, 80 + data.length * (pairW + groupGap));
+    const logicalW = Math.max(containerW, 80 + slotCount * (groupW + groupGap));
     const logicalH = chartH + labelH + 30;
 
     dialogueCanvas.width = logicalW * dpr;
@@ -93,58 +199,111 @@
     ctx.fillStyle = '#faf8f5';
     ctx.fillRect(0, 0, logicalW, logicalH);
 
-    const maxVal = Math.max(...data.map(d => Math.max(d.narrative_words, d.dialogue_words)), 1);
+    // Bars represent percentages of total chapter words, NOT raw counts.
+    // This way a chapter with 8k words at 89% narrative is comparable to a
+    // chapter with 4k words at 89% narrative — both reach the same height.
+    const maxVal = 100;
+    const narPctOf = (c) => c && c.total_words > 0 ? (c.narrative_words / c.total_words) * 100 : 0;
+    const dlgPctOf = (c) => c && c.total_words > 0 ? (c.dialogue_words / c.total_words) * 100 : 0;
 
-    for (let i = 0; i < data.length; i++) {
-      const groupX = 60 + i * (pairW + groupGap);
-      const narH = (data[i].narrative_words / maxVal) * chartH;
-      const dlgH = (data[i].dialogue_words / maxVal) * chartH;
+    const NAR_GREEN = '#2d6a5e';
+    const DLG_PURPLE = '#5a3a82';
 
-      // Narrative bar
-      ctx.fillStyle = '#2d6a5e';
-      ctx.fillRect(groupX, chartH - narH + 15, singleBarW, narH);
+    for (let i = 0; i < slotCount; i++) {
+      const groupX = 60 + i * (groupW + groupGap);
+      const own = data[i];
+      const comp = hasComp ? compareBook.chapters[i] : null;
 
-      // Dialogue bar
-      ctx.fillStyle = '#d97706';
-      ctx.fillRect(groupX + singleBarW + pairGap, chartH - dlgH + 15, singleBarW, dlgH);
+      // Own narrative
+      if (own) {
+        const narH = (narPctOf(own) / maxVal) * chartH;
+        ctx.fillStyle = NAR_GREEN;
+        ctx.fillRect(groupX, chartH - narH + 15, singleBarW, narH);
+      }
+      // Own dialogue
+      if (own) {
+        const dlgH = (dlgPctOf(own) / maxVal) * chartH;
+        ctx.fillStyle = DLG_PURPLE;
+        ctx.fillRect(groupX + singleBarW + pairGap, chartH - dlgH + 15, singleBarW, dlgH);
+      }
+      // Comp narrative (dark orange)
+      if (comp) {
+        const offset = hasComp ? 2 : 0;
+        const narH = (narPctOf(comp) / maxVal) * chartH;
+        ctx.fillStyle = ORANGE_DARK;
+        ctx.fillRect(groupX + (singleBarW + pairGap) * offset, chartH - narH + 15, singleBarW, narH);
+      }
+      // Comp dialogue (light orange)
+      if (comp) {
+        const offset = hasComp ? 3 : 0;
+        const dlgH = (dlgPctOf(comp) / maxVal) * chartH;
+        ctx.fillStyle = ORANGE_LIGHT;
+        ctx.fillRect(groupX + (singleBarW + pairGap) * offset, chartH - dlgH + 15, singleBarW, dlgH);
+      }
 
-      // Percentages below bars
-      const total = data[i].total_words || 1;
-      const narPct = Math.round(data[i].narrative_words / total * 100);
-      const dlgPct = Math.round(data[i].dialogue_words / total * 100);
-
+      // Percentages below
       ctx.font = '9px Source Sans 3, system-ui';
       ctx.textAlign = 'center';
-      ctx.fillStyle = '#2d6a5e';
-      ctx.fillText(`${narPct}%`, groupX + singleBarW / 2, chartH + 26);
-      ctx.fillStyle = '#d97706';
-      ctx.fillText(`${dlgPct}%`, groupX + singleBarW + pairGap + singleBarW / 2, chartH + 26);
+      if (own) {
+        const total = own.total_words || 1;
+        ctx.fillStyle = NAR_GREEN;
+        ctx.fillText(`${Math.round(own.narrative_words / total * 100)}%`, groupX + singleBarW / 2, chartH + 26);
+        ctx.fillStyle = DLG_PURPLE;
+        ctx.fillText(`${Math.round(own.dialogue_words / total * 100)}%`, groupX + singleBarW + pairGap + singleBarW / 2, chartH + 26);
+      }
+      if (comp) {
+        const total = comp.total_words || 1;
+        ctx.fillStyle = ORANGE_DARK;
+        ctx.fillText(`${Math.round(comp.narrative_words / total * 100)}%`, groupX + (singleBarW + pairGap) * 2 + singleBarW / 2, chartH + 26);
+        ctx.fillStyle = ORANGE_LIGHT;
+        ctx.fillText(`${Math.round(comp.dialogue_words / total * 100)}%`, groupX + (singleBarW + pairGap) * 3 + singleBarW / 2, chartH + 26);
+      }
 
       // Chapter name
+      const titleSource = own ? own.chapter_title : (comp ? comp.chapter_title : `#${i + 1}`);
       ctx.save();
-      ctx.translate(groupX + pairW / 2, chartH + 38);
+      ctx.translate(groupX + groupW / 2, chartH + 38);
       ctx.rotate(-Math.PI / 4);
       ctx.textAlign = 'right';
       ctx.font = '11px Source Sans 3, system-ui';
-      ctx.fillStyle = '#9e9891';
-      ctx.fillText(data[i].chapter_title, 0, 0);
+      ctx.fillStyle = own ? '#9e9891' : ORANGE_DARK;
+      const label = titleSource.length > 22 ? titleSource.slice(0, 22) + '…' : titleSource;
+      ctx.fillText(label, 0, 0);
       ctx.restore();
     }
 
     // Legend
-    ctx.fillStyle = '#2d6a5e'; ctx.fillRect(logicalW - 180, 8, 12, 12);
-    ctx.fillStyle = '#6b6560'; ctx.font = '11px Source Sans 3, system-ui'; ctx.textAlign = 'left';
-    ctx.fillText('Narrative', logicalW - 164, 18);
-    ctx.fillStyle = '#d97706'; ctx.fillRect(logicalW - 90, 8, 12, 12);
-    ctx.fillStyle = '#6b6560'; ctx.fillText('Dialogue', logicalW - 74, 18);
+    let lx = logicalW - (hasComp ? 480 : 180);
+    const drawLegend = (color, text) => {
+      ctx.fillStyle = color; ctx.fillRect(lx, 8, 12, 12);
+      ctx.fillStyle = '#6b6560'; ctx.font = '11px Source Sans 3, system-ui'; ctx.textAlign = 'left';
+      ctx.fillText(text, lx + 16, 18);
+      lx += ctx.measureText(text).width + 30;
+    };
+    drawLegend(NAR_GREEN, 'Narrative');
+    drawLegend(DLG_PURPLE, 'Dialogue');
+    if (hasComp) {
+      drawLegend(ORANGE_DARK, `${compareBook.title} narrative`);
+      drawLegend(ORANGE_LIGHT, `${compareBook.title} dialogue`);
+    }
   }
 
   function drawSentenceLenChart() {
-    drawBarChart(sentenceLenCanvas, data.map(d => Math.round(d.avg_sentence_length * 10) / 10), '#6a4c2d');
+    drawBarChart(
+      sentenceLenCanvas,
+      data.map(d => Math.round(d.avg_sentence_length * 10) / 10),
+      '#2d6a5e',
+      compareValues(c => Math.round(c.avg_sentence_length * 10) / 10)
+    );
   }
 
   function drawVocabChart() {
-    drawBarChart(vocabCanvas, data.map(d => Math.round(d.vocabulary_density * 100)), '#4c2d6a');
+    drawBarChart(
+      vocabCanvas,
+      data.map(d => Math.round(d.vocabulary_density * 100)),
+      '#2d6a5e',
+      compareValues(c => Math.round(c.vocabulary_density * 100))
+    );
   }
 </script>
 
@@ -157,6 +316,12 @@
         <input type="number" bind:value={wordsPerMin} min="100" max="600" class="wpm-input" />
         <span class="wpm-unit">wpm</span>
       </label>
+      {#if compareBook}
+        <label class="cmp-toggle">
+          <input type="checkbox" bind:checked={showComparison} />
+          Compare vs <strong>{compareBook.title}</strong>
+        </label>
+      {/if}
     </div>
   </div>
 
@@ -206,7 +371,7 @@
       </div>
 
       <div class="chart-section">
-        <h2 class="chart-title">Dialogue vs Narrative</h2>
+        <h2 class="chart-title">Narrative vs Dialogue</h2>
         <div class="chart-wrap"><canvas bind:this={dialogueCanvas}></canvas></div>
       </div>
 
@@ -285,7 +450,14 @@
     font-family: 'Libre Baskerville', Georgia, serif;
     font-size: 1.2rem; font-weight: 400; margin: 0; color: #2d2a26;
   }
-  .chap-wpm { display: flex; align-items: center; gap: 0.5rem; font-size: 0.85rem; color: #6b6560; }
+  .chap-wpm { display: flex; align-items: center; gap: 1rem; font-size: 0.85rem; color: #6b6560; flex-wrap: wrap; }
+  .cmp-toggle {
+    display: inline-flex; align-items: center; gap: 0.45rem;
+    cursor: pointer; padding-left: 0.8rem; border-left: 1px solid #e5e1da;
+    white-space: nowrap;
+  }
+  .cmp-toggle input { accent-color: #a85a04; width: 16px; height: 16px; }
+  .cmp-toggle strong { color: #a85a04; font-weight: 600; }
   .wpm-input {
     width: 65px; padding: 0.3rem 0.4rem; border: 1px solid #e5e1da;
     border-radius: 4px; font-size: 0.85rem; text-align: center;

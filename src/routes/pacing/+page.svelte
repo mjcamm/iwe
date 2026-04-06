@@ -244,7 +244,7 @@
     // Manuscript average line
     const avg = raw.reduce((a, b) => a + b, 0) / raw.length;
     const avgY = padTop + chartH * (1 - avg / maxVal);
-    ctx.strokeStyle = '#d4a574';
+    ctx.strokeStyle = '#7ba89e';
     ctx.lineWidth = 1.5;
     ctx.setLineDash([5, 5]);
     ctx.beginPath();
@@ -252,7 +252,7 @@
     ctx.lineTo(logicalW - padRight, avgY);
     ctx.stroke();
     ctx.setLineDash([]);
-    ctx.fillStyle = '#d4a574';
+    ctx.fillStyle = '#7ba89e';
     ctx.textAlign = 'left';
     ctx.font = '11px Source Sans 3, system-ui';
     ctx.fillText(`avg ${avg.toFixed(1)}`, logicalW - padRight - 56, avgY - 5);
