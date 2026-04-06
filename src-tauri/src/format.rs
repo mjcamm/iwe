@@ -265,7 +265,11 @@ fn build_typst_markup(
     format!("{}{}", heading_style, doc)
 }
 
-// ---- Compile & render ----
+// ---- Compile & SVG render ----
+
+use std::sync::Mutex;
+use std::time::Instant;
+use serde::Serialize;
 
 fn compile_document(markup: &str) -> Result<PagedDocument, String> {
     let world = IweWorld::new(markup.to_string());
@@ -282,20 +286,69 @@ fn compile_document(markup: &str) -> Result<PagedDocument, String> {
     }
 }
 
-fn render_page_to_png(page: &typst::layout::Page, pixel_per_pt: f32) -> Result<Vec<u8>, String> {
-    let pixmap = typst_render::render(page, pixel_per_pt);
-    pixmap
-        .encode_png()
-        .map_err(|e| format!("PNG encoding failed: {}", e))
+// ---- Cached document state ----
+
+pub struct FormatState {
+    document: Mutex<Option<PagedDocument>>,
+}
+
+impl FormatState {
+    pub fn new() -> Self {
+        FormatState {
+            document: Mutex::new(None),
+        }
+    }
+}
+
+// ---- Response types ----
+
+#[derive(Serialize, Clone)]
+pub struct CompileTiming {
+    pub db_load_ms: f64,
+    pub ydoc_extract_ms: f64,
+    pub markup_build_ms: f64,
+    pub typst_compile_ms: f64,
+    pub total_ms: f64,
+    pub page_count: usize,
+    pub chapter_count: usize,
+    pub markup_len: usize,
+}
+
+#[derive(Serialize, Clone)]
+pub struct CompileResult {
+    pub page_count: usize,
+    pub timing: CompileTiming,
+}
+
+#[derive(Serialize, Clone)]
+pub struct PageSvgResult {
+    pub svg: String,
+    pub svg_export_ms: f64,
+}
+
+#[derive(Serialize, Clone)]
+pub struct BatchSvgResult {
+    pub pages: Vec<BatchPageEntry>,
+    pub svg_export_ms: f64,
+}
+
+#[derive(Serialize, Clone)]
+pub struct BatchPageEntry {
+    pub index: usize,
+    pub svg: String,
 }
 
 // ---- Tauri commands ----
 
+/// Compile the document and cache it. Returns page count + timing. No SVGs yet.
 #[tauri::command]
-pub fn render_preview_pages(
+pub fn compile_preview(
     state: tauri::State<'_, AppState>,
+    format_state: tauri::State<'_, FormatState>,
     profile_id: i64,
-) -> Result<Vec<Vec<u8>>, String> {
+) -> Result<CompileResult, String> {
+    let total_start = Instant::now();
+
     let guard = state.db.lock().map_err(|e| e.to_string())?;
     let conn = guard.as_ref().ok_or("No project open")?;
 
@@ -303,70 +356,106 @@ pub fn render_preview_pages(
         .map_err(|e| e.to_string())?
         .ok_or("Profile not found")?;
 
-    // Check if this is an ebook target
     if profile.target_type == "ebook" {
-        return Ok(Vec::new()); // Empty = ebook, frontend shows placeholder
+        // Clear cached doc
+        let mut doc_guard = format_state.document.lock().map_err(|e| e.to_string())?;
+        *doc_guard = None;
+        return Ok(CompileResult {
+            page_count: 0,
+            timing: CompileTiming {
+                db_load_ms: 0.0, ydoc_extract_ms: 0.0, markup_build_ms: 0.0,
+                typst_compile_ms: 0.0, total_ms: 0.0, page_count: 0,
+                chapter_count: 0, markup_len: 0,
+            },
+        });
     }
 
+    // 1. DB load
+    let t = Instant::now();
     let format_pages = db::list_format_pages(conn, profile_id).map_err(|e| e.to_string())?;
     let chapters_raw = db::list_chapters(conn).map_err(|e| e.to_string())?;
+    let db_load_ms = t.elapsed().as_secs_f64() * 1000.0;
 
-    // Extract text from each chapter's Y.Doc
+    // 2. Y.Doc text extraction
+    let t = Instant::now();
     let mut chapters: Vec<(String, String)> = Vec::new();
     for ch in &chapters_raw {
         let text = ydoc::extract_text_with_breaks_from_bytes(&ch.content);
         chapters.push((ch.title.clone(), text));
     }
+    let ydoc_extract_ms = t.elapsed().as_secs_f64() * 1000.0;
+    let chapter_count = chapters.len();
 
     let front: Vec<FormatPage> = format_pages.iter().filter(|p| p.position == "front").cloned().collect();
     let back: Vec<FormatPage> = format_pages.iter().filter(|p| p.position == "back").cloned().collect();
 
+    // 3. Markup generation
+    let t = Instant::now();
     let markup = build_typst_markup(&profile, &front, &chapters, &back);
+    let markup_build_ms = t.elapsed().as_secs_f64() * 1000.0;
+    let markup_len = markup.len();
+
+    // 4. Typst compilation
+    let t = Instant::now();
     let document = compile_document(&markup)?;
+    let typst_compile_ms = t.elapsed().as_secs_f64() * 1000.0;
 
-    // Render all pages at 1.5x for preview quality
-    let pixel_per_pt = 1.5;
-    let mut pngs: Vec<Vec<u8>> = Vec::new();
-    for page in &document.pages {
-        let png = render_page_to_png(page, pixel_per_pt)?;
-        pngs.push(png);
-    }
+    let page_count = document.pages.len();
+    let total_ms = total_start.elapsed().as_secs_f64() * 1000.0;
 
-    Ok(pngs)
+    log::info!(
+        "[format] compile: {}ms total | db:{}ms ydoc:{}ms markup:{}ms compile:{}ms | {} pages, {} chapters, {}KB markup",
+        total_ms as u32, db_load_ms as u32, ydoc_extract_ms as u32, markup_build_ms as u32,
+        typst_compile_ms as u32, page_count, chapter_count, markup_len / 1024,
+    );
+
+    // Cache the compiled document
+    let mut doc_guard = format_state.document.lock().map_err(|e| e.to_string())?;
+    *doc_guard = Some(document);
+
+    Ok(CompileResult {
+        page_count,
+        timing: CompileTiming {
+            db_load_ms,
+            ydoc_extract_ms,
+            markup_build_ms,
+            typst_compile_ms,
+            total_ms,
+            page_count,
+            chapter_count,
+            markup_len,
+        },
+    })
 }
 
+/// Export a batch of pages to SVG from the cached document.
 #[tauri::command]
-pub fn render_single_page(
-    state: tauri::State<'_, AppState>,
-    profile_id: i64,
-    page_index: usize,
-) -> Result<Vec<u8>, String> {
-    let guard = state.db.lock().map_err(|e| e.to_string())?;
-    let conn = guard.as_ref().ok_or("No project open")?;
+pub fn get_preview_pages_svg(
+    format_state: tauri::State<'_, FormatState>,
+    page_indices: Vec<usize>,
+) -> Result<BatchSvgResult, String> {
+    let doc_guard = format_state.document.lock().map_err(|e| e.to_string())?;
+    let document = doc_guard.as_ref().ok_or("No compiled document. Call compile_preview first.")?;
 
-    let profile = db::get_format_profile(conn, profile_id)
-        .map_err(|e| e.to_string())?
-        .ok_or("Profile not found")?;
-
-    if profile.target_type == "ebook" {
-        return Err("Ebook targets do not have rendered pages".into());
+    let t = Instant::now();
+    let mut pages = Vec::with_capacity(page_indices.len());
+    for &idx in &page_indices {
+        if let Some(page) = document.pages.get(idx) {
+            pages.push(BatchPageEntry {
+                index: idx,
+                svg: typst_svg::svg(page),
+            });
+        }
     }
+    let svg_export_ms = t.elapsed().as_secs_f64() * 1000.0;
 
-    let format_pages = db::list_format_pages(conn, profile_id).map_err(|e| e.to_string())?;
-    let chapters_raw = db::list_chapters(conn).map_err(|e| e.to_string())?;
+    log::info!(
+        "[format] svg batch: {}ms for {} pages",
+        svg_export_ms as u32, pages.len(),
+    );
 
-    let mut chapters: Vec<(String, String)> = Vec::new();
-    for ch in &chapters_raw {
-        let text = ydoc::extract_text_with_breaks_from_bytes(&ch.content);
-        chapters.push((ch.title.clone(), text));
-    }
-
-    let front: Vec<FormatPage> = format_pages.iter().filter(|p| p.position == "front").cloned().collect();
-    let back: Vec<FormatPage> = format_pages.iter().filter(|p| p.position == "back").cloned().collect();
-
-    let markup = build_typst_markup(&profile, &front, &chapters, &back);
-    let document = compile_document(&markup)?;
-
-    let page = document.pages.get(page_index).ok_or("Page index out of range")?;
-    render_page_to_png(page, 1.5)
+    Ok(BatchSvgResult {
+        pages,
+        svg_export_ms,
+    })
 }

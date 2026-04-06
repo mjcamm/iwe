@@ -6,7 +6,7 @@
     getChapters, getFormatProfiles, getFormatPages, getSettings, saveSettings,
     seedFormatProfiles, updateFormatProfile, addFormatPage,
     updateFormatPage, deleteFormatPage, reorderFormatPages,
-    renderPreviewPages,
+    compilePreview, getPreviewPagesSvg,
   } from '$lib/db.js';
 
   const flipDurationMs = 150;
@@ -100,10 +100,14 @@
   let formatPages = $state([]); // FormatPage[] for active profile
   let selectedPresetLabel = $state(null); // tracks which target card is selected
 
-  // Typst-rendered preview pages (array of blob URLs)
-  let previewPages = $state([]); // string[] of blob URLs
-  let rendering = $state(false);
+  // Compiled preview state
+  let pageCount = $state(0);
+  let pageSvgs = $state({}); // { [index]: svgString }
+  let rendering = $state(false); // true during compile
   let renderError = $state(null);
+  let lastTiming = $state(null); // CompileTiming from Rust
+  let fetchingPages = $state(new Set()); // page indices currently being fetched
+  const PAGE_BUFFER = 3; // pages to pre-fetch in each direction
 
   // DnD items for front and back sections
   let frontItems = $state([]);
@@ -129,37 +133,107 @@
   // Preview scroll ref
   let previewContainer;
 
-  // Convert PNG byte arrays from Rust into blob URLs for <img> display.
-  function pngBytesToBlobUrls(pngArrays) {
-    // Revoke old URLs to prevent memory leaks
-    for (const url of previewPages) {
-      URL.revokeObjectURL(url);
-    }
-    return pngArrays.map(bytes => {
-      const arr = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-      const blob = new Blob([arr], { type: 'image/png' });
-      return URL.createObjectURL(blob);
-    });
-  }
-
-  async function renderPreview() {
+  async function compileAndShow() {
     if (!activeProfileId) return;
     if (isEbook) {
-      previewPages = [];
+      pageCount = 0;
+      pageSvgs = {};
+      lastTiming = null;
       return;
     }
     rendering = true;
     renderError = null;
+    pageSvgs = {};
+    fetchingPages = new Set();
     try {
-      const pngs = await renderPreviewPages(activeProfileId);
-      previewPages = pngBytesToBlobUrls(pngs);
+      const result = await compilePreview(activeProfileId);
+      pageCount = result.page_count;
+      lastTiming = result.timing;
+
+      console.log(
+        `[format] Compile: ${result.timing.total_ms.toFixed(0)}ms | ` +
+        `db:${result.timing.db_load_ms.toFixed(0)} ydoc:${result.timing.ydoc_extract_ms.toFixed(0)} ` +
+        `markup:${result.timing.markup_build_ms.toFixed(0)} compile:${result.timing.typst_compile_ms.toFixed(0)} | ` +
+        `${result.page_count} pages, ${result.timing.chapter_count} chapters`
+      );
     } catch (e) {
-      console.error('[format] render failed:', e);
+      console.error('[format] compile failed:', e);
       renderError = String(e);
-      previewPages = [];
+      pageCount = 0;
+      lastTiming = null;
     } finally {
       rendering = false;
     }
+
+    // Fetch initial visible pages
+    if (pageCount > 0) {
+      fetchPagesAround(0);
+    }
+  }
+
+  async function fetchPagesAround(centerIndex) {
+    const start = Math.max(0, centerIndex - PAGE_BUFFER);
+    const end = Math.min(pageCount - 1, centerIndex + PAGE_BUFFER);
+    const needed = [];
+    for (let i = start; i <= end; i++) {
+      if (!pageSvgs[i] && !fetchingPages.has(i)) {
+        needed.push(i);
+      }
+    }
+    if (needed.length === 0) return;
+
+    // Mark as fetching
+    const newFetching = new Set(fetchingPages);
+    for (const i of needed) newFetching.add(i);
+    fetchingPages = newFetching;
+
+    try {
+      const t0 = performance.now();
+      const result = await getPreviewPagesSvg(needed);
+      const ms = performance.now() - t0;
+      console.log(`[format] SVG batch: ${needed.length} pages in ${ms.toFixed(0)}ms (export: ${result.svg_export_ms.toFixed(0)}ms)`);
+
+      // Merge into pageSvgs
+      const updated = { ...pageSvgs };
+      for (const entry of result.pages) {
+        updated[entry.index] = entry.svg;
+      }
+      pageSvgs = updated;
+    } catch (e) {
+      console.error('[format] svg fetch failed:', e);
+    } finally {
+      const cleared = new Set(fetchingPages);
+      for (const i of needed) cleared.delete(i);
+      fetchingPages = cleared;
+    }
+  }
+
+  // Scroll-based lazy loading
+  let scrollTimer = null;
+  function handlePreviewScroll() {
+    clearTimeout(scrollTimer);
+    scrollTimer = setTimeout(() => {
+      if (!previewContainer || pageCount === 0) return;
+      const containerRect = previewContainer.getBoundingClientRect();
+      const centerY = containerRect.top + containerRect.height / 2;
+
+      // Find which page is closest to center of viewport
+      let closestIndex = 0;
+      let closestDist = Infinity;
+      for (let i = 0; i < pageCount; i++) {
+        const el = document.getElementById(`preview-page-${i}`);
+        if (!el) continue;
+        const rect = el.getBoundingClientRect();
+        const pageCenterY = rect.top + rect.height / 2;
+        const dist = Math.abs(pageCenterY - centerY);
+        if (dist < closestDist) {
+          closestDist = dist;
+          closestIndex = i;
+        }
+      }
+
+      fetchPagesAround(closestIndex);
+    }, 100);
   }
 
   async function loadData() {
@@ -185,7 +259,7 @@
     loading = false;
 
     // Kick off rendering after load
-    renderPreview();
+    compileAndShow();
   }
 
   function syncPresetLabel(prof) {
@@ -199,7 +273,7 @@
     activeProfileId = id;
     formatPages = await getFormatPages(id);
     syncPresetLabel(profiles.find(p => p.id === id));
-    renderPreview();
+    compileAndShow();
   }
 
   async function selectTarget(preset, type) {
@@ -215,7 +289,7 @@
     );
     profiles = await getFormatProfiles();
     selectedPresetLabel = preset.label;
-    renderPreview();
+    compileAndShow();
   }
 
   async function handleAddPage(position) {
@@ -271,8 +345,9 @@
   </div>
 {:else}
   <div class="format-layout">
-    <!-- Center: Page preview -->
-    <div class="preview-area" bind:this={previewContainer}>
+    <!-- Center: Preview + timing -->
+    <div class="preview-column">
+    <div class="preview-area" bind:this={previewContainer} onscroll={handlePreviewScroll}>
       {#if isEbook}
         <div class="ebook-placeholder">
           <i class="bi bi-phone" style="font-size: 2rem;"></i>
@@ -282,30 +357,55 @@
       {:else if rendering}
         <div class="render-loading">
           <div class="loader"></div>
-          <p>Rendering pages...</p>
+          <p>Compiling pages...</p>
         </div>
       {:else if renderError}
         <div class="render-error">
           <i class="bi bi-exclamation-triangle"></i>
           <p>Rendering failed</p>
           <pre class="error-detail">{renderError}</pre>
-          <button class="retry-btn" onclick={renderPreview}>Retry</button>
+          <button class="retry-btn" onclick={compileAndShow}>Retry</button>
         </div>
-      {:else if previewPages.length === 0}
+      {:else if pageCount === 0}
         <div class="render-loading">
           <p>No pages to display</p>
         </div>
       {:else}
         <div class="preview-scroll">
-          {#each previewPages as url, i}
+          {#each Array(pageCount) as _, i}
             <div class="preview-page-wrap" id="preview-page-{i}">
-              <img class="preview-page-img" src={url} alt="Page {i + 1}" draggable="false" />
+              {#if pageSvgs[i]}
+                <div class="preview-page-svg">
+                  {@html pageSvgs[i]}
+                </div>
+              {:else}
+                <div class="preview-page-placeholder" style="aspect-ratio: {activeProfile?.trim_width_in ?? 6} / {activeProfile?.trim_height_in ?? 9};">
+                  {#if fetchingPages.has(i)}
+                    <div class="placeholder-spinner"></div>
+                  {/if}
+                </div>
+              {/if}
               <div class="page-number">{i + 1}</div>
             </div>
           {/each}
         </div>
       {/if}
     </div>
+
+    {#if lastTiming}
+      <div class="timing-bar">
+        <span title="Total compile time">{lastTiming.total_ms.toFixed(0)}ms</span>
+        <span class="timing-sep">|</span>
+        <span title="DB load">db:{lastTiming.db_load_ms.toFixed(0)}</span>
+        <span title="Y.Doc text extraction">ydoc:{lastTiming.ydoc_extract_ms.toFixed(0)}</span>
+        <span title="Typst markup generation">markup:{lastTiming.markup_build_ms.toFixed(0)}</span>
+        <span title="Typst compilation">compile:{lastTiming.typst_compile_ms.toFixed(0)}</span>
+        <span class="timing-sep">|</span>
+        <span>{lastTiming.page_count} pages</span>
+        <span>{Object.keys(pageSvgs).length} loaded</span>
+      </div>
+    {/if}
+    </div><!-- end preview-column -->
 
     <!-- Resize handle -->
     <div
@@ -463,6 +563,10 @@
     display: flex; height: 100%; overflow: hidden;
   }
 
+  .preview-column {
+    flex: 1; display: flex; flex-direction: column; min-width: 0; overflow: hidden;
+  }
+
   /* Preview area */
   .preview-area {
     flex: 1; overflow-y: auto; overflow-x: auto;
@@ -477,12 +581,27 @@
   .preview-page-wrap {
     display: flex; flex-direction: column; align-items: center; gap: 0.4rem;
   }
-  .preview-page-img {
-    display: block;
+  .preview-page-svg {
     box-shadow: 0 2px 12px rgba(0,0,0,0.12), 0 0 0 1px rgba(0,0,0,0.06);
     background: #fff;
+    line-height: 0;
+  }
+  .preview-page-svg :global(svg) {
+    display: block;
     max-width: 100%;
     height: auto;
+  }
+  .preview-page-placeholder {
+    width: 432px; /* 6in * 72 fallback, overridden by aspect-ratio */
+    background: #f5f3f0;
+    border: 1px dashed var(--iwe-border);
+    box-shadow: 0 2px 12px rgba(0,0,0,0.06);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .placeholder-spinner {
+    width: 20px; height: 20px;
+    border: 2px solid var(--iwe-border); border-top-color: var(--iwe-accent);
+    border-radius: 50%; animation: spin 0.8s linear infinite;
   }
   .page-number {
     font-family: var(--iwe-font-ui); font-size: 0.7rem;
@@ -523,6 +642,16 @@
     color: var(--iwe-accent); cursor: pointer; transition: all 150ms;
   }
   .retry-btn:hover { background: var(--iwe-accent); color: #fff; }
+
+  /* Timing bar */
+  .timing-bar {
+    flex-shrink: 0; display: flex; align-items: center; gap: 0.5rem;
+    padding: 0.2rem 0.8rem; height: 24px;
+    background: var(--iwe-bg-warm); border-top: 1px solid var(--iwe-border);
+    font-family: var(--iwe-font-ui); font-size: 0.68rem;
+    color: var(--iwe-text-muted); white-space: nowrap; overflow-x: auto;
+  }
+  .timing-sep { color: var(--iwe-border); }
 
   /* Resize handle */
   .resize-handle {

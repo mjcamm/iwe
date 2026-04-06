@@ -1161,6 +1161,7 @@ pub fn run() {
             db_path: Mutex::new(None),
         })
         .manage(semantic::SemanticState::new())
+        .manage(format::FormatState::new())
         .manage(spell_state)
         .manage(synonym_state)
         .plugin(tauri_plugin_opener::init())
@@ -1309,8 +1310,8 @@ pub fn run() {
             semantic::rebuild_semantic_index,
             semantic::semantic_search,
             semantic::get_semantic_index_status,
-            format::render_preview_pages,
-            format::render_single_page,
+            format::compile_preview,
+            format::get_preview_pages_svg,
             get_format_profiles,
             get_format_profile,
             add_format_profile,

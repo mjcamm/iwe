@@ -730,10 +730,10 @@ export async function reorderFormatPages(ids) {
   return invoke('reorder_format_pages', { ids });
 }
 
-export async function renderPreviewPages(profileId) {
-  return invoke('render_preview_pages', { profileId });
+export async function compilePreview(profileId) {
+  return invoke('compile_preview', { profileId });
 }
 
-export async function renderSinglePage(profileId, pageIndex) {
-  return invoke('render_single_page', { profileId, pageIndex });
+export async function getPreviewPagesSvg(pageIndices) {
+  return invoke('get_preview_pages_svg', { pageIndices });
 }
