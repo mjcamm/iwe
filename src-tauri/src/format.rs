@@ -15,16 +15,17 @@ static FONT_BOLD: &[u8] = include_bytes!("../fonts/LiberationSerif-Bold.ttf");
 static FONT_ITALIC: &[u8] = include_bytes!("../fonts/LiberationSerif-Italic.ttf");
 static FONT_BOLD_ITALIC: &[u8] = include_bytes!("../fonts/LiberationSerif-BoldItalic.ttf");
 
-/// Minimal Typst World implementation with embedded fonts, no filesystem access.
+/// Minimal Typst World implementation with embedded fonts and an in-memory image store.
 struct IweWorld {
     library: LazyHash<Library>,
     book: LazyHash<FontBook>,
     fonts: Vec<Font>,
     source: Source,
+    images: std::collections::HashMap<String, Vec<u8>>,
 }
 
 impl IweWorld {
-    fn new(markup: String) -> Self {
+    fn new(markup: String, images: std::collections::HashMap<String, Vec<u8>>) -> Self {
         // Load embedded fonts
         let font_data: Vec<&[u8]> = vec![FONT_REGULAR, FONT_BOLD, FONT_ITALIC, FONT_BOLD_ITALIC];
         let fonts: Vec<Font> = font_data
@@ -43,6 +44,7 @@ impl IweWorld {
             book: LazyHash::new(book),
             fonts,
             source,
+            images,
         }
     }
 }
@@ -69,7 +71,14 @@ impl typst::World for IweWorld {
     }
 
     fn file(&self, id: FileId) -> FileResult<Bytes> {
-        Err(FileError::NotFound(id.vpath().as_rootless_path().into()))
+        // Match by string path against the embedded image store
+        let vpath = id.vpath();
+        let path = vpath.as_rooted_path();
+        let key = path.to_string_lossy().replace('\\', "/");
+        if let Some(bytes) = self.images.get(&key) {
+            return Ok(Bytes::new(bytes.clone()));
+        }
+        Err(FileError::NotFound(vpath.as_rootless_path().into()))
     }
 
     fn font(&self, index: usize) -> Option<Font> {
@@ -98,39 +107,318 @@ fn escape_typst(text: &str) -> String {
     out
 }
 
-/// Build a Typst markup string for front matter page.
-fn build_front_matter_page(page: &FormatPage) -> String {
-    let mut out = String::new();
-    let title = escape_typst(&page.title);
-    let content = escape_typst(&page.content);
+/// Image storage collected during PM JSON conversion.
+/// Maps a virtual file path to raw image bytes. Typst's World serves these on demand.
+type ImageMap = std::collections::HashMap<String, Vec<u8>>;
 
+/// Convert a ProseMirror/TipTap JSON document to Typst markup.
+/// Supports paragraphs, headings, text marks (bold/italic/underline/strike/font-size),
+/// text alignment, and embedded images.
+/// Image bytes are added to `images` and referenced from markup as virtual paths.
+fn pm_json_to_typst(json_str: &str, images: &mut ImageMap) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(json_str).ok()?;
+    if !value.is_object() {
+        return None;
+    }
+    let mut out = String::new();
+    if let Some(content) = value.get("content").and_then(|c| c.as_array()) {
+        for node in content {
+            convert_pm_node(node, &mut out, images);
+        }
+    }
+    Some(out)
+}
+
+fn convert_pm_node(node: &serde_json::Value, out: &mut String, images: &mut ImageMap) {
+    let node_type = node.get("type").and_then(|t| t.as_str()).unwrap_or("");
+    let children = node.get("content").and_then(|c| c.as_array());
+
+    match node_type {
+        "paragraph" => {
+            let align = node
+                .get("attrs")
+                .and_then(|a| a.get("textAlign"))
+                .and_then(|t| t.as_str());
+            let inner = collect_pm_inline(children);
+            if inner.trim().is_empty() {
+                out.push_str("#v(1em)\n\n");
+                return;
+            }
+            // The enclosing format page already disables first-line-indent,
+            // so we only need to handle alignment here.
+            match align {
+                Some("center") => out.push_str(&format!("#align(center)[{}]\n\n", inner)),
+                Some("right") => out.push_str(&format!("#align(right)[{}]\n\n", inner)),
+                Some("justify") => out.push_str(&format!("#par(justify: true)[{}]\n\n", inner)),
+                _ => out.push_str(&format!("{}\n\n", inner)),
+            }
+        }
+        "heading" => {
+            let level = node
+                .get("attrs")
+                .and_then(|a| a.get("level"))
+                .and_then(|l| l.as_i64())
+                .unwrap_or(2)
+                .clamp(1, 6) as usize;
+            let align = node
+                .get("attrs")
+                .and_then(|a| a.get("textAlign"))
+                .and_then(|t| t.as_str());
+            let inner = collect_pm_inline(children);
+            let heading = format!("#heading(level: {}, outlined: false)[{}]\n\n", level, inner);
+            match align {
+                Some("center") => out.push_str(&format!("#align(center)[{}]\n", heading)),
+                Some("right") => out.push_str(&format!("#align(right)[{}]\n", heading)),
+                _ => out.push_str(&heading),
+            }
+        }
+        "horizontalRule" => {
+            out.push_str("#line(length: 100%)\n\n");
+        }
+        "hardBreak" => {
+            out.push_str(" \\\n");
+        }
+        "image" => {
+            let attrs = node.get("attrs");
+            let src = attrs.and_then(|a| a.get("src")).and_then(|s| s.as_str());
+            let width = attrs
+                .and_then(|a| a.get("width"))
+                .and_then(|w| w.as_str());
+            if let Some(src) = src {
+                if let Some((path, ext)) = ingest_image(src, images) {
+                    let width_attr = match width {
+                        Some(w) if !w.is_empty() => format!(", width: {}", normalize_width(w)),
+                        _ => String::new(),
+                    };
+                    let _ = ext; // currently unused; could be used for format hint
+                    out.push_str(&format!(
+                        "#align(center)[#image(\"{}\"{})]\n\n",
+                        path, width_attr
+                    ));
+                }
+            }
+        }
+        _ => {
+            // Unknown node — recurse into children
+            if let Some(children) = children {
+                for child in children {
+                    convert_pm_node(child, out, images);
+                }
+            }
+        }
+    }
+}
+
+/// Decode a data URL or pass-through a virtual path. Returns (typst_path, extension).
+fn ingest_image(src: &str, images: &mut ImageMap) -> Option<(String, String)> {
+    if let Some(rest) = src.strip_prefix("data:") {
+        // data:image/png;base64,XXXXX
+        let (meta, data) = rest.split_once(',')?;
+        let mime = meta.split(';').next().unwrap_or("");
+        let ext = match mime {
+            "image/png" => "png",
+            "image/jpeg" | "image/jpg" => "jpg",
+            "image/gif" => "gif",
+            "image/webp" => "webp",
+            "image/svg+xml" => "svg",
+            _ => "png",
+        };
+        // Only handle base64 for now
+        if !meta.contains("base64") {
+            return None;
+        }
+        let bytes = base64_decode(data)?;
+        // Use a hash so identical images dedupe
+        let hash = simple_hash(&bytes);
+        let path = format!("/iwe-img-{:x}.{}", hash, ext);
+        images.entry(path.clone()).or_insert(bytes);
+        Some((path, ext.to_string()))
+    } else {
+        None
+    }
+}
+
+/// Minimal base64 decoder. Avoids pulling in a dep for one use.
+fn base64_decode(input: &str) -> Option<Vec<u8>> {
+    let cleaned: String = input.chars().filter(|c| !c.is_whitespace()).collect();
+    let mut out = Vec::with_capacity(cleaned.len() * 3 / 4);
+    let mut buf: u32 = 0;
+    let mut bits: u32 = 0;
+    for c in cleaned.chars() {
+        let v: u32 = match c {
+            'A'..='Z' => (c as u32) - ('A' as u32),
+            'a'..='z' => (c as u32) - ('a' as u32) + 26,
+            '0'..='9' => (c as u32) - ('0' as u32) + 52,
+            '+' | '-' => 62,
+            '/' | '_' => 63,
+            '=' => break,
+            _ => return None,
+        };
+        buf = (buf << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((buf >> bits) & 0xff) as u8);
+        }
+    }
+    Some(out)
+}
+
+/// FNV-1a hash for image deduplication and stable virtual paths.
+fn simple_hash(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+fn normalize_width(w: &str) -> String {
+    // Accept "300px", "50%", "3in" etc. Pass through if valid Typst length.
+    if w.ends_with('%') {
+        w.to_string()
+    } else if w.ends_with("px") {
+        // Convert px to pt approximately (1px = 0.75pt)
+        if let Ok(n) = w.trim_end_matches("px").parse::<f64>() {
+            format!("{}pt", n * 0.75)
+        } else {
+            "auto".to_string()
+        }
+    } else {
+        w.to_string()
+    }
+}
+
+fn collect_pm_inline(children: Option<&Vec<serde_json::Value>>) -> String {
+    let mut out = String::new();
+    let Some(children) = children else { return out; };
+    for child in children {
+        let node_type = child.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        match node_type {
+            "text" => {
+                if let Some(text) = child.get("text").and_then(|t| t.as_str()) {
+                    out.push_str(&apply_pm_marks(text, child.get("marks")));
+                }
+            }
+            "hardBreak" => {
+                out.push_str(" \\\n");
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn apply_pm_marks(text: &str, marks: Option<&serde_json::Value>) -> String {
+    let mut s = escape_typst(text);
+    let Some(marks) = marks.and_then(|m| m.as_array()) else { return s; };
+
+    // Track the textStyle font size separately so we can wrap once with #text(size:)
+    let mut font_size: Option<String> = None;
+
+    for mark in marks {
+        let mtype = mark.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        match mtype {
+            "bold" | "strong" => s = format!("*{}*", s),
+            "italic" | "em" => s = format!("_{}_", s),
+            "underline" => s = format!("#underline[{}]", s),
+            "strike" | "s" => s = format!("#strike[{}]", s),
+            "textStyle" => {
+                if let Some(size) = mark
+                    .get("attrs")
+                    .and_then(|a| a.get("fontSize"))
+                    .and_then(|f| f.as_str())
+                {
+                    // Accept "12pt", "14pt", "16px" — pass through to Typst
+                    font_size = Some(size.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(size) = font_size {
+        s = format!("#text(size: {})[{}]", size, s);
+    }
+    s
+}
+
+/// Render a page's content field — JSON if it parses, otherwise plain text.
+/// Any embedded images are added to the shared image map.
+fn render_page_content(content: &str, images: &mut ImageMap) -> String {
+    if content.trim().is_empty() {
+        return String::new();
+    }
+    // Try ProseMirror JSON first
+    if content.trim_start().starts_with('{') {
+        if let Some(typst) = pm_json_to_typst(content, images) {
+            return typst;
+        }
+    }
+    // Fallback: treat as plain text with paragraph breaks
+    let mut out = String::new();
+    for para in content.split("\n\n") {
+        let trimmed = para.trim();
+        if !trimmed.is_empty() {
+            out.push_str(&format!("{}\n\n", escape_typst(trimmed)));
+        }
+    }
+    out
+}
+
+/// Build a Typst markup string for a front/back matter page.
+/// If the page has rich content (PM JSON), render it directly.
+/// Otherwise apply role-based defaults using the title.
+fn build_front_matter_page(page: &FormatPage, images: &mut ImageMap) -> String {
+    let mut out = String::new();
+    let title_escaped = escape_typst(&page.title);
+    let content_typst = render_page_content(&page.content, images);
+    let has_content = !content_typst.trim().is_empty();
+
+    // If user has authored content, render it directly without role-based wrapping.
+    // Wrap in a content block that resets par settings — format pages should never
+    // inherit the chapter body's first-line indent.
+    if has_content {
+        out.push_str("#[\n");
+        out.push_str("#set par(first-line-indent: 0em, justify: false)\n");
+        // Apply vertical alignment using #v(1fr) gutters
+        match page.vertical_align.as_str() {
+            "center" => {
+                out.push_str("#v(1fr)\n");
+                out.push_str(&content_typst);
+                out.push_str("#v(1fr)\n");
+            }
+            "bottom" => {
+                out.push_str("#v(1fr)\n");
+                out.push_str(&content_typst);
+            }
+            _ => {
+                // top (default)
+                out.push_str(&content_typst);
+            }
+        }
+        out.push_str("]\n");
+        return out;
+    }
+
+    // Empty content — apply role-based default placeholders
     match page.page_role.as_str() {
         "title" => {
             out.push_str("#align(center + horizon)[\n");
-            out.push_str(&format!("  #text(size: 24pt, weight: \"bold\")[{}]\n", title));
-            if !content.is_empty() {
-                out.push_str(&format!("  #v(1em)\n  {}\n", content));
-            }
+            out.push_str(&format!("  #text(size: 24pt, weight: \"bold\")[{}]\n", title_escaped));
             out.push_str("]\n");
         }
         "copyright" => {
             out.push_str("#set text(size: 8pt)\n");
             out.push_str("#align(bottom)[\n");
-            if !content.is_empty() {
-                out.push_str(&format!("  {}\n", content));
-            } else {
-                out.push_str(&format!("  {}\n", title));
-            }
+            out.push_str(&format!("  {}\n", title_escaped));
             out.push_str("]\n");
         }
         "dedication" => {
             out.push_str("#align(center + horizon)[\n");
             out.push_str("#set text(style: \"italic\")\n");
-            if !content.is_empty() {
-                out.push_str(&format!("  {}\n", content));
-            } else {
-                out.push_str(&format!("  {}\n", title));
-            }
+            out.push_str(&format!("  {}\n", title_escaped));
             out.push_str("]\n");
         }
         "toc" => {
@@ -139,24 +427,13 @@ fn build_front_matter_page(page: &FormatPage) -> String {
         }
         "half-title" => {
             out.push_str("#align(center + horizon)[\n");
-            out.push_str(&format!("  #text(size: 18pt)[{}]\n", title));
+            out.push_str(&format!("  #text(size: 18pt)[{}]\n", title_escaped));
             out.push_str("]\n");
         }
         _ => {
-            // Generic: centered title + content
             out.push_str("#align(center)[\n");
-            out.push_str(&format!("  #text(size: 16pt, weight: \"bold\")[{}]\n", title));
+            out.push_str(&format!("  #text(size: 16pt, weight: \"bold\")[{}]\n", title_escaped));
             out.push_str("]\n");
-            if !content.is_empty() {
-                out.push_str("#v(1em)\n");
-                // Render content as paragraphs
-                for para in content.split("\\n\\n") {
-                    let trimmed = para.trim();
-                    if !trimmed.is_empty() {
-                        out.push_str(&format!("{}\n\n", trimmed));
-                    }
-                }
-            }
         }
     }
 
@@ -164,13 +441,16 @@ fn build_front_matter_page(page: &FormatPage) -> String {
 }
 
 /// Build complete Typst markup for the entire book.
+/// Returns the markup string, section ID list, and image map for embedded images.
 fn build_typst_markup(
     profile: &FormatProfile,
     front_pages: &[FormatPage],
-    chapters: &[(String, String)], // (title, text with \n\n paragraph breaks)
+    chapters: &[(i64, String, String)], // (chapter_id, title, text)
     back_pages: &[FormatPage],
-) -> String {
+) -> (String, Vec<String>, ImageMap) {
     let mut doc = String::new();
+    let mut section_ids: Vec<String> = Vec::new();
+    let mut images: ImageMap = std::collections::HashMap::new();
 
     // Page setup
     doc.push_str(&format!(
@@ -198,6 +478,12 @@ fn build_typst_markup(
         leading_em,
     ));
 
+    // Helper to emit an invisible labeled anchor for a section.
+    // We use #metadata wrapped with a label so the introspector can find it.
+    let emit_anchor = |out: &mut String, id: &str| {
+        out.push_str(&format!("#[#metadata(none) <{}>]\n", id));
+    };
+
     // ---- Front matter ----
     // Front matter uses roman numeral page numbering and no heading numbering
     if !front_pages.is_empty() {
@@ -205,7 +491,10 @@ fn build_typst_markup(
         doc.push_str("#counter(page).update(1)\n\n");
 
         for page in front_pages {
-            doc.push_str(&build_front_matter_page(page));
+            let sid = format!("iwe-fp-{}", page.id);
+            emit_anchor(&mut doc, &sid);
+            section_ids.push(sid);
+            doc.push_str(&build_front_matter_page(page, &mut images));
             doc.push_str("#pagebreak()\n\n");
         }
     }
@@ -215,10 +504,14 @@ fn build_typst_markup(
     doc.push_str("#set page(numbering: \"1\")\n");
     doc.push_str("#counter(page).update(1)\n\n");
 
-    for (i, (title, text)) in chapters.iter().enumerate() {
+    for (i, (chapter_id, title, text)) in chapters.iter().enumerate() {
         if i > 0 {
             doc.push_str("#pagebreak()\n\n");
         }
+
+        let sid = format!("iwe-ch-{}", chapter_id);
+        emit_anchor(&mut doc, &sid);
+        section_ids.push(sid);
 
         // Chapter heading — centered, no indent for first paragraph after
         let escaped_title = escape_typst(title);
@@ -249,7 +542,10 @@ fn build_typst_markup(
     if !back_pages.is_empty() {
         doc.push_str("#pagebreak()\n\n");
         for page in back_pages {
-            doc.push_str(&build_front_matter_page(page));
+            let sid = format!("iwe-fp-{}", page.id);
+            emit_anchor(&mut doc, &sid);
+            section_ids.push(sid);
+            doc.push_str(&build_front_matter_page(page, &mut images));
             doc.push_str("#pagebreak()\n\n");
         }
     }
@@ -261,8 +557,7 @@ fn build_typst_markup(
     );
 
     // Prepend heading style after page/font setup
-    // Actually, let's insert it at the beginning after the set rules
-    format!("{}{}", heading_style, doc)
+    (format!("{}{}", heading_style, doc), section_ids, images)
 }
 
 // ---- Compile & SVG render ----
@@ -271,8 +566,8 @@ use std::sync::Mutex;
 use std::time::Instant;
 use serde::Serialize;
 
-fn compile_document(markup: &str) -> Result<PagedDocument, String> {
-    let world = IweWorld::new(markup.to_string());
+fn compile_document(markup: &str, images: ImageMap) -> Result<PagedDocument, String> {
+    let world = IweWorld::new(markup.to_string(), images);
     let warned = typst::compile::<PagedDocument>(&world);
     match warned.output {
         Ok(doc) => Ok(doc),
@@ -318,6 +613,8 @@ pub struct CompileTiming {
 pub struct CompileResult {
     pub page_count: usize,
     pub timing: CompileTiming,
+    /// section_id -> 0-based page index
+    pub section_pages: std::collections::HashMap<String, usize>,
 }
 
 
@@ -350,6 +647,7 @@ pub fn compile_preview(
                 typst_compile_ms: 0.0, total_ms: 0.0, page_count: 0,
                 chapter_count: 0, markup_len: 0,
             },
+            section_pages: std::collections::HashMap::new(),
         });
     }
 
@@ -370,10 +668,10 @@ pub fn compile_preview(
 
     // 2. Y.Doc text extraction
     let t = Instant::now();
-    let mut chapters: Vec<(String, String)> = Vec::new();
+    let mut chapters: Vec<(i64, String, String)> = Vec::new();
     for ch in &chapters_raw {
         let text = ydoc::extract_text_with_breaks_from_bytes(&ch.content);
-        chapters.push((ch.title.clone(), text));
+        chapters.push((ch.id, ch.title.clone(), text));
     }
     let ydoc_extract_ms = t.elapsed().as_secs_f64() * 1000.0;
     let chapter_count = chapters.len();
@@ -383,22 +681,26 @@ pub fn compile_preview(
 
     // 3. Markup generation
     let t = Instant::now();
-    let markup = build_typst_markup(&profile, &front, &chapters, &back);
+    let (markup, section_ids, images) = build_typst_markup(&profile, &front, &chapters, &back);
     let markup_build_ms = t.elapsed().as_secs_f64() * 1000.0;
     let markup_len = markup.len();
 
     // 4. Typst compilation
     let t = Instant::now();
-    let document = compile_document(&markup)?;
+    let document = compile_document(&markup, images)?;
     let typst_compile_ms = t.elapsed().as_secs_f64() * 1000.0;
 
     let page_count = document.pages.len();
+
+    // 5. Resolve section labels to page numbers
+    let section_pages = resolve_section_pages(&document, &section_ids);
+
     let total_ms = total_start.elapsed().as_secs_f64() * 1000.0;
 
     log::info!(
-        "[format] compile: {}ms total | db:{}ms ydoc:{}ms markup:{}ms compile:{}ms | {} pages, {} chapters, {}KB markup",
+        "[format] compile: {}ms total | db:{}ms ydoc:{}ms markup:{}ms compile:{}ms | {} pages, {} chapters, {} sections resolved, {}KB markup",
         total_ms as u32, db_load_ms as u32, ydoc_extract_ms as u32, markup_build_ms as u32,
-        typst_compile_ms as u32, page_count, chapter_count, markup_len / 1024,
+        typst_compile_ms as u32, page_count, chapter_count, section_pages.len(), markup_len / 1024,
     );
 
     // Cache the compiled document
@@ -417,7 +719,29 @@ pub fn compile_preview(
             chapter_count,
             markup_len,
         },
+        section_pages,
     })
+}
+
+/// Walk the introspector and resolve each section label to a 0-based page index.
+fn resolve_section_pages(
+    document: &PagedDocument,
+    section_ids: &[String],
+) -> std::collections::HashMap<String, usize> {
+    use typst::foundations::Label;
+    let mut map = std::collections::HashMap::new();
+    for sid in section_ids {
+        let Some(label) = Label::new(typst::utils::PicoStr::intern(sid)) else {
+            continue;
+        };
+        if let Ok(content) = document.introspector.query_label(label) {
+            if let Some(loc) = content.location() {
+                let page = document.introspector.page(loc).get();
+                map.insert(sid.clone(), page - 1); // 0-indexed
+            }
+        }
+    }
+    map
 }
 
 /// Export a single page to SVG from the cached document (called by URI protocol handler).

@@ -335,6 +335,7 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             position TEXT NOT NULL DEFAULT 'front',
             sort_order INTEGER NOT NULL DEFAULT 0,
             include_in TEXT NOT NULL DEFAULT 'both',
+            vertical_align TEXT NOT NULL DEFAULT 'top',
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
 
@@ -388,6 +389,17 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             DROP TABLE format_pages;
             ALTER TABLE format_pages_new RENAME TO format_pages;
         ")?;
+    }
+
+    // Migration: add vertical_align column if missing (must run after the profile_id
+    // migration above, which may recreate the table without this column).
+    let has_vertical_align: bool = conn
+        .prepare("SELECT vertical_align FROM format_pages LIMIT 0")
+        .is_ok();
+    if !has_vertical_align {
+        conn.execute_batch(
+            "ALTER TABLE format_pages ADD COLUMN vertical_align TEXT NOT NULL DEFAULT 'top';",
+        )?;
     }
 
     Ok(())
@@ -1725,6 +1737,7 @@ pub struct FormatPage {
     pub position: String,
     pub sort_order: i64,
     pub include_in: String,
+    pub vertical_align: String,
     pub created_at: String,
 }
 
@@ -1762,12 +1775,13 @@ fn read_format_page(row: &rusqlite::Row) -> rusqlite::Result<FormatPage> {
         position: row.get(4)?,
         sort_order: row.get(5)?,
         include_in: row.get(6)?,
-        created_at: row.get(7)?,
+        vertical_align: row.get(7)?,
+        created_at: row.get(8)?,
     })
 }
 
 const PROFILE_COLS: &str = "id, name, target_type, trim_width_in, trim_height_in, margin_top_in, margin_bottom_in, margin_outside_in, margin_inside_in, font_body, font_size_pt, line_spacing, sort_order, created_at";
-const FORMAT_PAGE_COLS: &str = "id, page_role, title, content, position, sort_order, include_in, created_at";
+const FORMAT_PAGE_COLS: &str = "id, page_role, title, content, position, sort_order, include_in, vertical_align, created_at";
 
 pub fn list_format_profiles(conn: &Connection) -> rusqlite::Result<Vec<FormatProfile>> {
     let mut stmt = conn.prepare(&format!("SELECT {} FROM format_profiles ORDER BY sort_order ASC", PROFILE_COLS))?;
@@ -1858,6 +1872,71 @@ pub fn seed_default_profiles(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// Paste copyable settings from a JSON object into a target profile.
+/// Uses PRAGMA table_info to discover columns at runtime — no maintenance when adding fields.
+/// Excluded fields (target/dimensions/identity) are protected so the target keeps its own format.
+pub fn paste_format_profile_settings(
+    conn: &Connection,
+    target_id: i64,
+    settings: serde_json::Map<String, serde_json::Value>,
+) -> rusqlite::Result<()> {
+    const EXCLUDED: &[&str] = &[
+        "id", "name", "target_type",
+        "trim_width_in", "trim_height_in",
+        "sort_order", "created_at",
+    ];
+
+    // Discover current columns
+    let mut stmt = conn.prepare("PRAGMA table_info(format_profiles)")?;
+    let columns: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(|r| r.ok())
+        .filter(|c| !EXCLUDED.contains(&c.as_str()))
+        .collect();
+
+    // Build SET clause for columns that are present in the JSON input
+    let mut set_clauses: Vec<String> = Vec::new();
+    let mut values: Vec<rusqlite::types::Value> = Vec::new();
+    for col in &columns {
+        if let Some(v) = settings.get(col) {
+            set_clauses.push(format!("{} = ?", col));
+            values.push(json_to_sqlite_value(v));
+        }
+    }
+
+    if set_clauses.is_empty() {
+        return Ok(());
+    }
+
+    let sql = format!(
+        "UPDATE format_profiles SET {} WHERE id = ?",
+        set_clauses.join(", ")
+    );
+    values.push(rusqlite::types::Value::Integer(target_id));
+
+    conn.execute(&sql, rusqlite::params_from_iter(values))?;
+    Ok(())
+}
+
+fn json_to_sqlite_value(v: &serde_json::Value) -> rusqlite::types::Value {
+    use rusqlite::types::Value;
+    match v {
+        serde_json::Value::Null => Value::Null,
+        serde_json::Value::Bool(b) => Value::Integer(if *b { 1 } else { 0 }),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Value::Integer(i)
+            } else if let Some(f) = n.as_f64() {
+                Value::Real(f)
+            } else {
+                Value::Null
+            }
+        }
+        serde_json::Value::String(s) => Value::Text(s.clone()),
+        _ => Value::Text(v.to_string()),
+    }
+}
+
 /// Duplicate a profile, including all its exclusions.
 pub fn duplicate_format_profile(
     conn: &Connection,
@@ -1922,10 +2001,11 @@ pub fn update_format_page(
     content: &str,
     position: &str,
     include_in: &str,
+    vertical_align: &str,
 ) -> rusqlite::Result<()> {
     conn.execute(
-        "UPDATE format_pages SET page_role=?1, title=?2, content=?3, position=?4, include_in=?5 WHERE id=?6",
-        params![page_role, title, content, position, include_in, id],
+        "UPDATE format_pages SET page_role=?1, title=?2, content=?3, position=?4, include_in=?5, vertical_align=?6 WHERE id=?7",
+        params![page_role, title, content, position, include_in, vertical_align, id],
     )?;
     Ok(())
 }

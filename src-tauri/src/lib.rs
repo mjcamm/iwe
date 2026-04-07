@@ -1169,10 +1169,10 @@ fn add_format_page(state: tauri::State<'_, AppState>, page_role: String, title: 
 }
 
 #[tauri::command]
-fn update_format_page(state: tauri::State<'_, AppState>, id: i64, page_role: String, title: String, content: String, position: String, include_in: String) -> Result<(), String> {
+fn update_format_page(state: tauri::State<'_, AppState>, id: i64, page_role: String, title: String, content: String, position: String, include_in: String, vertical_align: String) -> Result<(), String> {
     let guard = state.db.lock().map_err(|e| e.to_string())?;
     let conn = guard.as_ref().ok_or("No project open")?;
-    db::update_format_page(conn, id, &page_role, &title, &content, &position, &include_in).map_err(|e| e.to_string())
+    db::update_format_page(conn, id, &page_role, &title, &content, &position, &include_in, &vertical_align).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1194,6 +1194,21 @@ fn duplicate_format_profile(state: tauri::State<'_, AppState>, source_id: i64, n
     let guard = state.db.lock().map_err(|e| e.to_string())?;
     let conn = guard.as_ref().ok_or("No project open")?;
     db::duplicate_format_profile(conn, source_id, &new_name).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn paste_format_profile_settings(
+    state: tauri::State<'_, AppState>,
+    target_id: i64,
+    settings: serde_json::Value,
+) -> Result<(), String> {
+    let map = settings
+        .as_object()
+        .cloned()
+        .ok_or("settings must be a JSON object")?;
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::paste_format_profile_settings(conn, target_id, map).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1428,6 +1443,7 @@ pub fn run() {
             update_format_profile,
             delete_format_profile,
             duplicate_format_profile,
+            paste_format_profile_settings,
             seed_format_profiles,
             get_format_pages,
             add_format_page,

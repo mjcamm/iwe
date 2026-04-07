@@ -724,6 +724,10 @@ export async function duplicateFormatProfile(sourceId, newName) {
   return invoke('duplicate_format_profile', { sourceId, newName });
 }
 
+export async function pasteFormatProfileSettings(targetId, settings) {
+  return invoke('paste_format_profile_settings', { targetId, settings });
+}
+
 export async function addPageExclusion(pageId, profileId) {
   return invoke('add_page_exclusion', { pageId, profileId });
 }
@@ -736,8 +740,8 @@ export async function listPageExclusions() {
   return invoke('list_page_exclusions');
 }
 
-export async function updateFormatPage(id, pageRole, title, content, position, includeIn) {
-  return invoke('update_format_page', { id, pageRole, title, content, position, includeIn });
+export async function updateFormatPage(id, pageRole, title, content, position, includeIn, verticalAlign = 'top') {
+  return invoke('update_format_page', { id, pageRole, title, content, position, includeIn, verticalAlign });
 }
 
 export async function deleteFormatPage(id) {

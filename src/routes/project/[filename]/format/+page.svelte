@@ -5,11 +5,13 @@
   import {
     getChapters, getFormatProfiles, getFormatPages, getSettings, saveSettings,
     seedFormatProfiles, addFormatProfile, updateFormatProfile, deleteFormatProfile,
-    duplicateFormatProfile, addFormatPage,
+    duplicateFormatProfile, pasteFormatProfileSettings, addFormatPage,
     updateFormatPage, deleteFormatPage, reorderFormatPages,
     addPageExclusion, removePageExclusion, listPageExclusions,
     compilePreview,
   } from '$lib/db.js';
+  import { addToast } from '$lib/toast.js';
+  import PageContentEditor from '$lib/components/PageContentEditor.svelte';
 
   const flipDurationMs = 150;
 
@@ -47,6 +49,9 @@
     };
     return labels[role] || role;
   }
+
+  // Roles that can be applied via the tag bar (custom is the default for the + buttons)
+  const ASSIGNABLE_ROLES = PAGE_ROLES.filter(r => r !== 'custom');
 
   // Sidebar modes
   const SIDEBAR_MODES = [
@@ -113,10 +118,24 @@
   let renameValue = $state('');
   let confirmDeleteProfileId = $state(null);
 
+  // Clipboard for copy/paste profile settings (persists in settings.json)
+  let formatClipboard = $state(null); // raw profile object snapshot, or null
+
   // Helper: is a page included in a given profile?
   function isPageIncludedIn(pageId, profileId) {
     return !exclusions.some(e => e.page_id === pageId && e.profile_id === profileId);
   }
+
+  // Tag-bar state for adding tagged pages
+  let armedTag = $state(null);
+  let usedTags = $derived(new Set(formatPages.map(p => p.page_role)));
+
+  // Inline rename state for format pages
+  let editingPageId = $state(null);
+  let editingPageTitle = $state('');
+
+  // Full content editor modal state
+  let designingPage = $state(null); // FormatPage being edited, or null
 
   // Re-attach observer whenever the page count or compile generation changes
   $effect(() => {
@@ -133,6 +152,7 @@
   let renderError = $state(null);
   let lastTiming = $state(null); // CompileTiming from Rust
   let compileGeneration = $state(0); // incremented on each compile to bust img cache
+  let sectionPages = $state({}); // section_id -> 0-based page index
 
   // Lazy-load state — IntersectionObserver tracks visible pages, scroll-idle commits loads
   let loadedPages = $state(new Set()); // page indices that have had src set
@@ -256,6 +276,7 @@
       const result = await compilePreview(activeProfileId);
       pageCount = result.page_count;
       lastTiming = result.timing;
+      sectionPages = result.section_pages || {};
       compileGeneration++; // bust img cache
       loadedPages = new Set(); // reset — pages will be loaded lazily by observer
 
@@ -281,9 +302,10 @@
 
   async function loadData() {
     loading = true;
-    // Restore sidebar width
+    // Restore sidebar width and clipboard
     const settings = await getSettings();
     if (settings.formatSidebarWidth) sidebarWidth = settings.formatSidebarWidth;
+    if (settings.formatClipboard) formatClipboard = settings.formatClipboard;
 
     await seedFormatProfiles();
     const [profs, chaps] = await Promise.all([getFormatProfiles(), getChapters()]);
@@ -333,9 +355,109 @@
   }
 
   async function handleAddPage(position) {
-    await addFormatPage('custom', 'New Page', position);
+    const role = armedTag || 'custom';
+    const title = armedTag ? roleLabel(armedTag) : 'New Page';
+    await addFormatPage(role, title, position);
+    await reloadPages();
+    armedTag = null;
+    compileAndShow();
+  }
+
+  // ---- Tag bar handlers ----
+
+  function armTag(role) {
+    if (usedTags.has(role)) return; // already used; X removes it
+    armedTag = armedTag === role ? null : role;
+  }
+
+  async function deleteTaggedPage(role) {
+    const page = formatPages.find(p => p.page_role === role);
+    if (page) {
+      await deleteFormatPage(page.id);
+      await reloadPages();
+      compileAndShow();
+    }
+  }
+
+  async function placeArmedTagBelow(targetItem) {
+    if (!armedTag) return;
+    const role = armedTag;
+    armedTag = null; // disarm immediately so subsequent clicks don't re-fire
+    const title = roleLabel(role);
+    const newId = await addFormatPage(role, title, targetItem.position);
+    await reloadPages();
+
+    // Reorder the section so the new page lands directly below the target
+    const section = formatPages
+      .filter(p => p.position === targetItem.position)
+      .sort((a, b) => a.sort_order - b.sort_order);
+    const orderedIds = section.map(p => p.id).filter(id => id !== newId);
+    const targetIdx = orderedIds.indexOf(targetItem.id);
+    if (targetIdx >= 0) {
+      orderedIds.splice(targetIdx + 1, 0, newId);
+      await reorderFormatPages(orderedIds);
+      await reloadPages();
+    }
+    compileAndShow();
+  }
+
+  function handlePageItemClick(item) {
+    if (armedTag) {
+      placeArmedTagBelow(item);
+    } else {
+      scrollToSection(`iwe-fp-${item.id}`);
+    }
+  }
+
+  function handleChapterItemClick(ch) {
+    if (armedTag) {
+      // Chapters can't be retagged — just disarm so the user knows nothing happened
+      armedTag = null;
+      return;
+    }
+    scrollToSection(`iwe-ch-${ch.id}`);
+  }
+
+  function handleEscape(e) {
+    if (e.key === 'Escape') {
+      if (armedTag) armedTag = null;
+      if (editingPageId !== null) editingPageId = null;
+    }
+  }
+
+  function startEditPage(item) {
+    editingPageId = item.id;
+    editingPageTitle = item.title || '';
+  }
+
+  async function commitEditPage() {
+    if (editingPageId === null) return;
+    const id = editingPageId;
+    const newTitle = editingPageTitle.trim();
+    const page = formatPages.find(p => p.id === id);
+    editingPageId = null;
+    if (!page) return;
+    if (newTitle === (page.title || '')) return; // no change
+    await updateFormatPage(id, page.page_role, newTitle, page.content, page.position, page.include_in, page.vertical_align);
     await reloadPages();
     compileAndShow();
+  }
+
+  function openDesignEditor(item) {
+    designingPage = item;
+  }
+
+  async function saveDesignedPage({ content: jsonContent, verticalAlign }) {
+    if (!designingPage) return;
+    const p = designingPage;
+    designingPage = null;
+    await updateFormatPage(p.id, p.page_role, p.title, jsonContent, p.position, p.include_in, verticalAlign);
+    await reloadPages();
+    compileAndShow();
+  }
+
+  function cancelDesignedPage() {
+    designingPage = null;
   }
 
   async function handleDeletePage(id) {
@@ -345,7 +467,7 @@
   }
 
   async function handleRoleChange(page, newRole) {
-    await updateFormatPage(page.id, newRole, page.title, page.content, page.position, page.include_in);
+    await updateFormatPage(page.id, newRole, page.title, page.content, page.position, page.include_in, page.vertical_align);
     await reloadPages();
   }
 
@@ -379,15 +501,32 @@
     compileAndShow();
   }
 
-  async function quickDuplicateActive() {
+  async function copyProfileSettings() {
     if (!activeProfile) return;
-    const name = `${activeProfile.name} (copy)`;
-    const newId = await duplicateFormatProfile(activeProfile.id, name);
-    profiles = await getFormatProfiles();
-    activeProfileId = newId;
-    syncPresetLabel(profiles.find(p => p.id === newId));
-    showProfileMenu = false;
-    compileAndShow();
+    // Snapshot the entire active profile object — Rust filters excluded fields on paste
+    formatClipboard = { ...activeProfile };
+    // Persist to settings.json so the clipboard survives reloads + project switches
+    const settings = await getSettings();
+    settings.formatClipboard = formatClipboard;
+    await saveSettings(settings);
+    addToast(`Copied settings from "${activeProfile.name}"`, 'success');
+  }
+
+  async function pasteProfileSettings() {
+    if (!activeProfile || !formatClipboard) return;
+    if (formatClipboard.id === activeProfile.id) {
+      addToast('Cannot paste a profile onto itself', 'info');
+      return;
+    }
+    try {
+      await pasteFormatProfileSettings(activeProfile.id, formatClipboard);
+      profiles = await getFormatProfiles();
+      addToast(`Pasted settings into "${activeProfile.name}"`, 'success');
+      compileAndShow();
+    } catch (e) {
+      console.error('[format] paste failed:', e);
+      addToast('Paste failed: ' + e, 'error');
+    }
   }
 
   async function deleteActiveProfile() {
@@ -469,12 +608,20 @@
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 
+  function scrollToSection(sectionId) {
+    const idx = sectionPages[sectionId];
+    if (idx == null) return;
+    scrollToPage(idx);
+  }
+
   onMount(loadData);
   onDestroy(() => {
     teardownObserver();
     clearTimeout(scrollIdleTimer);
   });
 </script>
+
+<svelte:window onkeydown={handleEscape} />
 
 {#if loading}
   <div class="format-loading">
@@ -576,8 +723,17 @@
           <button class="profile-action-btn" title="Rename" onclick={startRenameActive}>
             <i class="bi bi-pencil"></i>
           </button>
-          <button class="profile-action-btn" title="Duplicate" onclick={quickDuplicateActive}>
-            <i class="bi bi-files"></i>
+          <button class="profile-action-btn" title="Copy settings (excludes target/size)"
+            onclick={copyProfileSettings}>
+            <i class="bi bi-clipboard"></i>
+          </button>
+          <button class="profile-action-btn"
+            title={formatClipboard
+              ? `Paste settings from "${formatClipboard.name}" (target/size unchanged)`
+              : 'Nothing to paste — copy a profile first'}
+            disabled={!formatClipboard || formatClipboard.id === activeProfileId}
+            onclick={pasteProfileSettings}>
+            <i class="bi bi-clipboard-check"></i>
           </button>
           <button class="profile-action-btn" title="New profile" onclick={openCreateProfileModal}>
             <i class="bi bi-plus-lg"></i>
@@ -615,6 +771,27 @@
       <div class="sidebar-mode-content">
         {#if sidebarMode === 'pages'}
           <div class="mode-panel page-list-panel">
+            <!-- Tag bar: click to arm, then click a page in the list to insert below -->
+            <div class="tag-bar">
+              {#each ASSIGNABLE_ROLES as role}
+                {@const used = usedTags.has(role)}
+                <button class="tag-pill"
+                  class:used
+                  class:armed={armedTag === role}
+                  title={used ? `Already used — click × to remove` : (armedTag === role ? 'Click a page to insert below it (Esc to cancel)' : `Add a ${roleLabel(role)} page`)}
+                  onclick={() => armTag(role)}>
+                  <span>{roleLabel(role)}</span>
+                  {#if used}
+                    <span class="tag-x" title="Remove this page"
+                      onclick={(e) => { e.stopPropagation(); deleteTaggedPage(role); }}>×</span>
+                  {/if}
+                </button>
+              {/each}
+            </div>
+            {#if armedTag}
+              <div class="armed-hint">Click a page to insert <strong>{roleLabel(armedTag)}</strong> below it · <kbd>Esc</kbd> to cancel</div>
+            {/if}
+
             <!-- Front matter (draggable) -->
             <div class="page-group-label">
               Front Matter
@@ -629,10 +806,27 @@
               onfinalize={handleFrontFinalize}>
               {#each frontItems as item (item.id)}
                 <div class="page-list-entry" animate:flip={{ duration: flipDurationMs }}>
-                  <div class="page-list-item format-page-item" onclick={() => scrollToPage(0)}>
+                  <div class="page-list-item format-page-item" class:armed-target={armedTag} onclick={() => editingPageId === item.id ? null : handlePageItemClick(item)}>
                     <i class="bi bi-grip-vertical drag-handle"></i>
-                    <span class="page-item-title">{item.title || roleLabel(item.page_role)}</span>
+                    {#if editingPageId === item.id}
+                      <input class="page-item-input"
+                        bind:value={editingPageTitle}
+                        onblur={commitEditPage}
+                        onkeydown={(e) => { if (e.key === 'Enter') commitEditPage(); }}
+                        onclick={(e) => e.stopPropagation()}
+                        autofocus />
+                    {:else}
+                      <span class="page-item-title">{item.title || roleLabel(item.page_role)}</span>
+                    {/if}
                     <span class="page-item-role">{roleLabel(item.page_role)}</span>
+                    <button class="page-item-edit" title="Edit content"
+                      onclick={(e) => { e.stopPropagation(); openDesignEditor(item); }}>
+                      <i class="bi bi-card-text"></i>
+                    </button>
+                    <button class="page-item-edit" title="Rename"
+                      onclick={(e) => { e.stopPropagation(); startEditPage(item); }}>
+                      <i class="bi bi-pencil"></i>
+                    </button>
                     <button class="page-item-delete" title="Remove page"
                       onclick={(e) => { e.stopPropagation(); handleDeletePage(item.id); }}>
                       <i class="bi bi-x"></i>
@@ -656,7 +850,7 @@
             <div class="page-group-label">Chapters</div>
             {#each chapters as ch (ch.id)}
               <div class="page-list-item chapter-item"
-                onclick={() => scrollToPage(0)}>
+                onclick={() => handleChapterItemClick(ch)}>
                 <span class="page-item-title">{ch.title}</span>
               </div>
             {/each}
@@ -675,10 +869,27 @@
               onfinalize={handleBackFinalize}>
               {#each backItems as item (item.id)}
                 <div class="page-list-entry" animate:flip={{ duration: flipDurationMs }}>
-                  <div class="page-list-item format-page-item" onclick={() => scrollToPage(0)}>
+                  <div class="page-list-item format-page-item" class:armed-target={armedTag} onclick={() => editingPageId === item.id ? null : handlePageItemClick(item)}>
                     <i class="bi bi-grip-vertical drag-handle"></i>
-                    <span class="page-item-title">{item.title || roleLabel(item.page_role)}</span>
+                    {#if editingPageId === item.id}
+                      <input class="page-item-input"
+                        bind:value={editingPageTitle}
+                        onblur={commitEditPage}
+                        onkeydown={(e) => { if (e.key === 'Enter') commitEditPage(); }}
+                        onclick={(e) => e.stopPropagation()}
+                        autofocus />
+                    {:else}
+                      <span class="page-item-title">{item.title || roleLabel(item.page_role)}</span>
+                    {/if}
                     <span class="page-item-role">{roleLabel(item.page_role)}</span>
+                    <button class="page-item-edit" title="Edit content"
+                      onclick={(e) => { e.stopPropagation(); openDesignEditor(item); }}>
+                      <i class="bi bi-card-text"></i>
+                    </button>
+                    <button class="page-item-edit" title="Rename"
+                      onclick={(e) => { e.stopPropagation(); startEditPage(item); }}>
+                      <i class="bi bi-pencil"></i>
+                    </button>
                     <button class="page-item-delete" title="Remove page"
                       onclick={(e) => { e.stopPropagation(); handleDeletePage(item.id); }}>
                       <i class="bi bi-x"></i>
@@ -745,6 +956,14 @@
       </div>
     </div>
   </div>
+
+  {#if designingPage}
+    <PageContentEditor
+      page={designingPage}
+      profile={activeProfile}
+      onsave={saveDesignedPage}
+      oncancel={cancelDesignedPage} />
+  {/if}
 
   {#if showCreateProfileModal}
     <div class="modal-backdrop" onclick={() => showCreateProfileModal = false}>
@@ -1030,14 +1249,14 @@
     margin-bottom: 0.3rem;
   }
   .profile-pills {
-    display: flex; flex-wrap: wrap; gap: 3px;
-    padding: 0.15rem 0.4rem 0.3rem 1.5rem;
+    display: flex; flex-wrap: wrap; gap: 4px;
+    padding: 0.25rem 0.55rem 0.4rem 1.85rem;
   }
   .profile-pill {
     border: 1px solid var(--iwe-border); background: none;
     color: var(--iwe-text-muted);
-    padding: 1px 6px; border-radius: 9px;
-    font-family: var(--iwe-font-ui); font-size: 0.62rem;
+    padding: 2px 8px; border-radius: 10px;
+    font-family: var(--iwe-font-ui); font-size: 0.72rem;
     cursor: pointer; transition: all 100ms;
     max-width: 100%; overflow: hidden;
     text-overflow: ellipsis; white-space: nowrap;
@@ -1128,17 +1347,75 @@
   .target-card-dims { font-size: 0.65rem; color: var(--iwe-text-muted); }
   .target-card.selected .target-card-label { color: var(--iwe-accent); font-weight: 500; }
 
+  /* Tag bar */
+  .tag-bar {
+    display: flex; flex-wrap: wrap; gap: 4px;
+    padding: 0.5rem 0 0.5rem 0;
+    border-bottom: 1px solid var(--iwe-border);
+    margin-bottom: 0.4rem;
+  }
+  .tag-pill {
+    display: inline-flex; align-items: center; gap: 3px;
+    border: 1px solid var(--iwe-border); background: var(--iwe-bg);
+    color: var(--iwe-text);
+    padding: 3px 10px; border-radius: 11px;
+    font-family: var(--iwe-font-ui); font-size: 0.8rem;
+    cursor: pointer; transition: all 100ms;
+  }
+  .tag-pill:hover:not(.used) {
+    border-color: var(--iwe-accent); color: var(--iwe-accent);
+  }
+  .tag-pill.armed {
+    background: var(--iwe-accent); border-color: var(--iwe-accent); color: #fff;
+    box-shadow: 0 0 0 2px rgba(45, 106, 94, 0.2);
+  }
+  .tag-pill.used {
+    background: var(--iwe-bg-hover); color: var(--iwe-text-muted);
+    cursor: default; opacity: 0.7;
+  }
+  .tag-x {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 14px; height: 14px; border-radius: 50%;
+    color: var(--iwe-text-muted); font-size: 0.85rem; line-height: 1;
+    cursor: pointer; transition: all 100ms;
+  }
+  .tag-x:hover {
+    background: #c0392b; color: #fff;
+  }
+  .armed-hint {
+    font-family: var(--iwe-font-ui); font-size: 0.7rem;
+    color: var(--iwe-text-muted); padding: 0.3rem 0.4rem;
+    background: rgba(45, 106, 94, 0.06);
+    border-left: 2px solid var(--iwe-accent);
+    border-radius: var(--iwe-radius-sm);
+    margin-bottom: 0.5rem;
+  }
+  .armed-hint kbd {
+    font-family: monospace; font-size: 0.65rem;
+    background: var(--iwe-bg); border: 1px solid var(--iwe-border);
+    padding: 0 4px; border-radius: 3px;
+  }
+
+  /* Page list — when a tag is armed, page items become click targets */
+  .page-list-item.armed-target {
+    cursor: copy;
+  }
+  .page-list-item.armed-target:hover {
+    background: rgba(45, 106, 94, 0.12);
+    box-shadow: inset 0 -2px 0 var(--iwe-accent);
+  }
+
   /* Page list */
   .page-group-label {
-    font-family: var(--iwe-font-ui); font-size: 0.68rem;
+    font-family: var(--iwe-font-ui); font-size: 0.78rem;
     color: var(--iwe-text-muted); text-transform: uppercase;
     letter-spacing: 0.04em; font-weight: 600;
-    padding: 0.5rem 0 0.25rem 0;
+    padding: 0.6rem 0 0.3rem 0;
     display: flex; align-items: center; justify-content: space-between;
   }
   .add-page-btn {
     border: none; background: none; color: var(--iwe-accent);
-    cursor: pointer; padding: 0 0.2rem; font-size: 0.9rem;
+    cursor: pointer; padding: 0.1rem 0.35rem; font-size: 1.1rem;
     line-height: 1; border-radius: var(--iwe-radius-sm);
     transition: background 100ms;
   }
@@ -1147,15 +1424,15 @@
   .dnd-zone { min-height: 4px; }
 
   .page-list-item {
-    display: flex; align-items: center; gap: 0.35rem;
-    padding: 0.35rem 0.4rem; border-radius: var(--iwe-radius-sm);
+    display: flex; align-items: center; gap: 0.5rem;
+    padding: 0.5rem 0.55rem; border-radius: var(--iwe-radius-sm);
     cursor: pointer; transition: background 100ms;
-    font-family: var(--iwe-font-ui); font-size: 0.78rem;
+    font-family: var(--iwe-font-ui); font-size: 0.92rem;
   }
   .page-list-item:hover { background: var(--iwe-bg-hover); }
 
   .format-page-item .drag-handle {
-    color: var(--iwe-text-muted); font-size: 0.85rem;
+    color: var(--iwe-text-muted); font-size: 1.05rem;
     cursor: grab; opacity: 0.5;
   }
   .format-page-item:hover .drag-handle { opacity: 1; }
@@ -1165,21 +1442,31 @@
     color: var(--iwe-text);
   }
   .page-item-role {
-    font-size: 0.65rem; color: var(--iwe-text-muted);
+    font-size: 0.72rem; color: var(--iwe-text-muted);
     white-space: nowrap;
   }
-  .page-item-delete {
+  .page-item-edit, .page-item-delete {
     border: none; background: none; color: var(--iwe-text-muted);
-    cursor: pointer; padding: 0 0.15rem; font-size: 0.8rem;
-    opacity: 0; transition: opacity 100ms;
+    cursor: pointer; padding: 0.15rem 0.3rem; font-size: 1rem;
+    opacity: 0; transition: opacity 100ms, color 100ms;
   }
-  .page-list-item:hover .page-item-delete { opacity: 1; }
-  .page-item-delete:hover { color: #c0392b; }
+  .page-list-item:hover .page-item-edit,
+  .page-list-item:hover .page-item-delete { opacity: 0.75; }
+  .page-item-edit:hover { color: var(--iwe-accent); opacity: 1 !important; }
+  .page-item-delete:hover { color: #c0392b; opacity: 1 !important; }
+  .page-item-input {
+    flex: 1; min-width: 0;
+    border: 1px solid var(--iwe-accent); border-radius: var(--iwe-radius-sm);
+    background: var(--iwe-bg); color: var(--iwe-text);
+    font-family: var(--iwe-font-ui); font-size: 0.92rem;
+    padding: 0.2rem 0.4rem;
+  }
+  .page-item-input:focus { outline: none; }
 
   /* Chapter items are visually distinct */
   .chapter-item {
-    padding-left: 1.4rem;
-    opacity: 0.7;
+    padding-left: 1.6rem;
+    opacity: 0.75;
     cursor: pointer;
   }
   .chapter-item .page-item-title {
