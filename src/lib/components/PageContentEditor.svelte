@@ -3,8 +3,9 @@
   import { Editor, Node, mergeAttributes } from '@tiptap/core';
   import StarterKit from '@tiptap/starter-kit';
   import TextAlign from '@tiptap/extension-text-align';
-  import { TextStyle, FontSize } from '@tiptap/extension-text-style';
+  import { TextStyle, FontSize, FontFamily } from '@tiptap/extension-text-style';
   import Placeholder from '@tiptap/extension-placeholder';
+  import FontPicker from '$lib/components/FontPicker.svelte';
 
   let { page, profile, onsave, oncancel } = $props();
 
@@ -134,6 +135,7 @@
         StarterKit.configure({ heading: false }), // we don't use H1/H2/H3 — font sizes only
         TextStyle,
         FontSize,
+        FontFamily,
         ImageNode,
         TextAlign.configure({ types: ['paragraph'] }),
         Placeholder.configure({ placeholder: 'Start writing...' }),
@@ -239,6 +241,16 @@
         </button>
 
         <div class="tb-sep"></div>
+
+        <div class="tb-font-picker">
+          <FontPicker
+            value={ed.getAttributes('textStyle').fontFamily || ''}
+            onchange={(font) => {
+              if (font) ed.chain().focus().setFontFamily(font).run();
+              else ed.chain().focus().unsetFontFamily().run();
+            }}
+            placeholder="Font" />
+        </div>
 
         <select class="tb-select" title="Font size"
           value={ed.getAttributes('textStyle').fontSize || ''}
@@ -412,6 +424,9 @@
     cursor: pointer;
   }
   .tb-select:focus { outline: none; border-color: var(--iwe-accent); }
+  .tb-font-picker {
+    width: 180px;
+  }
 
   .editor-canvas {
     flex: 1;

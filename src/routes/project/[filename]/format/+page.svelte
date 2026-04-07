@@ -8,10 +8,18 @@
     duplicateFormatProfile, pasteFormatProfileSettings, addFormatPage,
     updateFormatPage, deleteFormatPage, reorderFormatPages,
     addPageExclusion, removePageExclusion, listPageExclusions,
-    compilePreview,
+    compilePreview, getProjectSetting, setProjectSetting,
   } from '$lib/db.js';
   import { addToast } from '$lib/toast.js';
   import PageContentEditor from '$lib/components/PageContentEditor.svelte';
+  import ChapterHeadings from '$lib/components/format/ChapterHeadings.svelte';
+  import ParagraphSettings from '$lib/components/format/ParagraphSettings.svelte';
+  import HeadingsSettings from '$lib/components/format/HeadingsSettings.svelte';
+  import BreaksSettings from '$lib/components/format/BreaksSettings.svelte';
+  import PrintLayoutSettings from '$lib/components/format/PrintLayoutSettings.svelte';
+  import TypographySettings from '$lib/components/format/TypographySettings.svelte';
+  import HeaderFooterSettings from '$lib/components/format/HeaderFooterSettings.svelte';
+  import TrimSettings from '$lib/components/format/TrimSettings.svelte';
 
   const flipDurationMs = 150;
 
@@ -52,6 +60,26 @@
 
   // Roles that can be applied via the tag bar (custom is the default for the + buttons)
   const ASSIGNABLE_ROLES = PAGE_ROLES.filter(r => r !== 'custom');
+
+  // Custom mode sub-tabs (each is a settings component)
+  const CUSTOM_TABS = [
+    { id: 'chapter-headings', label: 'Chapter Headings', icon: 'bi-bookmark' },
+    { id: 'paragraph',        label: 'Paragraph',        icon: 'bi-paragraph' },
+    { id: 'headings',         label: 'Headings',         icon: 'bi-type-h1' },
+    { id: 'breaks',           label: 'Breaks',           icon: 'bi-asterisk' },
+    { id: 'print-layout',     label: 'Print Layout',     icon: 'bi-layout-text-window' },
+    { id: 'typography',       label: 'Typography',       icon: 'bi-fonts' },
+    { id: 'header-footer',    label: 'Header / Footer',  icon: 'bi-distribute-vertical' },
+    { id: 'trim',             label: 'Trim',             icon: 'bi-aspect-ratio' },
+  ];
+  let customTab = $state('chapter-headings');
+  let customSelectorOpen = $state(false);
+  let activeCustomTab = $derived(CUSTOM_TABS.find(t => t.id === customTab) || CUSTOM_TABS[0]);
+
+  function selectCustomTab(id) {
+    customTab = id;
+    customSelectorOpen = false;
+  }
 
   // Sidebar modes
   const SIDEBAR_MODES = [
@@ -254,6 +282,38 @@
     if (changed) {
       loadedPages = updated;
     }
+
+    // Persist current scroll position for the active profile so a recompile
+    // (settings change) can restore the user's exact viewport.
+    persistScrollPosition();
+  }
+
+  // ---- Scroll position persistence ----
+  let scrollSaveTimer = null;
+  function persistScrollPosition() {
+    if (!activeProfileId || !previewContainer) return;
+    clearTimeout(scrollSaveTimer);
+    const top = previewContainer.scrollTop;
+    scrollSaveTimer = setTimeout(() => {
+      setProjectSetting(`format_scroll_${activeProfileId}`, String(top)).catch(() => {});
+    }, 200);
+  }
+
+  async function loadSavedScroll(profileId) {
+    try {
+      const v = await getProjectSetting(`format_scroll_${profileId}`);
+      const n = Number(v);
+      return Number.isFinite(n) && n >= 0 ? n : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  /// Restore scroll position synchronously (no animation) after a render cycle.
+  /// Called from compileAndShow once placeholders are in the DOM.
+  function restoreScroll(top) {
+    if (!previewContainer || top == null) return;
+    previewContainer.scrollTop = top;
   }
 
   function handlePreviewScroll() {
@@ -270,6 +330,14 @@
       loadedPages = new Set();
       return;
     }
+
+    // Snapshot the current scroll position so we can restore it after recompile.
+    // Fall back to the saved position from project_settings (used on first load
+    // and after switching profiles).
+    const liveScroll = previewContainer ? previewContainer.scrollTop : null;
+    const savedScroll = await loadSavedScroll(activeProfileId);
+    const restoreTo = liveScroll && liveScroll > 0 ? liveScroll : savedScroll;
+
     rendering = true;
     renderError = null;
     try {
@@ -294,10 +362,28 @@
     } finally {
       rendering = false;
     }
+
+    // Wait two animation frames so:
+    // 1) Svelte commits the new pageCount → placeholders mount
+    // 2) Browser computes layout (fixed-height placeholders give correct scroll height)
+    // Then jump scroll to restore position before the user sees the top.
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        restoreScroll(restoreTo);
+      });
+    });
   }
 
   async function reloadPages() {
     [formatPages, exclusions] = await Promise.all([getFormatPages(), listPageExclusions()]);
+  }
+
+  // Used by Custom mode settings components after they save a category JSON.
+  // Refreshes the local profiles array so the prop they receive is up-to-date,
+  // then recompiles the preview.
+  async function handleCustomSettingChange() {
+    profiles = await getFormatProfiles();
+    compileAndShow();
   }
 
   async function loadData() {
@@ -950,7 +1036,52 @@
           </div>
         {:else if sidebarMode === 'custom'}
           <div class="mode-panel">
-            <p class="shell-placeholder">Custom formatting controls will appear here.</p>
+            <!-- Sub-tab selector dropdown -->
+            <div class="custom-selector-wrap">
+              <button class="custom-selector-btn"
+                onclick={() => customSelectorOpen = !customSelectorOpen}>
+                <i class="bi {activeCustomTab.icon}"></i>
+                <span class="custom-selector-label">{activeCustomTab.label}</span>
+                <i class="bi bi-chevron-down custom-selector-chevron" class:open={customSelectorOpen}></i>
+              </button>
+              {#if customSelectorOpen}
+                <div class="custom-selector-backdrop"
+                  onclick={() => customSelectorOpen = false}
+                  role="button" tabindex="-1" onkeydown={() => {}}></div>
+                <div class="custom-selector-dropdown">
+                  {#each CUSTOM_TABS as tab (tab.id)}
+                    <button class="custom-option"
+                      class:active={customTab === tab.id}
+                      onclick={() => selectCustomTab(tab.id)}>
+                      <i class="bi {tab.icon}"></i>
+                      <span>{tab.label}</span>
+                      {#if customTab === tab.id}
+                        <i class="bi bi-check2 custom-option-check"></i>
+                      {/if}
+                    </button>
+                  {/each}
+                </div>
+              {/if}
+            </div>
+
+            <!-- Active sub-tab component -->
+            {#if customTab === 'chapter-headings'}
+              <ChapterHeadings profile={activeProfile} onchange={handleCustomSettingChange} />
+            {:else if customTab === 'paragraph'}
+              <ParagraphSettings profile={activeProfile} onchange={handleCustomSettingChange} />
+            {:else if customTab === 'headings'}
+              <HeadingsSettings profile={activeProfile} onchange={handleCustomSettingChange} />
+            {:else if customTab === 'breaks'}
+              <BreaksSettings profile={activeProfile} onchange={handleCustomSettingChange} />
+            {:else if customTab === 'print-layout'}
+              <PrintLayoutSettings profile={activeProfile} onchange={handleCustomSettingChange} />
+            {:else if customTab === 'typography'}
+              <TypographySettings profile={activeProfile} onchange={handleCustomSettingChange} />
+            {:else if customTab === 'header-footer'}
+              <HeaderFooterSettings profile={activeProfile} onchange={handleCustomSettingChange} />
+            {:else if customTab === 'trim'}
+              <TrimSettings profile={activeProfile} onchange={handleCustomSettingChange} />
+            {/if}
           </div>
         {/if}
       </div>
@@ -1346,6 +1477,56 @@
   .target-card-label { font-size: 0.78rem; color: var(--iwe-text); }
   .target-card-dims { font-size: 0.65rem; color: var(--iwe-text-muted); }
   .target-card.selected .target-card-label { color: var(--iwe-accent); font-weight: 500; }
+
+  /* Custom mode sub-tab selector */
+  .custom-selector-wrap {
+    position: relative;
+    margin-bottom: 0.6rem;
+  }
+  .custom-selector-btn {
+    width: 100%;
+    display: flex; align-items: center; gap: 0.5rem;
+    padding: 0.45rem 0.6rem;
+    font-family: var(--iwe-font-ui); font-size: 0.85rem;
+    border: 1px solid var(--iwe-border); border-radius: var(--iwe-radius-sm);
+    background: var(--iwe-bg); color: var(--iwe-text); cursor: pointer;
+    transition: all 100ms;
+  }
+  .custom-selector-btn:hover { border-color: var(--iwe-accent); }
+  .custom-selector-label { flex: 1; text-align: left; }
+  .custom-selector-chevron {
+    font-size: 0.7rem; color: var(--iwe-text-muted);
+    transition: transform 150ms;
+  }
+  .custom-selector-chevron.open { transform: rotate(180deg); }
+  .custom-selector-backdrop {
+    position: fixed; inset: 0; z-index: 5;
+    background: transparent; cursor: default;
+  }
+  .custom-selector-dropdown {
+    position: absolute; top: calc(100% + 4px); left: 0; right: 0;
+    z-index: 10;
+    background: var(--iwe-bg);
+    border: 1px solid var(--iwe-border); border-radius: var(--iwe-radius-sm);
+    box-shadow: 0 8px 24px rgba(0,0,0,0.12);
+    padding: 4px;
+    max-height: 60vh; overflow-y: auto;
+  }
+  .custom-option {
+    width: 100%;
+    display: flex; align-items: center; gap: 0.5rem;
+    padding: 0.4rem 0.55rem;
+    font-family: var(--iwe-font-ui); font-size: 0.82rem;
+    border: none; background: none; color: var(--iwe-text); cursor: pointer;
+    border-radius: var(--iwe-radius-sm); text-align: left;
+    transition: background 100ms;
+  }
+  .custom-option:hover { background: var(--iwe-bg-hover); }
+  .custom-option.active { color: var(--iwe-accent); font-weight: 500; }
+  .custom-option i:first-child { width: 16px; text-align: center; }
+  .custom-option-check {
+    margin-left: auto; color: var(--iwe-accent);
+  }
 
   /* Tag bar */
   .tag-bar {

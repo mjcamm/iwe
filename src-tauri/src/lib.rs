@@ -1197,6 +1197,18 @@ fn duplicate_format_profile(state: tauri::State<'_, AppState>, source_id: i64, n
 }
 
 #[tauri::command]
+fn update_profile_category(
+    state: tauri::State<'_, AppState>,
+    profile_id: i64,
+    category: String,
+    json: String,
+) -> Result<(), String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::update_profile_category(conn, profile_id, &category, &json).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn paste_format_profile_settings(
     state: tauri::State<'_, AppState>,
     target_id: i64,
@@ -1432,6 +1444,7 @@ pub fn run() {
             semantic::semantic_search,
             semantic::get_semantic_index_status,
             format::compile_preview,
+            format::list_system_fonts,
             import::parse_import_file,
             famous_books::list_library_books,
             famous_books::get_library_book,
@@ -1443,6 +1456,7 @@ pub fn run() {
             update_format_profile,
             delete_format_profile,
             duplicate_format_profile,
+            update_profile_category,
             paste_format_profile_settings,
             seed_format_profiles,
             get_format_pages,

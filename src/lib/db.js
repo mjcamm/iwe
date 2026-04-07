@@ -756,6 +756,14 @@ export async function compilePreview(profileId) {
   return invoke('compile_preview', { profileId });
 }
 
+export async function listSystemFonts() {
+  return invoke('list_system_fonts');
+}
+
+export async function updateProfileCategory(profileId, category, json) {
+  return invoke('update_profile_category', { profileId, category, json });
+}
+
 // --- Manuscript import (DOCX / EPUB) ---
 
 export async function parseImportFile(path, method = null) {

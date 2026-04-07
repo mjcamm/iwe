@@ -38,5 +38,6 @@ tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 typst = "0.14"
 typst-pdf = "0.14"
 typst-svg = "0.14"
+typst-kit = { version = "0.14", default-features = false, features = ["fonts"] }
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
 quick-xml = "0.31"

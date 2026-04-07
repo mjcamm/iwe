@@ -324,6 +324,14 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             font_size_pt REAL NOT NULL DEFAULT 11.0,
             line_spacing REAL NOT NULL DEFAULT 1.4,
             sort_order INTEGER NOT NULL DEFAULT 0,
+            chapter_headings_json TEXT NOT NULL DEFAULT '{}',
+            paragraph_json TEXT NOT NULL DEFAULT '{}',
+            headings_json TEXT NOT NULL DEFAULT '{}',
+            breaks_json TEXT NOT NULL DEFAULT '{}',
+            print_layout_json TEXT NOT NULL DEFAULT '{}',
+            typography_json TEXT NOT NULL DEFAULT '{}',
+            header_footer_json TEXT NOT NULL DEFAULT '{}',
+            trim_json TEXT NOT NULL DEFAULT '{}',
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
 
@@ -400,6 +408,31 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         conn.execute_batch(
             "ALTER TABLE format_pages ADD COLUMN vertical_align TEXT NOT NULL DEFAULT 'top';",
         )?;
+    }
+
+    // Migration: add per-category JSON columns to format_profiles for the Custom mode
+    // sub-tab settings. These are TEXT columns containing arbitrary JSON, so adding
+    // new fields inside a category requires no further migrations.
+    let category_columns = [
+        "chapter_headings_json",
+        "paragraph_json",
+        "headings_json",
+        "breaks_json",
+        "print_layout_json",
+        "typography_json",
+        "header_footer_json",
+        "trim_json",
+    ];
+    for col in &category_columns {
+        let exists = conn
+            .prepare(&format!("SELECT {} FROM format_profiles LIMIT 0", col))
+            .is_ok();
+        if !exists {
+            conn.execute_batch(&format!(
+                "ALTER TABLE format_profiles ADD COLUMN {} TEXT NOT NULL DEFAULT '{{}}';",
+                col
+            ))?;
+        }
     }
 
     Ok(())
@@ -1725,6 +1758,14 @@ pub struct FormatProfile {
     pub font_size_pt: f64,
     pub line_spacing: f64,
     pub sort_order: i64,
+    pub chapter_headings_json: String,
+    pub paragraph_json: String,
+    pub headings_json: String,
+    pub breaks_json: String,
+    pub print_layout_json: String,
+    pub typography_json: String,
+    pub header_footer_json: String,
+    pub trim_json: String,
     pub created_at: String,
 }
 
@@ -1762,7 +1803,15 @@ fn read_profile(row: &rusqlite::Row) -> rusqlite::Result<FormatProfile> {
         font_size_pt: row.get(10)?,
         line_spacing: row.get(11)?,
         sort_order: row.get(12)?,
-        created_at: row.get(13)?,
+        chapter_headings_json: row.get(13)?,
+        paragraph_json: row.get(14)?,
+        headings_json: row.get(15)?,
+        breaks_json: row.get(16)?,
+        print_layout_json: row.get(17)?,
+        typography_json: row.get(18)?,
+        header_footer_json: row.get(19)?,
+        trim_json: row.get(20)?,
+        created_at: row.get(21)?,
     })
 }
 
@@ -1780,7 +1829,7 @@ fn read_format_page(row: &rusqlite::Row) -> rusqlite::Result<FormatPage> {
     })
 }
 
-const PROFILE_COLS: &str = "id, name, target_type, trim_width_in, trim_height_in, margin_top_in, margin_bottom_in, margin_outside_in, margin_inside_in, font_body, font_size_pt, line_spacing, sort_order, created_at";
+const PROFILE_COLS: &str = "id, name, target_type, trim_width_in, trim_height_in, margin_top_in, margin_bottom_in, margin_outside_in, margin_inside_in, font_body, font_size_pt, line_spacing, sort_order, chapter_headings_json, paragraph_json, headings_json, breaks_json, print_layout_json, typography_json, header_footer_json, trim_json, created_at";
 const FORMAT_PAGE_COLS: &str = "id, page_role, title, content, position, sort_order, include_in, vertical_align, created_at";
 
 pub fn list_format_profiles(conn: &Connection) -> rusqlite::Result<Vec<FormatProfile>> {
@@ -1835,6 +1884,37 @@ pub fn update_format_profile(
 
 pub fn delete_format_profile(conn: &Connection, id: i64) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM format_profiles WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+/// Whitelist of category JSON columns that may be updated via update_profile_category.
+pub const FORMAT_CATEGORY_COLUMNS: &[&str] = &[
+    "chapter_headings_json",
+    "paragraph_json",
+    "headings_json",
+    "breaks_json",
+    "print_layout_json",
+    "typography_json",
+    "header_footer_json",
+    "trim_json",
+];
+
+/// Update a single category JSON column on a format profile.
+/// The column name must be in FORMAT_CATEGORY_COLUMNS to prevent SQL injection.
+pub fn update_profile_category(
+    conn: &Connection,
+    profile_id: i64,
+    category: &str,
+    json: &str,
+) -> rusqlite::Result<()> {
+    if !FORMAT_CATEGORY_COLUMNS.contains(&category) {
+        return Err(rusqlite::Error::InvalidParameterName(format!(
+            "unknown category: {}",
+            category
+        )));
+    }
+    let sql = format!("UPDATE format_profiles SET {} = ?1 WHERE id = ?2", category);
+    conn.execute(&sql, params![json, profile_id])?;
     Ok(())
 }
 

@@ -1,6 +1,7 @@
 use crate::db::{self, AppState, FormatPage, FormatProfile};
 use crate::ydoc;
 
+use std::sync::Arc;
 use typst::diag::{FileError, FileResult, SourceResult};
 use typst::foundations::{Bytes, Datetime};
 use typst::layout::PagedDocument;
@@ -8,42 +9,68 @@ use typst::syntax::{FileId, Source};
 use typst::text::{Font, FontBook};
 use typst::utils::LazyHash;
 use typst::{Library, LibraryExt};
+use typst_kit::fonts::{FontSearcher, FontSlot};
 
-// Embedded Liberation Serif fonts
+// Embedded fallback fonts (used in addition to system fonts)
 static FONT_REGULAR: &[u8] = include_bytes!("../fonts/LiberationSerif-Regular.ttf");
 static FONT_BOLD: &[u8] = include_bytes!("../fonts/LiberationSerif-Bold.ttf");
 static FONT_ITALIC: &[u8] = include_bytes!("../fonts/LiberationSerif-Italic.ttf");
 static FONT_BOLD_ITALIC: &[u8] = include_bytes!("../fonts/LiberationSerif-BoldItalic.ttf");
 
-/// Minimal Typst World implementation with embedded fonts and an in-memory image store.
+/// Lazy-initialized font cache holding system fonts + embedded fallbacks.
+/// Discovered once at first compile and reused thereafter.
+pub struct FontCache {
+    pub book: Arc<LazyHash<FontBook>>,
+    pub slots: Arc<Vec<FontSlot>>,
+}
+
+impl FontCache {
+    fn discover() -> Self {
+        let t = std::time::Instant::now();
+        let fonts = FontSearcher::new().include_system_fonts(true).search();
+        log::info!(
+            "[format] font discovery: {} families, {} slots in {}ms",
+            fonts.book.families().count(),
+            fonts.fonts.len(),
+            t.elapsed().as_millis()
+        );
+        FontCache {
+            book: Arc::new(LazyHash::new(fonts.book)),
+            slots: Arc::new(fonts.fonts),
+        }
+    }
+}
+
+/// Get embedded fonts as Font instances (used as last-resort fallbacks).
+fn embedded_fonts() -> Vec<Font> {
+    [FONT_REGULAR, FONT_BOLD, FONT_ITALIC, FONT_BOLD_ITALIC]
+        .iter()
+        .filter_map(|data| Font::new(Bytes::new(data.to_vec()), 0))
+        .collect()
+}
+
+/// Typst World implementation backed by the FontCache + an in-memory image store.
 struct IweWorld {
     library: LazyHash<Library>,
-    book: LazyHash<FontBook>,
-    fonts: Vec<Font>,
+    book: Arc<LazyHash<FontBook>>,
+    slots: Arc<Vec<FontSlot>>,
+    embedded: Vec<Font>,
     source: Source,
     images: std::collections::HashMap<String, Vec<u8>>,
 }
 
 impl IweWorld {
-    fn new(markup: String, images: std::collections::HashMap<String, Vec<u8>>) -> Self {
-        // Load embedded fonts
-        let font_data: Vec<&[u8]> = vec![FONT_REGULAR, FONT_BOLD, FONT_ITALIC, FONT_BOLD_ITALIC];
-        let fonts: Vec<Font> = font_data
-            .into_iter()
-            .filter_map(|data| {
-                let bytes = Bytes::new(data.to_vec());
-                Font::new(bytes, 0)
-            })
-            .collect();
-
-        let book = FontBook::from_fonts(fonts.iter());
-        let source = Source::detached(markup);
-
+    fn new(
+        markup: String,
+        images: std::collections::HashMap<String, Vec<u8>>,
+        cache: &FontCache,
+    ) -> Self {
         IweWorld {
             library: LazyHash::new(Library::default()),
-            book: LazyHash::new(book),
-            fonts,
-            source,
+            book: cache.book.clone(),
+            slots: cache.slots.clone(),
+            embedded: embedded_fonts(),
+            source: Source::detached(markup),
             images,
         }
     }
@@ -82,7 +109,15 @@ impl typst::World for IweWorld {
     }
 
     fn font(&self, index: usize) -> Option<Font> {
-        self.fonts.get(index).cloned()
+        // First N indices are system fonts via FontSlot
+        if let Some(slot) = self.slots.get(index) {
+            if let Some(font) = slot.get() {
+                return Some(font);
+            }
+        }
+        // Fall back to embedded fonts (offset by slot count)
+        let fallback_idx = index.saturating_sub(self.slots.len());
+        self.embedded.get(fallback_idx).cloned()
     }
 
     fn today(&self, _offset: Option<i64>) -> Option<Datetime> {
@@ -105,6 +140,17 @@ fn escape_typst(text: &str) -> String {
         }
     }
     out
+}
+
+/// Parse a category JSON column. Returns an empty map if the JSON is missing/invalid.
+fn parse_category_json(s: &str) -> serde_json::Map<String, serde_json::Value> {
+    if s.trim().is_empty() {
+        return serde_json::Map::new();
+    }
+    serde_json::from_str::<serde_json::Value>(s)
+        .ok()
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default()
 }
 
 /// Image storage collected during PM JSON conversion.
@@ -314,8 +360,9 @@ fn apply_pm_marks(text: &str, marks: Option<&serde_json::Value>) -> String {
     let mut s = escape_typst(text);
     let Some(marks) = marks.and_then(|m| m.as_array()) else { return s; };
 
-    // Track the textStyle font size separately so we can wrap once with #text(size:)
+    // Track textStyle attributes separately so we wrap once with one #text() call
     let mut font_size: Option<String> = None;
+    let mut font_family: Option<String> = None;
 
     for mark in marks {
         let mtype = mark.get("type").and_then(|t| t.as_str()).unwrap_or("");
@@ -325,21 +372,34 @@ fn apply_pm_marks(text: &str, marks: Option<&serde_json::Value>) -> String {
             "underline" => s = format!("#underline[{}]", s),
             "strike" | "s" => s = format!("#strike[{}]", s),
             "textStyle" => {
-                if let Some(size) = mark
-                    .get("attrs")
+                let attrs = mark.get("attrs");
+                if let Some(size) = attrs
                     .and_then(|a| a.get("fontSize"))
                     .and_then(|f| f.as_str())
                 {
-                    // Accept "12pt", "14pt", "16px" — pass through to Typst
                     font_size = Some(size.to_string());
+                }
+                if let Some(family) = attrs
+                    .and_then(|a| a.get("fontFamily"))
+                    .and_then(|f| f.as_str())
+                {
+                    font_family = Some(family.to_string());
                 }
             }
             _ => {}
         }
     }
 
-    if let Some(size) = font_size {
-        s = format!("#text(size: {})[{}]", size, s);
+    // Build a single #text(...) call with whichever attributes were set
+    if font_size.is_some() || font_family.is_some() {
+        let mut args: Vec<String> = Vec::new();
+        if let Some(family) = font_family {
+            args.push(format!("font: \"{}\"", escape_typst(&family)));
+        }
+        if let Some(size) = font_size {
+            args.push(format!("size: {}", size));
+        }
+        s = format!("#text({})[{}]", args.join(", "), s);
     }
     s
 }
@@ -463,20 +523,28 @@ fn build_typst_markup(
         profile.margin_inside_in,
     ));
 
-    // Font and paragraph setup
-    let font_name = escape_typst(&profile.font_body);
-    doc.push_str(&format!(
-        "#set text(font: \"{}\", size: {}pt)\n",
-        font_name, profile.font_size_pt,
-    ));
-    // Convert line spacing multiplier to Typst leading (em units).
-    // Typst leading is extra space between lines, not the line-height multiplier.
-    // leading = (multiplier - 1) * font_size, expressed in em = (multiplier - 1)
-    let leading_em = profile.line_spacing - 1.0;
-    doc.push_str(&format!(
-        "#set par(leading: {}em, first-line-indent: 1.5em)\n\n",
-        leading_em,
-    ));
+    // Typography: read from typography_json with fallback to legacy scalar columns.
+    // The body font/size/leading is scoped to chapter body content only — chapter
+    // headings, format pages, headers/footers, page numbers etc. will get their
+    // own font settings as those features are added.
+    let typo = parse_category_json(&profile.typography_json);
+    let body_font = typo
+        .get("font")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| profile.font_body.clone());
+    let body_size_pt = typo
+        .get("size_pt")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(profile.font_size_pt);
+    let body_line_spacing = typo
+        .get("line_spacing")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(profile.line_spacing);
+    let body_leading_em = body_line_spacing - 1.0;
+
+    // Document-wide paragraph indent (chapter body only — wrappers reset for format pages).
+    doc.push_str("#set par(first-line-indent: 1.5em)\n\n");
 
     // Helper to emit an invisible labeled anchor for a section.
     // We use #metadata wrapped with a label so the introspector can find it.
@@ -521,6 +589,19 @@ fn build_typst_markup(
         ));
         doc.push_str("#v(2em)\n");
 
+        // Chapter body — wrapped in a content block that scopes the body typography.
+        // Only chapter body paragraphs use the picked body font/size/leading.
+        doc.push_str("#[\n");
+        doc.push_str(&format!(
+            "#set text(font: \"{}\", size: {}pt)\n",
+            escape_typst(&body_font),
+            body_size_pt,
+        ));
+        doc.push_str(&format!(
+            "#set par(leading: {}em, first-line-indent: 1.5em)\n",
+            body_leading_em,
+        ));
+
         // Paragraphs from extracted text (\n\n separated)
         let paragraphs: Vec<&str> = text.split("\n\n").collect();
         for (pi, para) in paragraphs.iter().enumerate() {
@@ -536,6 +617,7 @@ fn build_typst_markup(
                 doc.push_str(&format!("{}\n\n", escaped));
             }
         }
+        doc.push_str("]\n");
     }
 
     // ---- Back matter ----
@@ -566,8 +648,8 @@ use std::sync::Mutex;
 use std::time::Instant;
 use serde::Serialize;
 
-fn compile_document(markup: &str, images: ImageMap) -> Result<PagedDocument, String> {
-    let world = IweWorld::new(markup.to_string(), images);
+fn compile_document(markup: &str, images: ImageMap, cache: &FontCache) -> Result<PagedDocument, String> {
+    let world = IweWorld::new(markup.to_string(), images, cache);
     let warned = typst::compile::<PagedDocument>(&world);
     match warned.output {
         Ok(doc) => Ok(doc),
@@ -585,13 +667,25 @@ fn compile_document(markup: &str, images: ImageMap) -> Result<PagedDocument, Str
 
 pub struct FormatState {
     document: Mutex<Option<PagedDocument>>,
+    /// Lazily-initialized font cache (system + embedded)
+    font_cache: Mutex<Option<Arc<FontCache>>>,
 }
 
 impl FormatState {
     pub fn new() -> Self {
         FormatState {
             document: Mutex::new(None),
+            font_cache: Mutex::new(None),
         }
+    }
+
+    /// Get or initialize the font cache.
+    pub fn get_or_init_fonts(&self) -> Arc<FontCache> {
+        let mut guard = self.font_cache.lock().unwrap();
+        if guard.is_none() {
+            *guard = Some(Arc::new(FontCache::discover()));
+        }
+        guard.as_ref().unwrap().clone()
     }
 }
 
@@ -687,7 +781,8 @@ pub fn compile_preview(
 
     // 4. Typst compilation
     let t = Instant::now();
-    let document = compile_document(&markup, images)?;
+    let cache = format_state.get_or_init_fonts();
+    let document = compile_document(&markup, images, &cache)?;
     let typst_compile_ms = t.elapsed().as_secs_f64() * 1000.0;
 
     let page_count = document.pages.len();
@@ -742,6 +837,23 @@ fn resolve_section_pages(
         }
     }
     map
+}
+
+/// Return the list of available font family names (system + embedded fallbacks).
+/// Sorted alphabetically and deduplicated.
+#[tauri::command]
+pub fn list_system_fonts(
+    format_state: tauri::State<'_, FormatState>,
+) -> Result<Vec<String>, String> {
+    let cache = format_state.get_or_init_fonts();
+    let mut families: Vec<String> = cache
+        .book
+        .families()
+        .map(|(name, _)| name.to_string())
+        .collect();
+    families.sort_unstable();
+    families.dedup();
+    Ok(families)
 }
 
 /// Export a single page to SVG from the cached document (called by URI protocol handler).
