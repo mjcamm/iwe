@@ -233,6 +233,117 @@
   }
 
   // ---- Dialogue attribution adverb state ----
+  // ---- Word frequency comparison ----
+  let freqCompareEnabled = $state(true);
+  let freqCompareData = $state(null); // { title, words: [{word, total_count}] }
+  let freqCompareTitle = $state('');
+
+  async function loadFreqComparison() {
+    if (freqCompareData) return;
+    try {
+      const stored = await getProjectSetting('comparative_book_id');
+      if (stored == null || stored === '') return;
+      const id = parseInt(stored, 10);
+      if (Number.isNaN(id)) return;
+      const book = await import('$lib/db.js').then(m => m.getLibraryBook(id));
+      if (!book) return;
+      const analyses = JSON.parse(book.analysesJson || '{}');
+      const f = analyses.frequency;
+      if (Array.isArray(f)) {
+        freqCompareData = { words: f };
+        freqCompareTitle = book.title;
+      }
+    } catch (e) {
+      console.warn('Failed to load frequency comparison:', e);
+    }
+  }
+
+  $effect(() => { if (subTab === 'frequency') loadFreqComparison(); });
+
+  // Sort mode for split view: 'rank' | 'up' | 'down'
+  let freqSortMode = $state('rank');
+  function cycleFreqSortMode() {
+    freqSortMode = freqSortMode === 'rank' ? 'up' : freqSortMode === 'up' ? 'down' : 'rank';
+  }
+  function freqSortLabel() {
+    if (freqSortMode === 'up') return '▲ Biggest risers';
+    if (freqSortMode === 'down') return '▼ Biggest fallers';
+    return 'Sort: by rank';
+  }
+
+  // Comparison filtered + ranked according to current filters
+  let freqCompareFiltered = $derived.by(() => {
+    if (!freqCompareData?.words || !freqCompareEnabled) return null;
+    const f = (freqFilter || '').toLowerCase().trim();
+    const filtered = freqCompareData.words.filter(w => {
+      if (w.word.length < freqMinLength) return false;
+      if (w.total_count < freqMinCount) return false;
+      if (f && !w.word.toLowerCase().includes(f)) return false;
+      return true;
+    });
+    return filtered;
+  });
+
+  // Rank lookups: word → 1-based rank
+  function buildRankMap(list) {
+    const m = new Map();
+    if (!list) return m;
+    for (let i = 0; i < list.length; i++) m.set(list[i].word, i + 1);
+    return m;
+  }
+
+  let freqOurRanks = $derived.by(() => buildRankMap(freqResults ? freqFiltered() : null));
+  let freqCmpRanks = $derived.by(() => buildRankMap(freqCompareFiltered));
+
+  /**
+   * Apply the current sort mode to a list, given the OTHER side's rank map.
+   * Items not present in the other list (NEW) are pushed to the bottom for
+   * up/down modes so they don't dominate the result.
+   */
+  function applySortMode(list, otherRanks) {
+    if (!list) return [];
+    if (freqSortMode === 'rank') return list;
+    const enriched = list.map((item, idx) => {
+      const myRank = idx + 1;
+      const otherRank = otherRanks.get(item.word);
+      const diff = otherRank == null ? null : otherRank - myRank;
+      return { item, myRank, diff };
+    });
+    if (freqSortMode === 'up') {
+      enriched.sort((a, b) => {
+        if (a.diff == null && b.diff == null) return a.myRank - b.myRank;
+        if (a.diff == null) return 1;
+        if (b.diff == null) return -1;
+        return b.diff - a.diff; // largest positive first
+      });
+    } else {
+      enriched.sort((a, b) => {
+        if (a.diff == null && b.diff == null) return a.myRank - b.myRank;
+        if (a.diff == null) return 1;
+        if (b.diff == null) return -1;
+        return a.diff - b.diff; // most negative first
+      });
+    }
+    return enriched.map(e => e.item);
+  }
+
+  let freqOurSorted = $derived.by(() => {
+    if (!freqResults) return [];
+    return applySortMode(freqFiltered(), freqCmpRanks);
+  });
+  let freqCmpSorted = $derived.by(() => {
+    if (!freqCompareFiltered) return [];
+    return applySortMode(freqCompareFiltered, freqOurRanks);
+  });
+
+  function rankDelta(word, sourceRank, otherRanks) {
+    const otherRank = otherRanks.get(word);
+    if (otherRank == null) return { kind: 'new' };
+    const diff = otherRank - sourceRank; // positive: other ranks it lower (this side is more frequent)
+    if (diff === 0) return { kind: 'same' };
+    return { kind: diff > 0 ? 'up' : 'down', value: Math.abs(diff) };
+  }
+
   let adverbData = $state(null);
   let adverbCompareEnabled = $state(true);
   let adverbCompareData = $state(null); // { title, total_dialogue_spans, attributions_with_adverbs, total_instances, redundant_count, top_adverbs }
@@ -474,13 +585,112 @@
       <button class="rep-scan-btn" onclick={runFrequency} disabled={freqLoading}>
         {#if freqLoading}Scanning...{:else}<i class="bi bi-sort-numeric-down"></i> Scan Manuscript{/if}
       </button>
+      {#if freqCompareData}
+        <label class="cmp-toggle">
+          <input type="checkbox" bind:checked={freqCompareEnabled} />
+          Compare vs <strong>{freqCompareTitle}</strong>
+        </label>
+      {/if}
     </div>
 
     {#if freqResults}
       <div class="rep-filter">
         <input class="rep-filter-input" bind:value={freqFilter} placeholder="Filter words..." />
         <span class="rep-total">{freqFiltered().length} words</span>
+        {#if freqCompareEnabled && freqCompareFiltered}
+          <span class="rep-total cmp-total">{freqCompareFiltered.length} cmp</span>
+          <button class="freq-sort-btn" class:active={freqSortMode !== 'rank'} onclick={cycleFreqSortMode}>
+            {freqSortLabel()}
+          </button>
+        {/if}
       </div>
+      {#if freqCompareEnabled && freqCompareFiltered}
+        <div class="freq-split">
+          <!-- LEFT: ours -->
+          <div class="freq-col">
+            <div class="freq-col-head">Manuscript</div>
+            <div class="rep-list freq-col-list">
+              {#each freqOurSorted as item, idx (item.word)}
+                {@const ownRank = freqOurRanks.get(item.word) || (idx + 1)}
+                {@const delta = rankDelta(item.word, ownRank, freqCmpRanks)}
+                <div class="rep-item" class:expanded={freqExpanded === item.word}>
+                  <button class="rep-item-header" onclick={() => expandFreqWord(item.word)}>
+                    <span class="rep-rank">#{ownRank}</span>
+                    <span class="rep-word">{item.word}</span>
+                    <span class="rep-count">{item.total_count}&times;</span>
+                    <span class="rank-delta rank-{delta.kind}">
+                      {#if delta.kind === 'new'}NEW
+                      {:else if delta.kind === 'same'}—
+                      {:else if delta.kind === 'up'}▲{delta.value}
+                      {:else}▼{delta.value}{/if}
+                    </span>
+                  </button>
+                  {#if freqExpanded === item.word}
+                    <div class="rep-detail">
+                      <div class="rep-chapters">
+                        {#each item.chapters.filter(c => c.count > 0).sort((a, b) => b.count - a.count) as ch}
+                          <div class="rep-ch-row">
+                            <span class="rep-ch-name">{ch.chapter_title}</span>
+                            <span class="rep-ch-count">{ch.count}</span>
+                          </div>
+                        {/each}
+                      </div>
+                      {#if freqOccLoading}
+                        <div class="occ-loading">Loading occurrences...</div>
+                      {:else if freqOccurrences && freqOccurrences.length > 0}
+                        {@const occ = freqOccurrences[freqOccIdx]}
+                        <div class="occ-browser">
+                          <div class="occ-nav">
+                            <button class="occ-nav-btn" onclick={() => { if (freqOccIdx > 0) freqOccIdx--; }} disabled={freqOccIdx === 0}>
+                              <i class="bi bi-chevron-left"></i>
+                            </button>
+                            <span class="occ-counter">{freqOccIdx + 1} / {freqOccurrences.length}</span>
+                            <button class="occ-nav-btn" onclick={() => { if (freqOccIdx < freqOccurrences.length - 1) freqOccIdx++; }} disabled={freqOccIdx >= freqOccurrences.length - 1}>
+                              <i class="bi bi-chevron-right"></i>
+                            </button>
+                          </div>
+                          <div class="occ-chapter-tag">{occ.chapter_title}</div>
+                          <button
+                            class="occ-snippet"
+                            onclick={() => ongotochapter?.(occ.chapter_id, item.word, occ.char_position)}
+                            title="Jump to this occurrence"
+                          >
+                            &ldquo;...{@html highlightWord(occ.context, item.word)}...&rdquo;
+                          </button>
+                        </div>
+                      {/if}
+                    </div>
+                  {/if}
+                </div>
+              {/each}
+            </div>
+          </div>
+
+          <!-- RIGHT: comparison -->
+          <div class="freq-col freq-col-cmp">
+            <div class="freq-col-head cmp-head">{freqCompareTitle}</div>
+            <div class="rep-list freq-col-list">
+              {#each freqCmpSorted as item, idx (item.word)}
+                {@const ownRank = freqCmpRanks.get(item.word) || (idx + 1)}
+                {@const delta = rankDelta(item.word, ownRank, freqOurRanks)}
+                <div class="rep-item cmp-item">
+                  <div class="rep-item-header cmp-header">
+                    <span class="rep-rank cmp-rank">#{ownRank}</span>
+                    <span class="rep-word cmp-word">{item.word}</span>
+                    <span class="rep-count cmp-count">{item.total_count}&times;</span>
+                    <span class="rank-delta rank-{delta.kind}">
+                      {#if delta.kind === 'new'}NEW
+                      {:else if delta.kind === 'same'}—
+                      {:else if delta.kind === 'up'}▲{delta.value}
+                      {:else}▼{delta.value}{/if}
+                    </span>
+                  </div>
+                </div>
+              {/each}
+            </div>
+          </div>
+        </div>
+      {:else}
       <div class="rep-list">
         {#each freqFiltered() as item (item.word)}
           <div class="rep-item" class:expanded={freqExpanded === item.word}>
@@ -532,6 +742,7 @@
           </div>
         {/each}
       </div>
+      {/if}
     {/if}
 
   {:else if subTab === 'clusters'}
@@ -1095,6 +1306,7 @@
     width: 100%; background: none; border: none;
     padding: 0.45rem 0.75rem; cursor: pointer; text-align: left;
     font-family: var(--iwe-font-ui); transition: background 100ms;
+    min-height: 32px; box-sizing: border-box;
   }
   .rep-item-header:hover { background: var(--iwe-bg-hover); }
 
@@ -1411,6 +1623,83 @@
   .adv-top-pill.cmp-pill .adv-pill-count {
     color: rgba(168, 90, 4, 0.7);
   }
+
+  .freq-sort-btn {
+    margin-left: auto;
+    font-family: var(--iwe-font-ui); font-size: 0.75rem; font-weight: 500;
+    padding: 0.3rem 0.65rem; border-radius: 4px;
+    background: var(--iwe-bg-hover); border: 1px solid var(--iwe-border);
+    color: var(--iwe-text-secondary); cursor: pointer;
+    transition: all 100ms; white-space: nowrap;
+  }
+  .freq-sort-btn:hover { border-color: var(--iwe-accent); color: var(--iwe-accent); }
+  .freq-sort-btn.active {
+    background: rgba(168, 90, 4, 0.10); border-color: #a85a04; color: #a85a04;
+  }
+
+  /* Word frequency split view */
+  .freq-split {
+    display: grid; grid-template-columns: 1fr 1fr;
+    gap: 0; border-top: 1px solid var(--iwe-border-light);
+    flex: 1; min-height: 0;
+  }
+  .freq-col {
+    min-width: 0; min-height: 0;
+    display: flex; flex-direction: column;
+    border-right: 1px solid var(--iwe-border-light);
+  }
+  .freq-col:last-child { border-right: none; }
+  .freq-col-cmp { background: rgba(168, 90, 4, 0.04); }
+  .freq-col-head {
+    font-size: 0.7rem; font-weight: 700; color: var(--iwe-text-secondary);
+    text-transform: uppercase; letter-spacing: 0.06em;
+    padding: 0.5rem 0.75rem;
+    background: var(--iwe-bg-hover);
+    border-bottom: 1px solid var(--iwe-border-light);
+    flex-shrink: 0;
+  }
+  .freq-col-head.cmp-head {
+    background: rgba(168, 90, 4, 0.10);
+    color: #a85a04;
+  }
+  .freq-col-list {
+    flex: 1; min-height: 0; overflow-y: auto;
+  }
+
+  .rep-rank {
+    font-size: 0.7rem; font-weight: 600; color: var(--iwe-text-faint);
+    min-width: 28px; font-variant-numeric: tabular-nums;
+  }
+  .rep-rank.cmp-rank { color: #a85a04; opacity: 0.7; }
+  .rep-word.cmp-word { color: #a85a04; }
+  .rep-count.cmp-count { color: rgba(168, 90, 4, 0.75); }
+  .cmp-item .cmp-header {
+    display: flex; align-items: center; gap: 0.5rem;
+    padding: 0.45rem 0.75rem; cursor: default;
+    font-family: var(--iwe-font-ui);
+    border-bottom: 1px solid rgba(168, 90, 4, 0.08);
+    min-height: 32px; box-sizing: border-box;
+  }
+
+  /* Rank delta indicators */
+  .rank-delta {
+    margin-left: auto;
+    font-size: 0.7rem; font-weight: 700;
+    padding: 0.1rem 0.4rem; border-radius: 3px;
+    font-variant-numeric: tabular-nums;
+    min-width: 32px; text-align: center;
+    line-height: 1.2;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .rank-up   { color: #1e7a3a; background: rgba(30, 122, 58, 0.10); }
+  .rank-down { color: #a02020; background: rgba(160, 32, 32, 0.10); }
+  .rank-same { color: var(--iwe-text-faint); background: var(--iwe-bg-hover); }
+  .rank-new  {
+    color: #a85a04; background: rgba(168, 90, 4, 0.12);
+    font-size: 0.62rem; letter-spacing: 0.05em;
+  }
+
+  .rep-total.cmp-total { color: #a85a04; }
 
   /* Generic comparison toggle (used by adverbs and other tabs) */
   .cmp-toggle {

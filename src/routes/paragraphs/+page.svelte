@@ -51,7 +51,7 @@
   // Track each chart's pixel width via a ResizeObserver action so the SVG
   // overlay can use real pixel coordinates (no viewBox stretching).
   let chartWidths = $state({});
-  const CHART_HEIGHT = 160;
+  const CHART_HEIGHT = 210;
 
   function trackWidth(node, chapterId) {
     const update = () => {
@@ -159,7 +159,7 @@
               <span class="stat">variation <strong>{ch.variation_pct}%</strong></span>
               <span class="stat-label">{variationLabel(ch.variation_pct)}</span>
               {#if compChapter}
-                <span class="cmp-stat">vs <strong>{compChapter.total_paragraphs} paras</strong>, avg <strong>{compChapter.avg_length}</strong>w</span>
+                <span class="cmp-stat">vs <strong>{compChapter.total_paragraphs} paras</strong>, avg <strong>{compChapter.avg_length}</strong>w, variation <strong>{compChapter.variation_pct}%</strong></span>
               {/if}
             </div>
           </div>
@@ -280,7 +280,7 @@
 
   .col-chart {
     display: flex; align-items: flex-end; gap: 3px;
-    height: 160px;
+    height: 210px;
   }
 
   .cmp-toggle {

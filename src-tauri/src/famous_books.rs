@@ -116,18 +116,35 @@ pub fn save_library_book(
     analyses_json: String,
 ) -> Result<i64, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
-    // Upsert by source filename so re-saving (even after renaming the title) overwrites
-    conn.execute(
-        "DELETE FROM famous_books WHERE source = ?1",
-        params![&source],
-    )
-    .map_err(|e| e.to_string())?;
-    conn.execute(
-        "INSERT INTO famous_books (title, author, source, word_count, analyses_json) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![&title, &author, &source, word_count, &analyses_json],
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(conn.last_insert_rowid())
+
+    // If a row with this source already exists, UPDATE in place so the id
+    // (and any project_settings references to it) survives.
+    let existing_id: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM famous_books WHERE source = ?1",
+            params![&source],
+            |row| row.get(0),
+        )
+        .ok();
+
+    if let Some(id) = existing_id {
+        conn.execute(
+            "UPDATE famous_books
+                SET title = ?1, author = ?2, word_count = ?3,
+                    analyses_json = ?4, imported_at = CURRENT_TIMESTAMP
+              WHERE id = ?5",
+            params![&title, &author, word_count, &analyses_json, id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(id)
+    } else {
+        conn.execute(
+            "INSERT INTO famous_books (title, author, source, word_count, analyses_json) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![&title, &author, &source, word_count, &analyses_json],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(conn.last_insert_rowid())
+    }
 }
 
 #[tauri::command]

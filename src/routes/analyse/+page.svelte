@@ -24,11 +24,83 @@
   // These are the EXACT same commands the project analysis panel uses.
   const STEPS = [
     { key: 'chapter',    label: 'Chapter analysis',         fn: () => chapterAnalysis() },
-    { key: 'pacing',     label: 'Pacing (sentence length)', fn: () => pacingAnalysis() },
-    { key: 'readability',label: 'Readability (FK grade)',   fn: () => readabilityAnalysis() },
-    { key: 'paragraphs', label: 'Paragraph length',         fn: () => paragraphLengthAnalysis() },
-    { key: 'adverbs',    label: 'Adverbs in dialogue',      fn: () => adverbAnalysis() },
-    { key: 'frequency',  label: 'Word frequency',           fn: () => wordFrequency(4, 5, null) }
+    // Pacing: strip sentence_texts and sentence_starts — we only need the
+    // sentence_lengths array for whole-book waveform comparison.
+    { key: 'pacing',     label: 'Pacing (sentence length)', fn: async () => {
+      const raw = await pacingAnalysis();
+      if (Array.isArray(raw)) {
+        return raw.map(ch => ({
+          chapter_id: ch.chapter_id,
+          chapter_title: ch.chapter_title,
+          sentence_lengths: ch.sentence_lengths
+        }));
+      }
+      return raw;
+    }},
+    // Readability: strip sentence_texts/sentence_grades/sentence_starts —
+    // comparison only uses per-chapter total_words + grade_level.
+    { key: 'readability',label: 'Readability (FK grade)',   fn: async () => {
+      const raw = await readabilityAnalysis();
+      if (raw && Array.isArray(raw.chapters)) {
+        return {
+          ...raw,
+          chapters: raw.chapters.map(ch => ({
+            chapter_id: ch.chapter_id,
+            chapter_title: ch.chapter_title,
+            grade_level: ch.grade_level,
+            total_words: ch.total_words,
+            total_sentences: ch.total_sentences,
+            total_syllables: ch.total_syllables,
+            avg_words_per_sentence: ch.avg_words_per_sentence
+          }))
+        };
+      }
+      return raw;
+    }},
+    // Paragraphs: strip per-paragraph previews and char positions — keep
+    // word counts so the per-chapter overlay still works.
+    { key: 'paragraphs', label: 'Paragraph length',         fn: async () => {
+      const raw = await paragraphLengthAnalysis();
+      if (raw && Array.isArray(raw.chapters)) {
+        return {
+          ...raw,
+          chapters: raw.chapters.map(ch => ({
+            chapter_id: ch.chapter_id,
+            chapter_title: ch.chapter_title,
+            total_paragraphs: ch.total_paragraphs,
+            avg_length: ch.avg_length,
+            variation_pct: ch.variation_pct,
+            paragraphs: (ch.paragraphs || []).map(p => ({ word_count: p.word_count }))
+          }))
+        };
+      }
+      return raw;
+    }},
+    // Adverbs: strip per-instance dialogue snippets and contexts — keep
+    // headline counts and top_adverbs which are all the comparison needs.
+    { key: 'adverbs',    label: 'Adverbs in dialogue',      fn: async () => {
+      const raw = await adverbAnalysis();
+      if (raw) {
+        return {
+          total_dialogue_spans: raw.total_dialogue_spans,
+          attributions_with_adverbs: raw.attributions_with_adverbs,
+          total_instances: raw.total_instances,
+          redundant_count: raw.redundant_count,
+          top_adverbs: raw.top_adverbs
+        };
+      }
+      return raw;
+    }},
+    // Word frequency: store loose filters (min length 1, min count 10) so the
+    // saved blob covers most useful comparison cases. Strip per-chapter detail
+    // to keep the JSON blob small — comparative views only need {word, count}.
+    { key: 'frequency',  label: 'Word frequency',           fn: async () => {
+      const raw = await wordFrequency(1, 5, null);
+      if (Array.isArray(raw)) {
+        return raw.map(w => ({ word: w.word, total_count: w.total_count }));
+      }
+      return raw;
+    }}
   ];
 
   let filepath = $state('');
