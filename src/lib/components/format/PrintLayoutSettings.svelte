@@ -1,10 +1,235 @@
 <script>
+  import { onMount } from 'svelte';
+  import { updateProfileCategory, getSettings, saveSettings } from '$lib/db.js';
+  import { getRecommendedMargins } from '$lib/marginDefaults.js';
+
   let { profile, onchange } = $props();
+
+  // Unit preference is a global user setting — persisted in settings.json so it
+  // applies across all projects and profiles.
+  let unit = $state('in'); // 'in' | 'mm'
+  let unitLoaded = $state(false);
+
+  onMount(async () => {
+    const settings = await getSettings();
+    unit = settings.formatLengthUnit || 'in';
+    unitLoaded = true;
+  });
+
+  async function saveUnit(u) {
+    unit = u;
+    const settings = await getSettings();
+    settings.formatLengthUnit = u;
+    await saveSettings(settings);
+  }
+
+  // Canonical storage is inches. Read from print_layout_json with fallback to scalar columns.
+  let settings = $derived.by(() => {
+    try {
+      const parsed = JSON.parse(profile?.print_layout_json || '{}');
+      return {
+        margin_top_in:     parsed.margin_top_in     ?? profile?.margin_top_in     ?? 0.875,
+        margin_bottom_in:  parsed.margin_bottom_in  ?? profile?.margin_bottom_in  ?? 0.875,
+        margin_outside_in: parsed.margin_outside_in ?? profile?.margin_outside_in ?? 0.625,
+        margin_inside_in:  parsed.margin_inside_in  ?? profile?.margin_inside_in  ?? 0.875,
+        justify: parsed.justify ?? true,
+        hyphens: parsed.hyphens ?? true,
+      };
+    } catch {
+      return { margin_top_in: 0.875, margin_bottom_in: 0.875, margin_outside_in: 0.625, margin_inside_in: 0.875, justify: true, hyphens: true };
+    }
+  });
+
+  // Local working copies (inches, canonical)
+  let topIn    = $state(settings.margin_top_in);
+  let bottomIn = $state(settings.margin_bottom_in);
+  let outsideIn = $state(settings.margin_outside_in);
+  let insideIn = $state(settings.margin_inside_in);
+  let justify  = $state(settings.justify);
+  let hyphens  = $state(settings.hyphens);
+
+  // Re-sync when profile prop changes
+  $effect(() => {
+    topIn     = settings.margin_top_in;
+    bottomIn  = settings.margin_bottom_in;
+    outsideIn = settings.margin_outside_in;
+    insideIn  = settings.margin_inside_in;
+    justify   = settings.justify;
+    hyphens   = settings.hyphens;
+  });
+
+  // ---- Unit conversion ----
+  const MM_PER_IN = 25.4;
+
+  function toDisplay(inches) {
+    if (unit === 'mm') return (inches * MM_PER_IN).toFixed(1);
+    return inches.toFixed(3);
+  }
+
+  function fromDisplay(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n < 0) return null;
+    return unit === 'mm' ? n / MM_PER_IN : n;
+  }
+
+  const unitLabel = $derived(unit === 'mm' ? 'mm' : '″');
+  const step = $derived(unit === 'mm' ? '0.5' : '0.05');
+
+  // ---- Save (debounced) ----
+  let saveTimer = null;
+  function scheduleSave() {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(persist, 300);
+  }
+
+  async function persist() {
+    if (!profile) return;
+    const json = JSON.stringify({
+      margin_top_in:     topIn,
+      margin_bottom_in:  bottomIn,
+      margin_outside_in: outsideIn,
+      margin_inside_in:  insideIn,
+      justify,
+      hyphens,
+    });
+    await updateProfileCategory(profile.id, 'print_layout_json', json);
+    onchange?.();
+  }
+
+  function toggleJustify() {
+    justify = !justify;
+    scheduleSave();
+  }
+
+  function toggleHyphens() {
+    hyphens = !hyphens;
+    scheduleSave();
+  }
+
+  function handleInput(field, e) {
+    const inches = fromDisplay(e.target.value);
+    if (inches == null) return;
+    if (field === 'top')     topIn = inches;
+    if (field === 'bottom')  bottomIn = inches;
+    if (field === 'outside') outsideIn = inches;
+    if (field === 'inside')  insideIn = inches;
+    scheduleSave();
+  }
+
+  async function resetToRecommended() {
+    if (!profile) return;
+    const m = getRecommendedMargins(profile.trim_width_in, profile.trim_height_in);
+    topIn = m.top;
+    bottomIn = m.bottom;
+    outsideIn = m.outside;
+    insideIn = m.inside;
+    // Force an immediate save — don't wait for the debounce
+    clearTimeout(saveTimer);
+    await persist();
+  }
+
+  // Label showing the current trim in the user's unit
+  const trimLabel = $derived.by(() => {
+    if (!profile) return '';
+    if (unit === 'mm') {
+      const w = (profile.trim_width_in * MM_PER_IN).toFixed(0);
+      const h = (profile.trim_height_in * MM_PER_IN).toFixed(0);
+      return `${w}×${h}mm`;
+    }
+    return `${profile.trim_width_in}″×${profile.trim_height_in}″`;
+  });
 </script>
 
 <div class="custom-section">
   <h4 class="custom-section-title">Print Layout</h4>
-  <p class="custom-placeholder">Margins (top/bottom/inside/outside), bleed, gutter calculation, chapter sink, page numbering (Roman vs Arabic).</p>
+
+  <!-- Unit toggle -->
+  <div class="unit-toggle">
+    <button class="unit-btn" class:active={unit === 'in'}
+      onclick={() => saveUnit('in')}>Inches</button>
+    <button class="unit-btn" class:active={unit === 'mm'}
+      onclick={() => saveUnit('mm')}>Millimetres</button>
+  </div>
+
+  <div class="setting-group">
+    <div class="group-label">Margins</div>
+
+    {#if unitLoaded}
+      {#key unit}
+        <div class="margin-grid">
+          <label class="margin-field">
+            <span>Top</span>
+            <div class="input-wrap">
+              <input type="number" {step} min="0"
+                value={toDisplay(topIn)}
+                oninput={(e) => handleInput('top', e)} />
+              <span class="unit-suffix">{unitLabel}</span>
+            </div>
+          </label>
+
+          <label class="margin-field">
+            <span>Bottom</span>
+            <div class="input-wrap">
+              <input type="number" {step} min="0"
+                value={toDisplay(bottomIn)}
+                oninput={(e) => handleInput('bottom', e)} />
+              <span class="unit-suffix">{unitLabel}</span>
+            </div>
+          </label>
+
+          <label class="margin-field">
+            <span>Outside</span>
+            <div class="input-wrap">
+              <input type="number" {step} min="0"
+                value={toDisplay(outsideIn)}
+                oninput={(e) => handleInput('outside', e)} />
+              <span class="unit-suffix">{unitLabel}</span>
+            </div>
+          </label>
+
+          <label class="margin-field">
+            <span>Inside <span class="hint">(gutter)</span></span>
+            <div class="input-wrap">
+              <input type="number" {step} min="0"
+                value={toDisplay(insideIn)}
+                oninput={(e) => handleInput('inside', e)} />
+              <span class="unit-suffix">{unitLabel}</span>
+            </div>
+          </label>
+        </div>
+      {/key}
+    {/if}
+
+    <button class="reset-btn" onclick={resetToRecommended}
+      title="Apply professional defaults for this trim size">
+      <i class="bi bi-arrow-counterclockwise"></i>
+      Reset to recommended for {trimLabel}
+    </button>
+  </div>
+
+  <div class="setting-group">
+    <div class="group-label">Text Flow</div>
+
+    <button class="toggle-row" onclick={toggleJustify}>
+      <span class="toggle-switch" class:on={justify}>
+        <span class="toggle-knob"></span>
+      </span>
+      <div class="toggle-text">
+        <span class="toggle-label">Justified</span>
+        <span class="toggle-hint">Stretch text to fill both margins (standard for books)</span>
+      </div>
+    </button>
+
+    <button class="toggle-row" onclick={toggleHyphens}>
+      <span class="toggle-switch" class:on={hyphens}>
+        <span class="toggle-knob"></span>
+      </span>
+      <div class="toggle-text">
+        <span class="toggle-label">Hyphenation</span>
+        <span class="toggle-hint">Break words at line ends to avoid large gaps</span>
+      </div>
+    </button>
+  </div>
 </div>
 
 <style>
@@ -12,11 +237,149 @@
   .custom-section-title {
     font-family: var(--iwe-font-prose);
     font-weight: 400; font-size: 0.95rem;
-    margin: 0 0 0.6rem 0; color: var(--iwe-text);
+    margin: 0 0 0.8rem 0; color: var(--iwe-text);
   }
-  .custom-placeholder {
+  .setting-group { margin-bottom: 1rem; }
+  .group-label {
+    font-family: var(--iwe-font-ui); font-size: 0.7rem;
+    color: var(--iwe-text-muted); text-transform: uppercase;
+    letter-spacing: 0.04em; font-weight: 600;
+    margin-bottom: 0.5rem;
+  }
+
+  .unit-toggle {
+    display: flex; gap: 0;
+    border: 1px solid var(--iwe-border); border-radius: var(--iwe-radius-sm);
+    overflow: hidden;
+    margin-bottom: 1rem;
+  }
+  .unit-btn {
+    flex: 1; padding: 0.4rem 0;
     font-family: var(--iwe-font-ui); font-size: 0.78rem;
-    color: var(--iwe-text-muted); font-style: italic;
-    margin: 0; line-height: 1.4;
+    border: none; background: var(--iwe-bg); color: var(--iwe-text-muted);
+    cursor: pointer; transition: all 120ms;
+  }
+  .unit-btn:first-child { border-right: 1px solid var(--iwe-border); }
+  .unit-btn:hover { background: var(--iwe-bg-hover); }
+  .unit-btn.active {
+    background: var(--iwe-accent); color: #fff; font-weight: 500;
+  }
+
+  .margin-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.6rem;
+  }
+  .margin-field {
+    display: flex; flex-direction: column; gap: 0.25rem;
+    font-family: var(--iwe-font-ui); font-size: 0.75rem;
+    color: var(--iwe-text-muted);
+  }
+  .margin-field > span:first-child {
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    font-weight: 600;
+  }
+  .hint {
+    text-transform: none;
+    font-weight: 400;
+    opacity: 0.7;
+    font-size: 0.68rem;
+  }
+  .input-wrap {
+    display: flex; align-items: center;
+    border: 1px solid var(--iwe-border); border-radius: var(--iwe-radius-sm);
+    background: var(--iwe-bg);
+    overflow: hidden;
+  }
+  .input-wrap:focus-within { border-color: var(--iwe-accent); }
+  .input-wrap input {
+    flex: 1; min-width: 0;
+    border: none; background: none;
+    padding: 0.4rem 0.5rem;
+    font-family: var(--iwe-font-ui); font-size: 0.85rem;
+    color: var(--iwe-text);
+    outline: none;
+  }
+  /* Hide the spinner arrows — users type or use drag; the arrows are clutter */
+  .input-wrap input::-webkit-outer-spin-button,
+  .input-wrap input::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  .unit-suffix {
+    padding: 0 0.55rem;
+    font-family: var(--iwe-font-ui); font-size: 0.72rem;
+    color: var(--iwe-text-muted);
+    background: var(--iwe-bg-warm);
+    border-left: 1px solid var(--iwe-border);
+    height: 100%;
+    display: flex; align-items: center;
+  }
+
+  .reset-btn {
+    margin-top: 0.8rem;
+    width: 100%;
+    display: flex; align-items: center; justify-content: center; gap: 0.4rem;
+    padding: 0.5rem 0.7rem;
+    font-family: var(--iwe-font-ui); font-size: 0.78rem;
+    color: var(--iwe-text-muted);
+    background: none;
+    border: 1px dashed var(--iwe-border);
+    border-radius: var(--iwe-radius-sm);
+    cursor: pointer;
+    transition: all 120ms;
+  }
+  .reset-btn:hover {
+    color: var(--iwe-accent);
+    border-color: var(--iwe-accent);
+    background: rgba(45, 106, 94, 0.05);
+  }
+  .reset-btn i { font-size: 0.85rem; }
+
+  /* Toggle rows */
+  .toggle-row {
+    width: 100%;
+    display: flex; align-items: flex-start; gap: 0.7rem;
+    padding: 0.55rem 0.1rem;
+    background: none; border: none; cursor: pointer;
+    text-align: left;
+    border-bottom: 1px solid transparent;
+    transition: background 100ms;
+  }
+  .toggle-row:hover { background: var(--iwe-bg-hover); }
+  .toggle-row + .toggle-row {
+    border-top: 1px solid var(--iwe-border);
+  }
+  .toggle-switch {
+    flex-shrink: 0;
+    width: 32px; height: 18px;
+    border-radius: 9px;
+    background: var(--iwe-border);
+    position: relative;
+    transition: background 150ms;
+    margin-top: 2px;
+  }
+  .toggle-switch.on { background: var(--iwe-accent); }
+  .toggle-knob {
+    position: absolute;
+    top: 2px; left: 2px;
+    width: 14px; height: 14px;
+    border-radius: 50%;
+    background: #fff;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.25);
+    transition: transform 150ms;
+  }
+  .toggle-switch.on .toggle-knob { transform: translateX(14px); }
+  .toggle-text {
+    display: flex; flex-direction: column; gap: 0.15rem; min-width: 0;
+  }
+  .toggle-label {
+    font-family: var(--iwe-font-ui); font-size: 0.85rem;
+    color: var(--iwe-text); font-weight: 500;
+  }
+  .toggle-hint {
+    font-family: var(--iwe-font-ui); font-size: 0.7rem;
+    color: var(--iwe-text-muted); line-height: 1.35;
   }
 </style>

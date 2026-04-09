@@ -11,10 +11,10 @@
   let compareBook = $state(null);   // { title, author, chapters: [...] }
   let showComparison = $state(true);
 
-  let chapCanvas;
-  let dialogueCanvas;
-  let sentenceLenCanvas;
-  let vocabCanvas;
+  let chapCanvas = $state();
+  let dialogueCanvas = $state();
+  let sentenceLenCanvas = $state();
+  let vocabCanvas = $state();
 
   // Comparison palette: dark / light orange
   const ORANGE_DARK = '#a85a04';
@@ -49,6 +49,12 @@
       }
     }
     loading = false;
+    console.log('[chapters] data loaded', {
+      chapterCount: data?.length,
+      firstChapter: data?.[0],
+      hasCompare: !!compareBook,
+      compareChapterCount: compareBook?.chapters?.length,
+    });
   });
 
   $effect(() => { void compareBook; void showComparison; if (data && chapCanvas) drawWordCountChart(); });
@@ -66,6 +72,14 @@
     const ctx = canvas.getContext('2d');
     const dpr = window.devicePixelRatio || 1;
     const containerW = canvas.parentElement?.clientWidth || 600;
+    console.log('[chapters] drawBarChart', {
+      canvasId: canvas?.id || canvas?.className,
+      valuesLen: values?.length,
+      sampleValues: values?.slice(0, 5),
+      anyNonZero: values?.some(v => v != null && v !== 0),
+      compareLen: compareValues?.length,
+      containerW, dpr,
+    });
 
     const hasComp = !!compareValues && compareValues.length > 0;
     const slotCount = hasComp ? Math.max(values.length, compareValues.length) : values.length;
@@ -82,8 +96,16 @@
     const logicalW = Math.max(containerW, 70 + slotCount * (groupW + groupGap));
     const logicalH = chartH + labelH + 30;
 
-    canvas.width = logicalW * dpr;
-    canvas.height = logicalH * dpr;
+    const physicalW = logicalW * dpr;
+    const physicalH = logicalH * dpr;
+    const MAX_CANVAS = 32767;
+    if (physicalW > MAX_CANVAS || physicalH > MAX_CANVAS) {
+      console.warn('[chapters] BAR CHART canvas exceeds browser max', {
+        physicalW, physicalH, logicalW, logicalH, dpr, slotCount, groupW, groupGap,
+      });
+    }
+    canvas.width = physicalW;
+    canvas.height = physicalH;
     canvas.style.width = logicalW + 'px';
     canvas.style.height = logicalH + 'px';
     ctx.scale(dpr, dpr);
@@ -92,7 +114,12 @@
 
     // Shared y-scale across both books
     const allVals = hasComp ? [...values, ...compareValues] : values;
-    const maxVal = Math.max(...allVals.filter(v => v != null), 1);
+    const filtered = allVals.filter(v => v != null);
+    const maxVal = Math.max(...filtered, 1);
+    console.log('[chapters] drawBarChart computed', {
+      slotCount, barW, groupW, groupGap, logicalW, logicalH, maxVal,
+      filteredCount: filtered.length,
+    });
 
     for (let i = 0; i < slotCount; i++) {
       const groupX = 60 + i * (groupW + groupGap);
@@ -191,8 +218,19 @@
     const logicalW = Math.max(containerW, 80 + slotCount * (groupW + groupGap));
     const logicalH = chartH + labelH + 30;
 
-    dialogueCanvas.width = logicalW * dpr;
-    dialogueCanvas.height = logicalH * dpr;
+    const physicalW = logicalW * dpr;
+    const physicalH = logicalH * dpr;
+    const MAX_CANVAS = 32767;
+    console.log('[chapters] drawDialogueChart', {
+      dataLen: data?.length, hasComp, slotCount, singleBarW, groupW, groupGap,
+      logicalW, logicalH, physicalW, physicalH, dpr,
+      sampleOwn: data?.slice(0, 3).map(d => ({ t: d.total_words, n: d.narrative_words, dlg: d.dialogue_words })),
+    });
+    if (physicalW > MAX_CANVAS || physicalH > MAX_CANVAS) {
+      console.warn('[chapters] DIALOGUE canvas exceeds browser max', { physicalW, physicalH });
+    }
+    dialogueCanvas.width = physicalW;
+    dialogueCanvas.height = physicalH;
     dialogueCanvas.style.width = logicalW + 'px';
     dialogueCanvas.style.height = logicalH + 'px';
     ctx.scale(dpr, dpr);

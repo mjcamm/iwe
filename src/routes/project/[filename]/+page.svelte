@@ -40,13 +40,14 @@
   // Dialogue detection highlight state
   let dialogueHighlightActive = $state(false);
 
-  const DIALOGUE_OPENERS = new Set(['"', '\u201C', '\u201E', '\u00AB', '\u300C']);
+  const DIALOGUE_OPENERS = new Set(['"', '\u201C', '\u201E', '\u00AB', '\u300C', '\u2018']);
   const DIALOGUE_CLOSER_MAP = {
     '"': new Set(['"']),
     '\u201C': new Set(['\u201D', '"']),
     '\u201E': new Set(['\u201D', '\u201C']),
     '\u00AB': new Set(['\u00BB']),
     '\u300C': new Set(['\u300D']),
+    '\u2018': new Set(['\u2019']),
   };
 
   function computeDialogueRanges(ed) {
@@ -63,11 +64,30 @@
             continue;
           }
         }
+        // Single curly opener ‘ is ambiguous with apostrophe. Only treat as
+        // an opener when preceded by start-of-text or whitespace/opening
+        // punctuation, AND followed by a letter (not e.g. ’tis closer-as-elision).
+        if (ch === '\u2018') {
+          const prev = i > 0 ? text[i - 1] : '\n';
+          const next = i + 1 < text.length ? text[i + 1] : ' ';
+          if (/[a-zA-Z0-9\u00C0-\u024F]/.test(prev) || !/[a-zA-Z\u00C0-\u024F]/.test(next)) {
+            i++;
+            continue;
+          }
+        }
         const validClosers = DIALOGUE_CLOSER_MAP[ch];
         let j = i + 1;
         let found = false;
-        while (j < text.length && j - i < 500) {
+        while (j < text.length && j - i < 2000) {
           if (validClosers.has(text[j])) {
+            // Disambiguate ’ closer vs apostrophe (Bilbo’s, mother’s):
+            // a real closer is followed by whitespace/punctuation/end, not a letter.
+            if (text[j] === '\u2019') {
+              const before = j > 0 ? text[j - 1] : '';
+              const after = j + 1 < text.length ? text[j + 1] : '\n';
+              const punctBefore = /[.,!?;:\u2014\u2013]/.test(before);
+              if (!punctBefore && /[a-zA-Z\u00C0-\u024F]/.test(after)) { j++; continue; }
+            }
             if (j - i > 2) {
               ranges.push({ from: posMap[i], to: posMap[i] + 1, class: 'debug-highlight-quote' });
               if (i + 1 < j) {

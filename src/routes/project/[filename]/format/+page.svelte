@@ -9,7 +9,9 @@
     updateFormatPage, deleteFormatPage, reorderFormatPages,
     addPageExclusion, removePageExclusion, listPageExclusions,
     compilePreview, getProjectSetting, setProjectSetting,
+    updateProfileCategory,
   } from '$lib/db.js';
+  import { getRecommendedMargins } from '$lib/marginDefaults.js';
   import { addToast } from '$lib/toast.js';
   import PageContentEditor from '$lib/components/PageContentEditor.svelte';
   import ChapterHeadings from '$lib/components/format/ChapterHeadings.svelte';
@@ -428,6 +430,30 @@
     if (!activeProfileId) return;
     const prof = activeProfile;
     if (!prof) return;
+
+    // Auto-apply recommended margins if the user hasn't customised them yet.
+    // We check print_layout_json for any margin keys — their presence means
+    // the user has explicitly set margins, so we leave them alone.
+    let existingLayout = {};
+    try { existingLayout = JSON.parse(prof.print_layout_json || '{}'); } catch {}
+    const hasCustomMargins =
+      existingLayout.margin_top_in != null ||
+      existingLayout.margin_bottom_in != null ||
+      existingLayout.margin_outside_in != null ||
+      existingLayout.margin_inside_in != null;
+
+    if (!hasCustomMargins) {
+      const m = getRecommendedMargins(preset.w, preset.h);
+      const newLayout = {
+        ...existingLayout,
+        margin_top_in:     m.top,
+        margin_bottom_in:  m.bottom,
+        margin_outside_in: m.outside,
+        margin_inside_in:  m.inside,
+      };
+      await updateProfileCategory(prof.id, 'print_layout_json', JSON.stringify(newLayout));
+    }
+
     await updateFormatProfile(
       prof.id, prof.name, type,
       preset.w, preset.h,

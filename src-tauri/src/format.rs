@@ -142,6 +142,77 @@ fn escape_typst(text: &str) -> String {
     out
 }
 
+/// Detect if a plain-text paragraph is a scene-break sentinel (e.g. `***` or `* * *`).
+/// Case-insensitive to be forgiving. Only asterisks + whitespace counts.
+fn is_scene_break_sentinel(para: &str) -> bool {
+    let trimmed = para.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    // Must contain at least one star and no non-star/whitespace characters
+    let mut star_count = 0;
+    for ch in trimmed.chars() {
+        if ch == '*' {
+            star_count += 1;
+        } else if !ch.is_whitespace() {
+            return false;
+        }
+    }
+    star_count >= 3
+}
+
+/// Emit the Typst markup for a scene break with the given style, spacing, and keep behavior.
+/// Takes `&mut ImageMap` so the `image` style can register decoded bytes for Typst's World.
+fn emit_scene_break(
+    out: &mut String,
+    style: &str,
+    custom_text: &str,
+    space_above_em: f64,
+    space_below_em: f64,
+    keep_with_content: bool,
+    image_data: &str,
+    image_width_pct: f64,
+    images: &mut ImageMap,
+) {
+    // The content of the break depends on the style
+    let inner: String = match style {
+        "none" => String::new(),
+        "blank" => String::new(),
+        "dinkus" => "\\* \\* \\*".to_string(),
+        "asterism" => "⁂".to_string(),
+        "rule" => "#line(length: 25%, stroke: 0.6pt)".to_string(),
+        "custom" => escape_typst(custom_text),
+        "image" => {
+            if image_data.is_empty() {
+                // No image uploaded yet — fall back to dinkus
+                "\\* \\* \\*".to_string()
+            } else if let Some((path, _ext)) = ingest_image(image_data, images) {
+                let w = image_width_pct.clamp(1.0, 100.0);
+                format!("#image(\"{}\", width: {}%)", path, w)
+            } else {
+                "\\* \\* \\*".to_string()
+            }
+        }
+        _ => "\\* \\* \\*".to_string(),
+    };
+
+    // Wrap in a full-width block that resets the paragraph indent so the centered
+    // content is actually centered (the chapter body has first-line-indent: 1.5em
+    // which would otherwise push the ornament right of center).
+    if keep_with_content {
+        out.push_str("#block(sticky: true, width: 100%)[\n");
+    } else {
+        out.push_str("#block(width: 100%)[\n");
+    }
+    out.push_str("  #set par(first-line-indent: 0em, justify: false)\n");
+    out.push_str(&format!("  #v({}em)\n", space_above_em));
+    if !inner.is_empty() {
+        out.push_str(&format!("  #align(center)[{}]\n", inner));
+    }
+    out.push_str(&format!("  #v({}em)\n", space_below_em));
+    out.push_str("]\n\n");
+}
+
 /// Parse a category JSON column. Returns an empty map if the JSON is missing/invalid.
 fn parse_category_json(s: &str) -> serde_json::Map<String, serde_json::Value> {
     if s.trim().is_empty() {
@@ -512,15 +583,78 @@ fn build_typst_markup(
     let mut section_ids: Vec<String> = Vec::new();
     let mut images: ImageMap = std::collections::HashMap::new();
 
-    // Page setup
+    // Page setup — margins read from print_layout_json with fallback to scalar columns.
+    // Canonical unit is inches. Frontend may store values entered in mm after converting.
+    let print_layout = parse_category_json(&profile.print_layout_json);
+    let margin_top = print_layout
+        .get("margin_top_in")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(profile.margin_top_in);
+    let margin_bottom = print_layout
+        .get("margin_bottom_in")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(profile.margin_bottom_in);
+    let margin_outside = print_layout
+        .get("margin_outside_in")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(profile.margin_outside_in);
+    let margin_inside = print_layout
+        .get("margin_inside_in")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(profile.margin_inside_in);
+
+    // Justified text + hyphenation: default true (standard book typography)
+    let justify = print_layout
+        .get("justify")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let hyphens = print_layout
+        .get("hyphens")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    // Scene break (in-chapter) settings from breaks_json
+    let breaks = parse_category_json(&profile.breaks_json);
+    let break_style = breaks
+        .get("style")
+        .and_then(|v| v.as_str())
+        .unwrap_or("dinkus")
+        .to_string();
+    let break_custom_text = breaks
+        .get("custom_text")
+        .and_then(|v| v.as_str())
+        .unwrap_or("* * *")
+        .to_string();
+    let break_space_above_em = breaks
+        .get("space_above_em")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(1.2);
+    let break_space_below_em = breaks
+        .get("space_below_em")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(1.2);
+    let break_keep_with_content = breaks
+        .get("keep_with_content")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let break_image_data = breaks
+        .get("image_data")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let break_image_width_pct = breaks
+        .get("image_width_pct")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(25.0);
+
     doc.push_str(&format!(
         "#set page(\n  width: {}in,\n  height: {}in,\n  margin: (top: {}in, bottom: {}in, outside: {}in, inside: {}in),\n)\n\n",
         profile.trim_width_in,
         profile.trim_height_in,
-        profile.margin_top_in,
-        profile.margin_bottom_in,
-        profile.margin_outside_in,
-        profile.margin_inside_in,
+        margin_top,
+        margin_bottom,
+        margin_outside,
+        margin_inside,
     ));
 
     // Typography: read from typography_json with fallback to legacy scalar columns.
@@ -590,29 +724,51 @@ fn build_typst_markup(
         doc.push_str("#v(2em)\n");
 
         // Chapter body — wrapped in a content block that scopes the body typography.
-        // Only chapter body paragraphs use the picked body font/size/leading.
+        // Only chapter body paragraphs use the picked body font/size/leading + justify/hyphens.
         doc.push_str("#[\n");
         doc.push_str(&format!(
-            "#set text(font: \"{}\", size: {}pt)\n",
+            "#set text(font: \"{}\", size: {}pt, hyphenate: {})\n",
             escape_typst(&body_font),
             body_size_pt,
+            hyphens,
         ));
         doc.push_str(&format!(
-            "#set par(leading: {}em, first-line-indent: 1.5em)\n",
+            "#set par(leading: {}em, first-line-indent: 1.5em, justify: {})\n",
             body_leading_em,
+            justify,
         ));
 
         // Paragraphs from extracted text (\n\n separated)
         let paragraphs: Vec<&str> = text.split("\n\n").collect();
-        for (pi, para) in paragraphs.iter().enumerate() {
+        // Track whether the *next* visible paragraph should be first-line-indent-free.
+        // Reset after a scene break so the paragraph following the break isn't indented.
+        let mut next_no_indent = true; // first paragraph after chapter heading
+        for para in &paragraphs {
             let trimmed = para.trim();
             if trimmed.is_empty() {
                 continue;
             }
+
+            if is_scene_break_sentinel(trimmed) {
+                emit_scene_break(
+                    &mut doc,
+                    &break_style,
+                    &break_custom_text,
+                    break_space_above_em,
+                    break_space_below_em,
+                    break_keep_with_content,
+                    &break_image_data,
+                    break_image_width_pct,
+                    &mut images,
+                );
+                next_no_indent = true; // paragraph after a scene break has no indent
+                continue;
+            }
+
             let escaped = escape_typst(trimmed);
-            if pi == 0 {
-                // First paragraph: no indent
+            if next_no_indent {
                 doc.push_str(&format!("#par(first-line-indent: 0em)[{}]\n\n", escaped));
+                next_no_indent = false;
             } else {
                 doc.push_str(&format!("{}\n\n", escaped));
             }
@@ -760,11 +916,11 @@ pub fn compile_preview(
     let chapters_raw = db::list_chapters(conn).map_err(|e| e.to_string())?;
     let db_load_ms = t.elapsed().as_secs_f64() * 1000.0;
 
-    // 2. Y.Doc text extraction
+    // 2. Y.Doc text extraction (format-aware: emits * * * for horizontal rules)
     let t = Instant::now();
     let mut chapters: Vec<(i64, String, String)> = Vec::new();
     for ch in &chapters_raw {
-        let text = ydoc::extract_text_with_breaks_from_bytes(&ch.content);
+        let text = ydoc::extract_text_for_format_from_bytes(&ch.content);
         chapters.push((ch.id, ch.title.clone(), text));
     }
     let ydoc_extract_ms = t.elapsed().as_secs_f64() * 1000.0;

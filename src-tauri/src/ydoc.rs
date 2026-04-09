@@ -65,6 +65,43 @@ pub fn extract_text_with_breaks_from_bytes(state_bytes: &[u8]) -> String {
     }
 }
 
+/// Extract text for the format renderer. Same as extract_text_with_breaks but also
+/// emits `* * *` scene-break sentinels for top-level horizontal rule nodes so the
+/// format builder can recognise them as scene breaks. Keeps extract_plain_text
+/// untouched so scanner offsets aren't affected.
+pub fn extract_text_for_format_from_bytes(state_bytes: &[u8]) -> String {
+    match load_doc(state_bytes) {
+        Ok(doc) => extract_text_for_format(&doc),
+        Err(_) => String::new(),
+    }
+}
+
+fn extract_text_for_format(doc: &Doc) -> String {
+    let txn = doc.transact();
+    let fragment = match txn.get_xml_fragment("prosemirror") {
+        Some(f) => f,
+        None => return String::new(),
+    };
+    let mut text = String::new();
+    let mut first = true;
+    for child in fragment.children(&txn) {
+        if !first && !text.is_empty() {
+            text.push_str("\n\n");
+        }
+        first = false;
+        // Top-level horizontal rule → emit scene break sentinel
+        if let XmlOut::Element(ref el) = child {
+            let tag = el.tag();
+            if tag.as_ref() == "horizontalRule" {
+                text.push_str("* * *");
+                continue;
+            }
+        }
+        walk_xml_out(&txn, &child, &mut text);
+    }
+    text
+}
+
 fn walk_fragment<T: ReadTxn>(txn: &T, fragment: &XmlFragmentRef, out: &mut String) {
     for child in fragment.children(txn) {
         walk_xml_out(txn, &child, out);
