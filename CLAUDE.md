@@ -14,14 +14,16 @@ Rust builds automatically via Tauri. The Cargo.toml is in `src-tauri/`.
 ## Tech Stack
 
 - **Frontend:** Svelte 5 (runes mode), SvelteKit with `adapter-static`, vanilla JS (no TypeScript)
-- **Editor:** TipTap (ProseMirror-based) with custom extensions
+- **Editor:** TipTap 3 (ProseMirror-based) with custom nodes (`noteMarker`, `stateMarker`, `timeBreak`)
 - **Document Model:** Yjs (`yrs` in Rust, `yjs` + `y-prosemirror` in JS) — every character has a permanent identity
 - **Backend:** Tauri v2 (Rust), rusqlite with bundled SQLite
 - **Scanner:** Aho-Corasick (Rust) for blazing-fast multi-pattern entity matching
-- **PDF Export:** genpdf with embedded Liberation Serif fonts
-- **DOCX Export:** docx npm package
-- **Styling:** Bootstrap 5 + custom CSS theme (`src/lib/theme.css`), Bootstrap Icons
-- **Drag & Drop:** svelte-dnd-action
+- **Semantic Search:** ONNX Runtime (`ort` crate) + `tokenizers`, running all-mpnet-base-v2 on-device (no cloud, no API keys)
+- **Publishing / Layout:** Typst (`typst` crate) for the Format editor's SVG preview, served via a custom `iwe://` URI scheme
+- **Quick PDF export (toolbar):** `genpdf` with embedded Liberation Serif fonts (separate code path from the Typst-based Format editor)
+- **DOCX export:** `docx` npm package
+- **Styling:** Bootstrap 5 + Bootstrap Icons + custom CSS theme (`src/lib/theme.css`)
+- **Drag & Drop:** svelte-dnd-action (used in entity excerpts, kanban, time flow, format pages)
 
 ## Architecture
 
@@ -93,7 +95,7 @@ Users annotate their manuscript by highlighting text and right-clicking → "Add
 - Active/selected comment: strong yellow highlight (35% opacity, 2px border)
 - Hover on any comment: brightens slightly
 
-**Notes panel** (right panel tab): List → detail pattern. Clicking a note navigates to it and shows the detail view with editable textarea. "Update highlight" button (only visible when text is selected in editor) moves the note to the current selection. Two-step inline delete confirmation.
+**Notes panel** (right panel tab): List → detail pattern. Clicking a note navigates to it and shows the detail view with editable textarea. "Update highlight" button (only visible when text is selected in editor) moves the note to the current selection. Two-step inline delete confirmation. The panel ALSO shows a read-only "Kanban Notes" section listing any `chapter_planning_notes` rows for the current chapter (the same rows edited in the Kanban → Chapters board) so writers see planning context alongside inline notes.
 
 **Key files:**
 - `src/lib/noteMarker.js` — `NoteMarker` node extension, `commentDecoKey` plugin, `applyCommentHighlights()`
@@ -176,93 +178,248 @@ Handles flashbacks, flash-forwards, and time jumps. Writers wrap text in **time 
 
 **Cross-window navigation:** Popup windows (pacing, etc.) emit `navigate-to-position` events via `emitTo('main', ...)` from `@tauri-apps/api/event`. The main window listens and calls `handleGoToChapter`.
 
-### Multi-window architecture
+### Windows architecture — two kinds of "other view"
 
-Pop-up windows (heatmap, chapter analysis, stats, time flow manager, pacing analysis, readability score, paragraph length) are separate SvelteKit routes opened via `WebviewWindow` from `@tauri-apps/api/webviewWindow`. They read data directly from the database — no data passing between windows. Each window needs its route in `src/routes/` and its label pattern in `src-tauri/capabilities/default.json`.
+There are two ways a non-editor view can be shown, and it's important not to confuse them:
 
-**Cross-window events:** Popup windows can navigate the main editor via `emitTo('main', 'navigate-to-position', payload)` from `@tauri-apps/api/event`. The main window listens for this event and calls `handleGoToChapter`. Payload: `{ chapterId, searchText, charPosition }`.
+**1. Project subroutes (inline, same window, share the project layout + open DB handle):**
+Kanban, Editor, Palettes, Stats, Time Flow, Formatting — these are nav tabs in `src/routes/project/[filename]/+layout.svelte` and live at `/project/[filename]/{kanban,palettes,stats,timeflow,format}`. They're reached via `<a href>` inside the shell. They see the same SQLite connection that `open_project` set up.
 
-The print preview window converts Y.Doc bytes to HTML via `yDocToProsemirrorJSON()` + `generateHTML()` before rendering.
+**2. Popup windows (separate Tauri `WebviewWindow`, independent process, open their own DB view):**
+`heatmap`, `chapters`, `pacing`, `readability`, `paragraphs`, `print`, `import`, `analyse` — launched via `new WebviewWindow('label-' + Date.now(), { url: '/path', ... })` from `@tauri-apps/api/webviewWindow`. Each window's label prefix must be listed in `src-tauri/capabilities/default.json` under `windows`. They read the DB directly via Tauri commands.
+
+**Cross-window events:** Popup analysis windows can navigate the main editor via `emitTo('main', 'navigate-to-position', payload)` from `@tauri-apps/api/event`. The project layout listens, forwards to a `window` CustomEvent `iwe-navigate-to-position`, and the editor page's listener calls `handleGoToChapter`. Payload: `{ chapterId, searchText, charPosition }`.
+
+**Two independent PDF paths:**
+- `/print/+page.svelte` (popup) is NOT Typst — it converts Y.Doc → ProseMirror JSON → HTML via `yDocToProsemirrorJSON` + `generateHTML`, applies A4 or Book CSS, and triggers `window.print()`. Fast, rough, zero layout control.
+- The toolbar `Export → PDF` uses `genpdf` in Rust (`lib.rs:686-823`) with embedded Liberation Serif, A4 or 5×8 book preset. Also independent of Typst.
+- The `Formatting` project subroute is the Typst path: `format::compile_preview` compiles a cached `PagedDocument` and exposes pages as SVG via the custom `iwe://localhost/preview/page/{n}.svg` URI scheme (see `lib.rs:1265-1298`). This is the "publication-quality" path. Do not confuse it with the other two.
 
 ## Project Structure
 
 ```
 src/
 ├── routes/
-│   ├── +page.svelte              # Home page (project list)
-│   ├── project/[filename]/       # Main editor workspace
-│   ├── heatmap/                  # Entity heatmap (popup window)
-│   ├── chapters/                 # Chapter analysis (popup window)
-│   ├── stats/                    # Writing stats (popup window)
-│   ├── timeflow/                 # Time Flow Manager (popup window)
-│   ├── pacing/                   # Pacing analysis — sentence length waveforms (popup window)
-│   ├── readability/              # Readability score — Flesch-Kincaid grade level (popup window)
-│   ├── paragraphs/               # Paragraph length variation analysis (popup window)
-│   └── print/                    # Print preview (popup window)
+│   ├── +page.svelte              # Home shell (sidebar: Projects / Word Palettes / Settings)
+│   ├── project/[filename]/
+│   │   ├── +layout.svelte        # Project shell: top toolbar (6 nav tabs + Export dropdown)
+│   │   ├── +page.svelte          # Editor view (3 resizable panels: ChapterNav / Editor / right panel)
+│   │   ├── kanban/               # Kanban board (3 modes: chapters / entities / freeform)
+│   │   ├── palettes/             # Read-only palette browser for the current project
+│   │   ├── stats/                # Writing stats dashboard (contribution calendar, growth, hourly)
+│   │   ├── timeflow/             # Time Flow Manager — drag sections into story-time order
+│   │   └── format/               # Typst-based Format & Layout editor with live SVG preview
+│   ├── heatmap/                  # Entity heatmap (POPUP) — chapter grid + sentence timeline
+│   ├── chapters/                 # Chapter analysis (POPUP) — 4 charts + 12-col breakdown table
+│   ├── pacing/                   # Pacing (POPUP) — whole-book sentence-length waveform
+│   ├── readability/              # Flesch-Kincaid (POPUP) — overview + per-chapter sentence detail
+│   ├── paragraphs/               # Paragraph length variation (POPUP)
+│   ├── print/                    # Print preview (POPUP) — HTML + window.print(), NOT Typst
+│   ├── import/                   # Manuscript import wizard (POPUP) — DOCX + EPUB
+│   └── analyse/                  # Dev-only batch analysis (POPUP) — runs all 6 analyses and saves to the famous-books library
 ├── lib/
-│   ├── db.js                     # ALL Tauri command wrappers
+│   ├── db.js                     # ALL Tauri command wrappers + settings.json helpers
 │   ├── entityHighlight.js        # ProseMirror decoration plugins (entities + spellcheck + debug)
 │   ├── noteMarker.js             # NoteMarker TipTap node + comment highlight decorations
 │   ├── stateMarker.js            # StateMarker TipTap node (entity state checkpoints)
 │   ├── timeBreak.js              # TimeBreak TipTap wrapping node (time jump regions)
 │   ├── ydoc.js                   # Y.Doc lifecycle (create, encode, destroy)
-│   ├── export.js                 # DOCX/HTML/TXT/PDF export
+│   ├── export.js                 # DOCX/HTML/TXT export helpers (PDF paths are Rust-side)
 │   ├── theme.css                 # Design system CSS variables
 │   ├── toast.js                  # Toast notification store
 │   └── components/
-│       ├── Editor.svelte         # TipTap editor + toolbar + suggestions + spellcheck + context menu + comments + state markers + time breaks
-│       ├── WordModal.svelte      # Combined spelling & synonym modal
-│       ├── EntityPanel.svelte    # Entity CRUD + notes + detection + state tracking
-│       ├── NotesPanel.svelte     # Comments/notes list + detail view
-│       ├── ChapterNav.svelte     # Chapter sidebar
-│       ├── SearchPanel.svelte    # Text/dialogue/relationship search
-│       ├── AnalysisPanel.svelte  # Analysis tools (frequency/clusters/similar/adverbs/readability/paragraphs/dialogue detection/heatmap/pacing/chapters)
-│       └── Toasts.svelte         # Toast renderer
+│       ├── Editor.svelte         # TipTap editor + toolbar + context menu + comments + state markers + time breaks + typewriter mode
+│       ├── WordModal.svelte      # Combined spelling & synonym modal (flowing pill grid)
+│       ├── PalettePickerModal.svelte # Modal for picking a replacement word from active palettes
+│       ├── EntityPanel.svelte    # Entity CRUD + detection + references + view (excerpts/notes/state tabs)
+│       ├── NotesPanel.svelte     # Inline notes + read-only Kanban notes for current chapter
+│       ├── ChapterNav.svelte     # Chapter list: rename, delete, restore-from-archive modal
+│       ├── SearchPanel.svelte    # Text / Dialogue / Relationship / Descriptive (semantic) search
+│       ├── AnalysisPanel.svelte  # Analysis tool selector — 11 tools across 4 groups
+│       ├── FontPicker.svelte     # System font picker with in-face previews (calls list_system_fonts)
+│       ├── PageContentEditor.svelte # Rich HTML editor for format-editor custom pages (with image support)
+│       ├── KanbanCardModal.svelte # Create/edit card modal used by Kanban board
+│       ├── WordPalettes.svelte   # Full palette CRUD (used by the home sidebar)
+│       ├── Toasts.svelte         # Toast renderer
+│       └── format/               # Settings subpanels for the Format editor "Custom" mode:
+│           ├── ChapterHeadings.svelte
+│           ├── ParagraphSettings.svelte
+│           ├── HeadingsSettings.svelte
+│           ├── BreaksSettings.svelte
+│           ├── PrintLayoutSettings.svelte
+│           ├── TypographySettings.svelte
+│           ├── HeaderFooterSettings.svelte
+│           └── TrimSettings.svelte
 
 src-tauri/
 ├── src/
 │   ├── main.rs                   # Entry point
-│   ├── lib.rs                    # Tauri commands + PDF export
-│   ├── db.rs                     # Database schema + all queries
-│   ├── scanner.rs                # Aho-Corasick scanner + entity/search commands
-│   ├── analysis.rs               # Analysis tools (frequency, clusters, similar, pacing, adverbs, heatmap, chapter analysis, readability, paragraph length)
-│   ├── text_utils.rs             # Shared text utilities (dialogue extraction, sentence extraction, word counting)
-│   ├── ydoc.rs                   # Y.Doc load/encode/text extraction (yrs)
-│   ├── spellcheck.rs             # Hunspell dictionary + spell checking + custom words
-│   ├── synonyms.rs               # Moby Thesaurus lookup (in-memory)
-│   ├── syllable_data.rs          # AUTO-GENERATED phf map of word→syllable counts (generated by generate_syllables.py)
-│   └── wordlists.rs              # Verb/adjective/adverb lists for POS tags
+│   ├── lib.rs                    # Tauri commands (all #[tauri::command] wrappers + genpdf export + backup helpers)
+│   ├── db.rs                     # Database schema + all queries + migrations
+│   ├── scanner.rs                # Aho-Corasick scanner, entity detection, text_search, dialogue_search, relationship_search, find_references
+│   ├── analysis.rs               # word_frequency, find_similar_phrases, generate_heatmap, chapter_analysis, pacing_analysis, adverb_analysis, readability_analysis, paragraph_length_analysis
+│   ├── text_utils.rs             # Shared: extract_dialogue, extract_sentences, count_words (THE source of truth)
+│   ├── ydoc.rs                   # Y.Doc load/encode, text extraction, extract_time_sections, locate_state_markers_in_sections
+│   ├── spellcheck.rs             # Hunspell-compatible parser for en_US + en_GB, custom words, suggestions
+│   ├── synonyms.rs               # Moby Thesaurus II lookup (in-memory, suffix-aware)
+│   ├── syllable_data.rs          # AUTO-GENERATED phf map of word→syllable counts
+│   ├── wordlists.rs              # Speech-verb / adverb / etc. lists for analysis
+│   ├── semantic.rs               # ONNX session + tokenizer, embedding index, semantic_search, indexing events
+│   ├── format.rs                 # Typst-based Format editor: FormatState, compile_preview, render_page_svg, list_system_fonts
+│   ├── import.rs                 # DOCX + EPUB parse → flat blocks → 5-strategy chapter break detection
+│   ├── palettes.rs               # Word Palettes: separate SQLite DB in app data dir, 21 palette commands
+│   ├── famous_books.rs           # Comparative-works library: separate SQLite DB in app data dir
+│   ├── _emotions_ag.txt          # Seeded palette: emotions a–g with physical manifestations
+│   ├── _emotions_gn.txt          # Seeded palette: emotions g–n
+│   ├── _emotions_oz.txt          # Seeded palette: emotions o–z
+│   ├── _sensory.txt              # Seeded palette: sight/sound/touch/smell/taste
+│   ├── _setting_dialogue.txt     # Seeded palette: weather & setting observations
+│   └── _movement.txt             # Seeded palette: motion/movement words
 ├── fonts/
-│   └── LiberationSerif-*.ttf     # Embedded fonts for PDF export
-├── generate_syllables.py           # One-time script: CSV → syllable_data.rs (phf map)
+│   └── LiberationSerif-*.ttf     # Embedded fonts for genpdf toolbar export AND Typst fallback
+├── generate_syllables.py         # One-time script: CSV → syllable_data.rs (phf map)
 ├── resources/
-│   ├── dictionaries/en_US.*      # Hunspell dictionary (embedded via include_str!)
-│   ├── syllables-list.csv        # Syllable count dictionary (dev-only, not shipped — compiled into syllable_data.rs)
-│   └── mthesaur.txt              # Moby Thesaurus II (embedded via include_str!)
-├── capabilities/default.json     # Tauri permissions
+│   ├── dictionaries/             # Hunspell en_US + en_GB (.dic/.aff) — GITIGNORED, embedded via include_str! at build
+│   ├── mthesaur.txt              # Moby Thesaurus II — GITIGNORED, embedded via include_str! at build
+│   ├── syllables-list.csv        # Dev-only, compiled into syllable_data.rs (not shipped)
+│   └── models/                   # ONNX semantic model directory
+│       ├── model.onnx            # all-mpnet-base-v2 ONNX export (large — may be gitignored locally)
+│       └── tokenizer.json        # HuggingFace tokenizer config
+├── capabilities/default.json     # Tauri permissions + popup window label allowlist
 └── Cargo.toml
 ```
 
-## Database Schema (16 tables)
+**IMPORTANT — the `resources/` directory is partially gitignored.** `dictionaries/` and `mthesaur.txt` are listed in `.gitignore` because they're too large for git, and must be provided locally before `cargo build` will succeed (the Rust code uses `include_str!` on them at compile time). `resources/models/model.onnx` is similarly expected to exist on disk but isn't tracked. When setting up a fresh checkout, ensure these files are present or builds will fail.
 
-- **chapters** — id, title, content (BLOB — Yjs state), sort_order, timestamps
-- **entities** — id, name, entity_type (character/place/thing), description, color, visible
-- **aliases** — entity_id, alias text
-- **entity_fields** — key-value custom fields (schema exists, UI not built)
+## Database Schema
+
+Three databases exist at runtime:
+
+1. **Per-project `.iwe` file (SQLite)** — all of the writer's content. Opened via `open_project` command, connection stored in `AppState.db`.
+2. **`palettes.db` (SQLite, in app data dir)** — shared Word Palettes across all projects. Managed in `palettes.rs`, state in `PaletteState`.
+3. **`famous_books.db` (SQLite, in app data dir)** — the comparative-works library used by the Analysis panel's "Comparative Works" tab and overlays. Managed in `famous_books.rs`, state in `LibraryState`.
+
+### Per-project `.iwe` schema (tables defined in `db.rs::init_schema`)
+
+**Writing core:**
+- **chapters** — id, title, content (BLOB — Yjs state), sort_order, created_at, updated_at, **deleted** (soft-delete flag — restore via `restore_chapter`)
+- **entities** — id, name, entity_type CHECK('character'|'place'|'thing'), description, color, visible
+- **aliases** — entity_id, alias
+- **entity_fields** — key-value custom fields *(schema exists, no UI yet)*
 - **ignored_words** — words excluded from entity detection
-- **custom_words** — spell checker custom dictionary (word, source: 'user' or 'entity')
-- **entity_notes** — pinned text ranges from chapters stored as Y.Doc relative positions (y_start BLOB, y_end BLOB), with sort_order. Text is resolved live from the Y.Doc — ranges expand if text is inserted within them.
-- **entity_free_notes** — free-form note cards per entity, with sort_order
-- **comments** — chapter_id, note_text, timestamps (position lives in the Y.Doc as a noteMarker node)
-- **state_markers** — entity_id, chapter_id, note, timestamps (position lives in Y.Doc as a stateMarker node)
-- **state_marker_values** — marker_id, value_type ('fact'|'entity_ref'), fact_key, fact_value, ref_entity_id, ref_active
-- **time_section_order** — chapter_id, section_index, label, story_order (global sort key for time flow)
-- **writing_activity** — per-save log (timestamp, chapter, word counts, delta)
-- **daily_stats** — aggregated daily (words added/deleted/net, active minutes)
-- **writing_settings** — daily_goal, session_gap_minutes (singleton)
-- **nav_history** — chapter_id, scroll_top, cursor_pos (max 100)
+- **custom_words** — spell checker custom dictionary (word, source='user'|'entity'; auto-synced from entities)
 
-Migrations are handled in `init_schema()` with `CREATE TABLE IF NOT EXISTS` for idempotent creation and `ALTER TABLE ... ADD COLUMN` checks for backward compatibility with existing `.iwe` files. During active development, schema changes may require deleting the `.iwe` file and starting fresh.
+**Annotation / linking:**
+- **entity_notes** — pinned excerpts stored as Yjs relative positions (y_start BLOB, y_end BLOB), with chapter_id and sort_order. Ranges expand when text is inserted inside them.
+- **entity_free_notes** — free-form note cards per entity with title, text, sort_order (the rows that Kanban "Entities" board also edits)
+- **comments** — chapter_id, note_text (position lives in the Y.Doc as a `noteMarker` atom node)
+- **state_markers** — entity_id, chapter_id, note (position lives in the Y.Doc as a `stateMarker` atom node)
+- **state_marker_values** — marker_id, value_type='fact'|'entity_ref', fact_key, fact_value, ref_entity_id, ref_active
+- **time_section_order** — chapter_id, section_index, label, story_order (global sort key for Time Flow Manager; when empty the system falls back to chapter sort_order × 1000 + section_index)
+
+**Planning / kanban:**
+- **chapter_planning_notes** — chapter_id, title, description, sort_order (shown in the Kanban "Chapters" board and the Notes panel's read-only Kanban section)
+- **kanban_columns** — title, sort_order (freeform board only)
+- **kanban_cards** — column_id, title, description, sort_order (freeform board only)
+
+**Semantic search:**
+- **semantic_embeddings** — chapter_id, granularity, segment_text, char_start, char_end, embedding (BLOB)
+- **semantic_index_status** — chapter_id PK, content_hash, indexed_at (used to detect dirty chapters)
+
+**Format / layout (Typst editor):**
+- **format_profiles** — name, target_type ('print'|'ebook'), trim dimensions, margins, font_body, font_size_pt, line_spacing, plus 8 JSON category columns: `chapter_headings_json`, `paragraph_json`, `headings_json`, `breaks_json`, `print_layout_json`, `typography_json`, `header_footer_json`, `trim_json`
+- **format_pages** — page_role, title, content (HTML), position ('front'|'back'), sort_order, include_in, vertical_align. Shared across all profiles; the Format editor uses `format_page_exclusions` to hide specific pages per profile.
+- **format_page_exclusions** — (page_id, profile_id) composite PK
+
+**Stats / history / misc:**
+- **writing_activity** — per-save log (timestamp, chapter, chapter_words, manuscript_words, words_delta)
+- **daily_stats** — aggregated daily (date PK, words_added, words_deleted, net_words, active_minutes, chapters_touched)
+- **writing_settings** — singleton: daily_goal, session_gap_minutes, **backup_interval_minutes**, **last_backup_at**
+- **nav_history** — chapter_id, scroll_top, cursor_pos (bounded to ~100 entries; truncated forward on new navigation like a browser)
+- **project_settings** — generic key/value store (e.g. `comparative_book_id` for the Comparative Works benchmark)
+
+Migrations are handled in `init_schema()` with `CREATE TABLE IF NOT EXISTS` for idempotent creation and `ALTER TABLE ... ADD COLUMN` checks for backward compatibility. There's also a one-off migration in `init_schema()` that drops the old `profile_id` column from `format_pages` and deduplicates rows — see `db.rs:360-400`. During active development, schema changes may require deleting the `.iwe` file and starting fresh.
+
+## Feature Subsystems
+
+These are the major subsystems not already covered above. Each one has its own route/component/Rust module and can be understood in isolation.
+
+### Home shell — `src/routes/+page.svelte`
+Three sidebar views: **Projects**, **Word Palettes** (renders `WordPalettes.svelte`), **Settings**. First-run flow: pick a projects folder (persisted via `getProjectsDir`/`setProjectsDir` in `db.js`). Projects view lists `.iwe` files from the chosen folder, buttons: New Manuscript, Import…, Refresh, Open Folder (reveals in OS), Change Folder. Delete has a "type `delete` to confirm" modal. A dev-only ⚗ button on each project row launches the `/analyse` popup window (visible only when `import.meta.env.DEV`). Settings view covers: Dictionary language (en_US / en_GB), Typewriter mode, Descriptive Search indexing delay (seconds), Projects folder, Backup interval (minutes), plus license credits for ONNX + all-mpnet-base-v2.
+
+### Semantic (Descriptive) Search — `src-tauri/src/semantic.rs`
+On-device ONNX embeddings. `SemanticState` holds a lazy-initialized `ort::Session` and `tokenizers::Tokenizer` (512-token truncation, 2 intra-threads). Model files are resolved from `resources/models/model.onnx` + `tokenizer.json` via `resolve_model_dir`, falling back to the Cargo manifest dir for dev. Commands: `mark_chapter_dirty`, `run_semantic_indexing`, `rebuild_semantic_index`, `semantic_search`, `get_semantic_index_status`. Emits Tauri events `semantic-index-started`, `semantic-index-progress`, `semantic-index-updated` which the project page and SearchPanel both listen for. Auto-indexes a chapter after configurable inactivity delay (default 30s, stored in `settings.json` as `semanticIndexDelay`, 0 disables auto). Embeddings stored in `semantic_embeddings` BLOB column, dirtiness tracked via `semantic_index_status.content_hash`. **Backups strip both semantic tables before VACUUM** to keep backup files small — see `lib.rs:94-101`.
+
+**UI granularity:** only **Sentences** and **Paragraphs** are exposed in `SearchPanel.svelte`. There is no "Chapter" option — do not add one without extending the Rust side.
+
+### Word Palettes — `src-tauri/src/palettes.rs`
+**Separate SQLite database** (`palettes.db` in app data dir) so palettes are shared across all projects. Managed via its own `PaletteState` struct and 21 Tauri commands (see `lib.rs:1419-1440`: `get_palettes`, `create_palette`, `update_palette`, `delete_palette`, `toggle_palette`, `copy_palette`, plus groups, sections, entries, and `search_word_groups` / `search_palette_entries`). **Seeded content** comes from six bundled `.txt` files (`_emotions_ag.txt`, `_emotions_gn.txt`, `_emotions_oz.txt`, `_sensory.txt`, `_setting_dialogue.txt`, `_movement.txt`) that are parsed into palettes on first init. Two UI entry points: the `WordPalettes.svelte` component on the home sidebar (full CRUD) and the `/project/[filename]/palettes` subroute (read-only browser scoped to active groups). The editor's right-click menu also exposes `PalettePickerModal.svelte` for swapping a selected word with one from an active palette.
+
+### Kanban — `src/routes/project/[filename]/kanban/+page.svelte`
+Three board modes selected by toggle: **Chapters / Entities / Freeform**. Each mode uses different tables:
+- **Chapters mode** — columns = `chapters` (respects sort order); cards = `chapter_planning_notes`; column reorder calls `reorder_chapters`.
+- **Entities mode** — columns = `entities` (sorted by name, order not persisted); cards = `entity_free_notes`; columns show entity dot + type + count; inline entity edit modal with name/type/color/aliases/description.
+- **Freeform mode** — columns = `kanban_columns`; cards = `kanban_cards`; fully user-defined.
+
+Drag-and-drop within columns and between columns (cards share a DnD group). Columns also reorderable. **Hand-grab horizontal scrolling**: mousedown on empty board background + drag to scroll horizontally, useful on wide boards. Card modal is `KanbanCardModal.svelte`.
+
+### Writing Stats — `src/routes/project/[filename]/stats/+page.svelte`
+Project subroute (NOT a popup). Header inputs for daily_goal (50–10000 words) and session_gap_minutes (5–120) auto-save on blur via `update_writing_settings`. Six stat cards at the top: Words Today (with goal progress bar), Day Streak, Minutes Active, Avg Words/Day, Best Day, Days Writing. Four Canvas 2D charts:
+1. **Writing Calendar** — GitHub-style contribution grid for a selectable year (back/forward buttons, can't go past current year). Hover tooltip shows day + word count. Clicking a cell opens a fifth chart:
+2. **Hourly Breakdown** — 24-bar chart for the selected day with green (added) / red (deleted) bars. Summary: net words, added, deleted, active hours.
+3. **Last 30 Days** — daily net words with daily-goal dashed line, darker bars where goal was met.
+4. **Manuscript Growth** — cumulative word count over time.
+
+Data source: `logWritingActivity` is called on every 500ms-debounced content save from the editor page; Rust aggregates into `daily_stats`.
+
+### Format & Layout editor — `src/routes/project/[filename]/format/+page.svelte` + `src-tauri/src/format.rs`
+The "publication-quality" path. Project subroute. Two-column layout: **Typst-rendered SVG preview (left) + profile sidebar (right, resizable, width persisted to `settings.json`)**.
+
+**How the preview works:**
+1. `compile_preview(profile_id)` in `format.rs` loads chapters + format_pages + exclusions, extracts Y.Doc text, builds a Typst markup document via `build_typst_markup`, compiles with the `typst` crate, caches the resulting `PagedDocument` in `FormatState.document`.
+2. The frontend receives `page_count` and renders `<img src="http://iwe.localhost/preview/page/{i}.svg?v={generation}">` per page. These URIs go through a custom protocol handler registered in `lib.rs::run` (`register_uri_scheme_protocol("iwe", ...)`) which calls `format::render_page_svg(page_index)`.
+3. **Pages lazy-load** via an IntersectionObserver + 150ms scroll-idle commit. Only pages within ±2 of the visible range get their `<img src>` set; the rest show aspect-correct placeholders. Re-observes on page-count or compile-generation change.
+4. A **timing bar** at the bottom shows DB load / Y.Doc extract / markup build / Typst compile / total ms (debug aid — keep it).
+
+**Profile management** (`format_profiles` table): dropdown + rename + **Copy settings** (serializes profile minus target/size to `settings.json` clipboard) + **Paste settings** (applies clipboard to active profile via `paste_format_profile_settings`) + **New** (optionally duplicate existing + pick Print/Ebook target) + **Delete** (inline Yes/No, disabled when only one profile remains).
+
+**Sidebar modes:**
+- **Pages** — tag bar with 17 `page_role` values (half-title, title, copyright, dedication, epigraph, toc, foreword, preface, prologue, epilogue, afterword, acknowledgments, about-author, also-by, glossary, excerpt, blurbs). Click to arm, then click a page in the list to insert below. Used tags show ×. Three draggable sections: Front Matter, Chapters (locked), Back Matter. Each page has a row of **profile-inclusion pills** that toggle `format_page_exclusions` for per-profile visibility. Full-content editing opens `PageContentEditor.svelte` (rich HTML editor with drag-resizable image support).
+- **Target** — preset cards. **Print:** 6×9 Paperback, 5.5×8.5 Paperback, 5×8 Paperback, A5 (5.83×8.27), US Letter. **Ebook:** Kindle (4.5×7.2), EPUB generic (5×7.5), Apple Books (5×7.5).
+- **Themes** — placeholder ("Theme presets will appear here"). **Not implemented.**
+- **Custom** — dropdown with 8 settings subpanels (each a component in `src/lib/components/format/`): Chapter Headings, Paragraph, Headings, Breaks, Print Layout, Typography, Header/Footer, Trim. Changes flush to `format_profiles.{category}_json` via `update_profile_category`.
+
+**Ebook output** currently shows a placeholder ("Ebook preview coming soon — Ebooks use reflowable HTML — no fixed pages to preview") when a profile's `target_type === 'ebook'`. The compile path returns 0 pages for ebook profiles. **Not implemented yet.**
+
+**Fonts:** `list_system_fonts` uses `typst_kit::fonts::FontSearcher` to discover system fonts, with the four embedded Liberation Serif variants as fallback (`format.rs:15-18`). `FontPicker.svelte` renders each family in its own face for WYSIWYG preview.
+
+### Manuscript import — `src/routes/import/+page.svelte` + `src-tauri/src/import.rs`
+Popup window. Launched from the Home page's "Import…" button. Supported formats: `.docx` and `.epub`, detected by extension. The Rust side parses into `ImportBlock`s (text, style, `page_break_before`, `is_heading`) and runs a `detect_breaks` pass.
+
+**Five detection methods:** `auto`, `heading`, `page_break`, `pattern`, `blank_lines`. **Auto** tries them in order (heading → page_break → pattern → blank_lines) and picks the first one producing 2–500 breaks. The `pattern` regex matches `(?i)^\s*(chapter|prologue|epilogue|part|book)\b|^\s*[ivxlcdm]+\s*$|^\s*\d{1,3}\s*$` — so Roman numerals and bare numbers count. `blank_lines` treats 3+ consecutive empty paragraphs as a break (Vellum-style).
+
+**UI:** live preview of the full parsed document. Editable project title, format badge (DOCX/EPUB), "Detect by" dropdown to switch methods, chapter count, **Ctrl+scroll zoom** (15–160%), chapter break dividers with editable title and source badge + × button, "Insert break here" buttons in gaps. Yellow validation banner lists chapters <200 words ("short"), >15k words ("long"), and untitled chapters — clickable to scroll to the problem. Import progress overlay: "{n} of {total} chapters". On success emits a `projects-changed` event so the home page refreshes.
+
+### Comparative Works & dev-only batch analyse
+`famous_books.rs` owns a separate `famous_books.db` (app data dir) storing `{title, author, source, word_count, analyses_json}` rows. The JSON blob holds the results of all 6 analyses (chapter, pacing, readability, paragraphs, adverbs, word_frequency) so charts can overlay a "famous book" benchmark.
+
+Populated via `src/routes/analyse/+page.svelte`, a **dev-only** popup launched from the ⚗ button on each project row on the home page (visible only when `import.meta.env.DEV`). Runs all 6 analyses sequentially, shows a summary grid + collapsible raw JSON, and has a "Save to library" button that calls `save_library_book`.
+
+Consumed by **AnalysisPanel.svelte**'s "Comparative Works" tab (stored per-project via `project_settings.comparative_book_id`). When a book is selected, the Word Frequency, Adverb Density, Chapter Analysis, Pacing, Readability, and Paragraph analyses all overlay comparison data in orange.
+
+### Automatic backups — `lib.rs:21-174`
+Triggered inside `update_chapter_content` whenever `(now - last_backup_at) >= backup_interval_minutes` since the last backup and `interval > 0`. Runs on a background `std::thread::spawn` so it doesn't block typing. Copies the `.iwe` file to `{projects_dir}/backups/{book_name}/{book_name}-YYYY-MM-DD-HH-MM-SS.iwe`. **Strips semantic tables from the backup** (`DELETE FROM semantic_embeddings`, `DELETE FROM semantic_index_status`, `VACUUM`) to keep backups small. **Cleanup:** keeps everything within 7 days, then prunes to one backup per day for older dates.
+
+Interval is stored in `writing_settings.backup_interval_minutes` (default 60, 0 disables) and also mirrored to `settings.json` so the home page can display it.
+
+### Relationship Search — modes that actually exist
+`SearchPanel.svelte` exposes only **two** relationship search types: `near` and `without` (see `scanner.rs:606-747`). The distance slider ranges from 100 to 5000 **characters** (not words). "Near" returns a lead-in + collapsible middle + lead-out text slab with both entities highlighted; "without" returns ~300-char context around every A mention that has no B mention within `max_distance`. Do not add "same chapter" / "appears before" modes casually — they would require a new scanner path.
+
+### Search — 5 modes
+Both **Text Search** and **Dialogue Search** expose the same 5 mode pills: `Standard`, `Aa` (case-sensitive), `[w] Word` (whole word), `.* Regex`, `~ Fuzzy`. The mode is passed as a set of bools to the Rust command (`case_sensitive`, `whole_word`, `use_regex`, `fuzzy`). Dialogue Search routes the query through `text_utils::extract_dialogue` first so only dialogue spans are searched.
+
+### Typewriter mode
+Toggle in Home → Settings, persisted to `settings.json`. When active, `Editor.svelte::typewriterScroll` runs on every selection change with a 16ms debounce: computes cursor Y position via `view.coordsAtPos(from)`, calculates the offset from the `.editor-scroll` container's vertical center, and smooth-scrolls the container if the offset is > 10px. Only the scroll position changes — no document mutation.
 
 ## Key Design Decisions
 
@@ -283,9 +440,6 @@ Visibility is stored in the DB (`visible` column). `build_terms()` only includes
 
 ### Hard-excluded words
 `HARD_EXCLUDE` in `scanner.rs` contains ~130 common contractions, pronouns, days, months etc. Both straight and curly apostrophe variants are added. Used by both `detect_entities` and `check_word`.
-
-### Live entity suggestion bubbles
-Every 4 keystrokes, `checkForSuggestion()` in Editor.svelte checks the last 150 chars for capitalized mid-sentence words. Calls Rust `check_word` to verify against known entities + ignored + hard excludes. Shows floating bubbles with 30-second CSS-animated progress bars. Multiple bubbles can show simultaneously.
 
 ### Spell checking
 Uses a hand-rolled Hunspell-compatible dictionary parser (`spellcheck.rs`) that reads `en_US.dic` + `en_US.aff` (embedded via `include_str!`), expands affix rules, and builds a `HashSet<String>` of ~180K words at startup. Spell checking runs after entity scanning (400ms debounce) — words covered by entity decorations are skipped. Suggestions use edit-distance-1 and edit-distance-2 candidates. The `custom_words` table stores per-project additions with source tracking ('user' vs 'entity'). Entity names/aliases are auto-synced to the custom dictionary on create/update/delete.
@@ -350,19 +504,27 @@ All text analysis that needs dialogue or sentence boundaries MUST use the shared
 
 ### Analysis tools (`analysis.rs`)
 
-All analysis commands live in `analysis.rs`, separate from the core entity scanner. This keeps the scanner focused on Aho-Corasick matching.
+All analysis commands live in `analysis.rs`, separate from the core entity scanner. This keeps the scanner focused on Aho-Corasick matching. The AnalysisPanel selector groups tools as **Repetition / Style / Overview / Comparison**.
 
 **Inline tools** (results in the right panel, clickable to navigate):
-- `word_frequency` — word repetition counts with per-chapter breakdown
+- `word_frequency` — word repetition counts with per-chapter breakdown; also drives the **Cluster Finder** (same command with a window_size parameter for co-occurring clusters)
 - `find_similar_phrases` — sentence similarity detection via Jaccard + LCS
-- `adverb_analysis` — finds adverbs in dialogue attribution near speech verbs
+- `adverb_analysis` — finds adverbs in dialogue attribution near speech verbs; detects "redundant" cases like `whispered quietly` via `wordlists.rs`; reports a "tag adverb rate" = attributions_with_adverbs / total_dialogue_spans
 
-**Popup window tools** (launch separate windows):
-- `chapter_analysis` — word counts, dialogue/narrative split, sentence stats, vocabulary density
-- `generate_heatmap` — entity mention grids (chapter-level and sentence-level)
-- `pacing_analysis` — sentence length waveforms per chapter with navigation
+**Inline toggle (no Rust command):**
+- **Dialogue Detection** — a JS-side toggle that walks `buildTextMap` text and emits `debugDecoKey` decorations over dialogue spans in the editor. Runs entirely in the main window; no popup. Implemented in the project page's `computeDialogueRanges` function, not `analysis.rs`.
 
-**Analysis tool selector** in AnalysisPanel uses a grouped dropdown menu (not tabs) to scale to many tools. Groups: Repetition, Style, Overview. To add a new tool: add an entry to the `analysisTools` array, add the `{:else if subTab === 'mytool'}` view, and add the Rust command if needed.
+**Popup window tools** (each launches a `WebviewWindow`; all use `ongotochapter`-style cross-window navigation):
+- `chapter_analysis` → `/chapters` — 4 canvas charts + 12-column breakdown table, with optional Comparative Works overlay
+- `generate_heatmap` → `/heatmap` — two canvas views: chapter grid AND sentence timeline across the whole manuscript
+- `pacing_analysis` → `/pacing` — whole-book sentence-length waveform with smoothing/zoom sliders and optional comparison overlay
+- `readability_analysis` → `/readability` — Flesch-Kincaid overview + per-chapter sentence-level canvases with grade-zone color bands
+- `paragraph_length_analysis` → `/paragraphs` — column chart per chapter, flags monotonous runs (3+ paragraphs within 15% of each other)
+
+**Comparison group:**
+- `comparative` — a picker (no Rust command) that reads `famous_books.db` via `list_library_books` and writes `project_settings.comparative_book_id`. When set, the other tools overlay benchmark data.
+
+**To add a new analysis tool:** add an entry to the `analysisTools` array in `AnalysisPanel.svelte` (in one of the four groups), add state variables, add the `{:else if subTab === 'mytool'}` view, and if it needs Rust processing add the command to `analysis.rs` + register it in `lib.rs::invoke_handler`.
 
 ### Adding a new Tauri command
 
@@ -372,14 +534,25 @@ All analysis commands live in `analysis.rs`, separate from the core entity scann
 4. Add the JS wrapper in `src/lib/db.js`
 5. Call it from Svelte components via `import { myFunction } from '$lib/db.js'`
 
-### Adding a new popup window
+### Adding a new popup window (separate Tauri window)
 
-1. Create `src/routes/mywindow/+page.js` (with `prerender = false, ssr = false`)
-2. Create `src/routes/mywindow/+page.svelte`
-3. Add `"mywindow*"` to the `windows` array in `src-tauri/capabilities/default.json`
-4. Launch with `new WebviewWindow('mywindow-' + Date.now(), { url: '/mywindow', ... })`
-5. Add `:global(html), :global(body) { overflow: auto !important; height: auto !important; }` to enable scrolling
-6. If the window reads chapter content, convert Y.Doc bytes to HTML via `yDocToProsemirrorJSON()` + `generateHTML()`
+Use this for analysis/import/print-style views that need their own window chrome and can read the DB independently.
+
+1. Create `src/routes/mywindow/+page.js` (with `prerender = false, ssr = false`) and `+page.svelte`
+2. Add `"mywindow*"` to the `windows` array in `src-tauri/capabilities/default.json`
+3. Launch with `new WebviewWindow('mywindow-' + Date.now(), { url: '/mywindow', title: '...', width, height, resizable: true })`
+4. Add `:global(html), :global(body) { overflow: auto !important; height: auto !important; }` to enable scrolling
+5. If the window reads chapter content, it can either call Rust commands directly (they'll use the `AppState.db` the main process holds) or convert Y.Doc bytes to HTML via `yDocToProsemirrorJSON` + `generateHTML` using the same extension set as `+layout.svelte` (StarterKit without history + TextAlign + Superscript + Subscript)
+6. For click-to-jump features, call `emitTo('main', 'navigate-to-position', { chapterId, searchText, charPosition })` — the project layout forwards to the editor page's `handleGoToChapter`
+
+### Adding a new project subroute (inline nav tab)
+
+Use this for views that belong in the editor shell and should share the open project context (Kanban, Stats, Time Flow, Palettes, Format).
+
+1. Create `src/routes/project/[filename]/mythingy/+page.js` + `+page.svelte`
+2. Add a `<a href="{basePath}/mythingy" class="nav-tab">` entry in `src/routes/project/[filename]/+layout.svelte` and extend the `activeSection` derivation so the tab highlights correctly
+3. No capabilities change needed (it's the same window as the editor)
+4. Call the same `db.js` wrappers the editor page uses — the project is already open
 
 ### Adding a new analysis tool
 
@@ -411,6 +584,38 @@ All analysis commands live in `analysis.rs`, separate from the core entity scann
 - **Do it right** — Rust-side processing preferred over JS workarounds. The full DB migration to rusqlite was done specifically because passing data through JS was "not the right way."
 - **Author-focused UX** — features should be framed for writers, not developers. "Scene Heading" not "H3". Word types `{verb}` not regex jargon.
 
+## Work-in-progress — features NOT yet built
+
+This list is authoritative. If you're an agent working on this codebase, do not assume any of the following exist just because they appear in `spec.md`, older CLAUDE.md versions, or online writing-tool discussions. They are scoped but unimplemented.
+
+**UI surfaces that are placeholder or shell-only:**
+- **Format editor → Themes mode** — the sidebar tab exists and renders "Theme presets will appear here." No preset data or apply logic.
+- **Format editor → Ebook output** — when a profile has `target_type === 'ebook'`, the preview shows "Ebook preview coming soon" and `compile_preview` returns 0 pages. No EPUB generation path.
+- **Entity custom fields** — the `entity_fields` table exists in the schema but has zero UI. Don't delete the table; it's reserved.
+
+**Features from `spec.md` that are NOT in the code:**
+- Minimap (thin scrollbar preview with entity dots)
+- Breadcrumbs ("Part > Chapter > Scene" location display)
+- Quick Open (Ctrl+P fuzzy across chapters/entities/text)
+- Peek popup (inline card summary on hover/alt-click)
+- Autocomplete for entity names as you type
+- Split editor
+- Bookmarks panel
+- Find and Replace
+- Rename symbol (rename entity → rewrite all occurrences in the manuscript text)
+- Distraction-free mode (typewriter mode is the closest thing currently)
+- Problems panel / orphan detection / unused symbol warnings
+
+**Features that exist in the backend but have no UI entry point:**
+- Chapter drag-reorder. `reorder_chapters` command works and is called from the Kanban "Chapters" board (which drags chapter columns), but `ChapterNav.svelte` itself has no drag handling — only rename/delete/restore.
+- Word counts per chapter in the chapter list sidebar. `get_all_chapter_word_counts` runs on project load and populates `wordCounts` state in the project page, but `ChapterNav.svelte` doesn't render them.
+
+**Relationship Search search types:** only `near` and `without` exist. Do not reference "same chapter" or "appears before" — they would require a new code path.
+
+**Semantic search granularity:** only `sentence` and `paragraph`. There is no `chapter` granularity — don't offer one in UI without extending `semantic.rs`.
+
+When filling in any of the above, update THIS section as part of the same commit so the list stays accurate.
+
 ## Spec
 
-The full feature vision is in `spec.md` at the project root. It describes the MVP scope, post-MVP roadmap, entity relationship search, analytics, and IDE-inspired features.
+`spec.md` at the project root is the **original design document** from the project's first week. It describes the MVP scope, post-MVP roadmap, entity relationship search, analytics, and IDE-inspired features as originally envisioned. **It runs ahead of the code.** Treat it as aspirational — the product shape the author is building toward — and treat the "Work-in-progress" section above as the ground truth for what actually exists today. When the two disagree, the code wins, CLAUDE.md is updated to match, and spec.md is left alone as the vision document.
