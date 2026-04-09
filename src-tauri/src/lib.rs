@@ -1405,6 +1405,7 @@ pub fn run() {
             analysis::readability_analysis,
             analysis::paragraph_length_analysis,
             analysis::get_chapter_dialogue,
+            analysis::extract_dialogue_in_text,
             analysis::debug_dialogue_spans,
             scanner::debug_stripped_text,
             spellcheck::check_spelling,

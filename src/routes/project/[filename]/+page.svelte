@@ -1,7 +1,7 @@
 <script>
   import { onMount } from 'svelte';
   import { beforeNavigate } from '$app/navigation';
-  import { getSettings, saveSettings, getChapters, getChapter, addChapter, updateChapterContent, renameChapter, deleteChapter, getEntities, createEntity, updateEntity, deleteEntity, setEntityVisible, addAlias, removeAlias, scanAllChapters, getNavHistory, pushNavEntry, truncateNavAfter, addEntityNote, logWritingActivity, setSpellLanguage, getAllChapterWordCounts, getChapterComments, addComment, updateComment, deleteComment, addStateMarker, deleteStateMarker, getStateMarker, getChapterDialogue, getChapterPlanningNotes as fetchChapterPlanningNotes, markChapterDirty, runSemanticIndexing, setBackupInterval } from '$lib/db.js';
+  import { getSettings, saveSettings, getChapters, getChapter, addChapter, updateChapterContent, renameChapter, deleteChapter, getEntities, createEntity, updateEntity, deleteEntity, setEntityVisible, addAlias, removeAlias, scanAllChapters, getNavHistory, pushNavEntry, truncateNavAfter, addEntityNote, logWritingActivity, setSpellLanguage, getAllChapterWordCounts, getChapterComments, addComment, updateComment, deleteComment, addStateMarker, deleteStateMarker, getStateMarker, getChapterDialogue, extractDialogueInText, getChapterPlanningNotes as fetchChapterPlanningNotes, markChapterDirty, runSemanticIndexing, setBackupInterval } from '$lib/db.js';
   import ChapterNav from '$lib/components/ChapterNav.svelte';
   import Editor from '$lib/components/Editor.svelte';
   import EntityPanel from '$lib/components/EntityPanel.svelte';
@@ -40,82 +40,37 @@
   // Dialogue detection highlight state
   let dialogueHighlightActive = $state(false);
 
-  const DIALOGUE_OPENERS = new Set(['"', '\u201C', '\u201E', '\u00AB', '\u300C', '\u2018']);
-  const DIALOGUE_CLOSER_MAP = {
-    '"': new Set(['"']),
-    '\u201C': new Set(['\u201D', '"']),
-    '\u201E': new Set(['\u201D', '\u201C']),
-    '\u00AB': new Set(['\u00BB']),
-    '\u300C': new Set(['\u300D']),
-    '\u2018': new Set(['\u2019']),
-  };
-
-  function computeDialogueRanges(ed) {
+  // Dialogue detection is delegated to Rust (text_utils::extract_dialogue) so
+  // the visual highlighter, chapter analysis, dialogue search, and adverb
+  // analysis all share the SAME detection logic. Never reimplement quote
+  // matching here — fix it in src-tauri/src/text_utils.rs instead.
+  async function computeDialogueRanges(ed) {
     const { text, posMap } = buildTextMap(ed.state.doc);
+    const spans = await extractDialogueInText(text);
     const ranges = [];
-    let i = 0;
-    while (i < text.length) {
-      const ch = text[i];
-      if (DIALOGUE_OPENERS.has(ch)) {
-        if (ch === '"') {
-          const next = i + 1 < text.length ? text[i + 1] : ' ';
-          if (!/[a-zA-Z\u00C0-\u024F\u2014'\u2018\u2019]/.test(next)) {
-            i++;
-            continue;
-          }
-        }
-        // Single curly opener ‘ is ambiguous with apostrophe. Only treat as
-        // an opener when preceded by start-of-text or whitespace/opening
-        // punctuation, AND followed by a letter (not e.g. ’tis closer-as-elision).
-        if (ch === '\u2018') {
-          const prev = i > 0 ? text[i - 1] : '\n';
-          const next = i + 1 < text.length ? text[i + 1] : ' ';
-          if (/[a-zA-Z0-9\u00C0-\u024F]/.test(prev) || !/[a-zA-Z\u00C0-\u024F]/.test(next)) {
-            i++;
-            continue;
-          }
-        }
-        const validClosers = DIALOGUE_CLOSER_MAP[ch];
-        let j = i + 1;
-        let found = false;
-        while (j < text.length && j - i < 2000) {
-          if (validClosers.has(text[j])) {
-            // Disambiguate ’ closer vs apostrophe (Bilbo’s, mother’s):
-            // a real closer is followed by whitespace/punctuation/end, not a letter.
-            if (text[j] === '\u2019') {
-              const before = j > 0 ? text[j - 1] : '';
-              const after = j + 1 < text.length ? text[j + 1] : '\n';
-              const punctBefore = /[.,!?;:\u2014\u2013]/.test(before);
-              if (!punctBefore && /[a-zA-Z\u00C0-\u024F]/.test(after)) { j++; continue; }
-            }
-            if (j - i > 2) {
-              ranges.push({ from: posMap[i], to: posMap[i] + 1, class: 'debug-highlight-quote' });
-              if (i + 1 < j) {
-                ranges.push({ from: posMap[i + 1], to: posMap[j - 1] + 1, class: 'debug-highlight-inner' });
-              }
-              ranges.push({ from: posMap[j], to: posMap[j] + 1, class: 'debug-highlight-quote' });
-            }
-            i = j + 1;
-            found = true;
-            break;
-          }
-          j++;
-        }
-        if (found) continue;
+    for (const s of spans) {
+      const { char_start: i, char_end: end } = s;
+      const j = end - 1; // index of the closing quote
+      if (i >= posMap.length || j >= posMap.length) continue;
+      ranges.push({ from: posMap[i], to: posMap[i] + 1, class: 'debug-highlight-quote' });
+      if (i + 1 < j) {
+        ranges.push({ from: posMap[i + 1], to: posMap[j - 1] + 1, class: 'debug-highlight-inner' });
       }
-      i++;
+      ranges.push({ from: posMap[j], to: posMap[j] + 1, class: 'debug-highlight-quote' });
     }
     return ranges;
   }
 
-  function refreshDialogueHighlight() {
+  async function refreshDialogueHighlight() {
     if (!dialogueHighlightActive) return;
     const ed = editorRef?.getEditor();
     if (!ed) return;
-    editorRef?.setDebugDecorations(computeDialogueRanges(ed));
+    const ranges = await computeDialogueRanges(ed);
+    if (!dialogueHighlightActive) return;
+    editorRef?.setDebugDecorations(ranges);
   }
 
-  function toggleDialogueHighlight() {
+  async function toggleDialogueHighlight() {
     const ed = editorRef?.getEditor();
     if (!ed || !activeChapter) return;
 
@@ -125,8 +80,10 @@
       return;
     }
 
-    editorRef?.setDebugDecorations(computeDialogueRanges(ed));
     dialogueHighlightActive = true;
+    const ranges = await computeDialogueRanges(ed);
+    if (!dialogueHighlightActive) return;
+    editorRef?.setDebugDecorations(ranges);
   }
 
   // Derived from entity.visible — the Set that drives highlighting

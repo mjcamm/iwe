@@ -1231,6 +1231,17 @@ pub fn get_chapter_dialogue(
     Ok(spans.iter().map(|s| DialogueRange { char_start: s.char_start, char_end: s.char_end }).collect())
 }
 
+/// Extract dialogue ranges from arbitrary plain text. This is the single
+/// source of truth for dialogue detection — the visual highlighter, the
+/// chapter analysis, and dialogue search all funnel through `text_utils::extract_dialogue`.
+#[tauri::command]
+pub fn extract_dialogue_in_text(text: String) -> Vec<DialogueRange> {
+    text_utils::extract_dialogue(&text)
+        .iter()
+        .map(|s| DialogueRange { char_start: s.char_start, char_end: s.char_end })
+        .collect()
+}
+
 #[tauri::command]
 pub fn debug_dialogue_spans(
     state: tauri::State<'_, AppState>,

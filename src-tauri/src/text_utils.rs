@@ -113,16 +113,27 @@ pub fn extract_dialogue(plain: &str) -> Vec<DialogueSpan> {
 }
 
 /// Find the nearest closing quote from a set of possible closers.
-/// Caps at 500 chars — no single line of dialogue should be longer than this.
-/// This prevents a mismatched quote from consuming the rest of the chapter.
+/// Caps at 2000 chars to prevent a mismatched quote from consuming the rest of the chapter.
+///
+/// Disambiguates the curly single closer ’ vs apostrophe (Bilbo’s, isn’t):
+/// a real closer is preceded by sentence punctuation OR followed by a non-letter.
 fn find_any_closing_quote(chars: &[char], start: usize, closers: &[char]) -> Option<usize> {
     let len = chars.len();
     let mut j = start;
     while j < len {
         if closers.contains(&chars[j]) {
+            if chars[j] == '\u{2019}' {
+                let before = if j > 0 { chars[j - 1] } else { ' ' };
+                let after = if j + 1 < len { chars[j + 1] } else { '\n' };
+                let punct_before = matches!(before, '.' | ',' | '!' | '?' | ';' | ':' | '\u{2014}' | '\u{2013}');
+                if !punct_before && after.is_alphabetic() {
+                    j += 1;
+                    continue;
+                }
+            }
             return Some(j);
         }
-        if j - start > 500 {
+        if j - start > 2000 {
             return None;
         }
         j += 1;

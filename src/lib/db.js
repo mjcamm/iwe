@@ -366,6 +366,10 @@ export async function getChapterDialogue(chapterId) {
   return invoke('get_chapter_dialogue', { chapterId });
 }
 
+export async function extractDialogueInText(text) {
+  return invoke('extract_dialogue_in_text', { text });
+}
+
 export async function debugDialogueSpans(chapterId, aroundPos) {
   return invoke('debug_dialogue_spans', { chapterId, aroundPos });
 }
