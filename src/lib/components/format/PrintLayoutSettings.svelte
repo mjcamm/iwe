@@ -1,27 +1,19 @@
 <script>
   import { onMount } from 'svelte';
-  import { updateProfileCategory, getSettings, saveSettings } from '$lib/db.js';
+  import { updateProfileCategory } from '$lib/db.js';
   import { getRecommendedMargins } from '$lib/marginDefaults.js';
+  import { ensureUnitLoaded, getUnit, toDisplay, fromDisplay, unitLabel, unitStep, subscribe } from '$lib/unitPreference.js';
 
   let { profile, onchange } = $props();
 
-  // Unit preference is a global user setting — persisted in settings.json so it
-  // applies across all projects and profiles.
-  let unit = $state('in'); // 'in' | 'mm'
+  let unit = $state('in');
   let unitLoaded = $state(false);
 
   onMount(async () => {
-    const settings = await getSettings();
-    unit = settings.formatLengthUnit || 'in';
+    unit = await ensureUnitLoaded();
     unitLoaded = true;
+    return subscribe(u => { unit = u; });
   });
-
-  async function saveUnit(u) {
-    unit = u;
-    const settings = await getSettings();
-    settings.formatLengthUnit = u;
-    await saveSettings(settings);
-  }
 
   // Canonical storage is inches. Read from print_layout_json with fallback to scalar columns.
   let settings = $derived.by(() => {
@@ -58,22 +50,8 @@
     hyphens   = settings.hyphens;
   });
 
-  // ---- Unit conversion ----
-  const MM_PER_IN = 25.4;
-
-  function toDisplay(inches) {
-    if (unit === 'mm') return (inches * MM_PER_IN).toFixed(1);
-    return inches.toFixed(3);
-  }
-
-  function fromDisplay(value) {
-    const n = Number(value);
-    if (!Number.isFinite(n) || n < 0) return null;
-    return unit === 'mm' ? n / MM_PER_IN : n;
-  }
-
-  const unitLabel = $derived(unit === 'mm' ? 'mm' : '″');
-  const step = $derived(unit === 'mm' ? '0.5' : '0.05');
+  let uLabel = $derived(unitLabel());
+  let step = $derived(unitStep());
 
   // ---- Save (debounced) ----
   let saveTimer = null;
@@ -132,24 +110,16 @@
   const trimLabel = $derived.by(() => {
     if (!profile) return '';
     if (unit === 'mm') {
-      const w = (profile.trim_width_in * MM_PER_IN).toFixed(0);
-      const h = (profile.trim_height_in * MM_PER_IN).toFixed(0);
-      return `${w}×${h}mm`;
+      const w = (profile.trim_width_in * 25.4).toFixed(0);
+      const h = (profile.trim_height_in * 25.4).toFixed(0);
+      return `${w}\u00d7${h}mm`;
     }
-    return `${profile.trim_width_in}″×${profile.trim_height_in}″`;
+    return `${profile.trim_width_in}\u2033\u00d7${profile.trim_height_in}\u2033`;
   });
 </script>
 
 <div class="custom-section">
   <h4 class="custom-section-title">Print Layout</h4>
-
-  <!-- Unit toggle -->
-  <div class="unit-toggle">
-    <button class="unit-btn" class:active={unit === 'in'}
-      onclick={() => saveUnit('in')}>Inches</button>
-    <button class="unit-btn" class:active={unit === 'mm'}
-      onclick={() => saveUnit('mm')}>Millimetres</button>
-  </div>
 
   <div class="setting-group">
     <div class="group-label">Margins</div>
@@ -163,7 +133,7 @@
               <input type="number" {step} min="0"
                 value={toDisplay(topIn)}
                 oninput={(e) => handleInput('top', e)} />
-              <span class="unit-suffix">{unitLabel}</span>
+              <span class="unit-suffix">{uLabel}</span>
             </div>
           </label>
 
@@ -173,7 +143,7 @@
               <input type="number" {step} min="0"
                 value={toDisplay(bottomIn)}
                 oninput={(e) => handleInput('bottom', e)} />
-              <span class="unit-suffix">{unitLabel}</span>
+              <span class="unit-suffix">{uLabel}</span>
             </div>
           </label>
 
@@ -183,7 +153,7 @@
               <input type="number" {step} min="0"
                 value={toDisplay(outsideIn)}
                 oninput={(e) => handleInput('outside', e)} />
-              <span class="unit-suffix">{unitLabel}</span>
+              <span class="unit-suffix">{uLabel}</span>
             </div>
           </label>
 
@@ -193,7 +163,7 @@
               <input type="number" {step} min="0"
                 value={toDisplay(insideIn)}
                 oninput={(e) => handleInput('inside', e)} />
-              <span class="unit-suffix">{unitLabel}</span>
+              <span class="unit-suffix">{uLabel}</span>
             </div>
           </label>
         </div>
@@ -245,24 +215,6 @@
     color: var(--iwe-text-muted); text-transform: uppercase;
     letter-spacing: 0.04em; font-weight: 600;
     margin-bottom: 0.5rem;
-  }
-
-  .unit-toggle {
-    display: flex; gap: 0;
-    border: 1px solid var(--iwe-border); border-radius: var(--iwe-radius-sm);
-    overflow: hidden;
-    margin-bottom: 1rem;
-  }
-  .unit-btn {
-    flex: 1; padding: 0.4rem 0;
-    font-family: var(--iwe-font-ui); font-size: 0.78rem;
-    border: none; background: var(--iwe-bg); color: var(--iwe-text-muted);
-    cursor: pointer; transition: all 120ms;
-  }
-  .unit-btn:first-child { border-right: 1px solid var(--iwe-border); }
-  .unit-btn:hover { background: var(--iwe-bg-hover); }
-  .unit-btn.active {
-    background: var(--iwe-accent); color: #fff; font-weight: 500;
   }
 
   .margin-grid {

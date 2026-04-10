@@ -756,6 +756,10 @@ export async function reorderFormatPages(ids) {
   return invoke('reorder_format_pages', { ids });
 }
 
+export async function updateChapterMetadata(id, title, subtitle, chapterImage, ornamentAbove, ornamentMid, ornamentBelow) {
+  return invoke('update_chapter_metadata', { id, title, subtitle, chapterImage, ornamentAbove, ornamentMid, ornamentBelow });
+}
+
 export async function compilePreview(profileId) {
   return invoke('compile_preview', { profileId });
 }

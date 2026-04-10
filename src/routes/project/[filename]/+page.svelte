@@ -900,6 +900,7 @@
         onrename={handleRenameChapter}
         ondelete={handleDeleteChapter}
         onrestore={async () => { chapters = await getChapters(); }}
+        onupdate={async () => { chapters = await getChapters(); }}
         {chapterCounts}
       />
     </div>

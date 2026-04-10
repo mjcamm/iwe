@@ -33,11 +33,16 @@ genpdf = "0.2.0"
 spellbook = "0.4.0"
 yrs = "0.21"
 phf = { version = "0.11", features = ["macros"] }
-ort = { version = "2.0.0-rc.12", features = ["ndarray"] }
-tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
-typst = "0.14"
-typst-pdf = "0.14"
-typst-svg = "0.14"
-typst-kit = { version = "0.14", default-features = false, features = ["fonts"] }
+ort = { version = "2.0.0-rc.12", features = ["ndarray"], optional = true }
+tokenizers = { version = "0.21", default-features = false, features = ["onig"], optional = true }
+typst = { version = "0.14", optional = true }
+typst-pdf = { version = "0.14", optional = true }
+typst-svg = { version = "0.14", optional = true }
+typst-kit = { version = "0.14", default-features = false, features = ["fonts", "packages"], optional = true }
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
 quick-xml = "0.31"
+
+[features]
+default = []
+semantic = ["dep:ort", "dep:tokenizers"]
+format = ["dep:typst", "dep:typst-pdf", "dep:typst-svg", "dep:typst-kit"]

@@ -8,7 +8,8 @@
 		"build": "vite build",
 		"preview": "vite preview",
 		"prepare": "svelte-kit sync || echo ''",
-		"tauri": "tauri"
+		"tauri": "tauri",
+		"tauri:full": "tauri dev --features semantic,format"
 	},
 	"devDependencies": {
 		"@sveltejs/adapter-auto": "^7.0.0",

@@ -30,6 +30,7 @@
     if (path.endsWith('/stats') || path.includes('/stats/')) return 'stats';
     if (path.endsWith('/timeflow') || path.includes('/timeflow/')) return 'timeflow';
     if (path.endsWith('/format') || path.includes('/format/')) return 'format';
+    if (path.endsWith('/book-settings') || path.includes('/book-settings/')) return 'book-settings';
     return 'editor';
   });
 
@@ -166,6 +167,9 @@
       </a>
       <a href="{basePath}/format" class="nav-tab" class:active={activeSection === 'format'}>
         <i class="bi bi-type"></i> Formatting
+      </a>
+      <a href="{basePath}/book-settings" class="nav-tab" class:active={activeSection === 'book-settings'}>
+        <i class="bi bi-book"></i> Book
       </a>
     </div>
 

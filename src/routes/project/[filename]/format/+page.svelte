@@ -1,5 +1,6 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
+  import { afterNavigate } from '$app/navigation';
   import { flip } from 'svelte/animate';
   import { dndzone } from 'svelte-dnd-action';
   import {
@@ -11,7 +12,6 @@
     compilePreview, getProjectSetting, setProjectSetting,
     updateProfileCategory,
   } from '$lib/db.js';
-  import { getRecommendedMargins } from '$lib/marginDefaults.js';
   import { addToast } from '$lib/toast.js';
   import PageContentEditor from '$lib/components/PageContentEditor.svelte';
   import ChapterHeadings from '$lib/components/format/ChapterHeadings.svelte';
@@ -25,21 +25,6 @@
 
   const flipDurationMs = 150;
 
-  // Target format presets
-  const TARGET_PRESETS = {
-    print: [
-      { label: '6\u00d79 Paperback', w: 6, h: 9 },
-      { label: '5.5\u00d78.5 Paperback', w: 5.5, h: 8.5 },
-      { label: '5\u00d78 Paperback', w: 5, h: 8 },
-      { label: 'A5', w: 5.83, h: 8.27 },
-      { label: 'US Letter', w: 8.5, h: 11 },
-    ],
-    ebook: [
-      { label: 'Kindle', w: 4.5, h: 7.2 },
-      { label: 'EPUB (generic)', w: 5, h: 7.5 },
-      { label: 'Apple Books', w: 5, h: 7.5 },
-    ],
-  };
 
   const PAGE_ROLES = [
     'half-title', 'title', 'copyright', 'dedication', 'epigraph', 'toc',
@@ -86,7 +71,6 @@
   // Sidebar modes
   const SIDEBAR_MODES = [
     { key: 'pages', label: 'Pages', icon: 'bi-file-earmark-text' },
-    { key: 'target', label: 'Target', icon: 'bi-rulers' },
     { key: 'themes', label: 'Themes', icon: 'bi-palette' },
     { key: 'custom', label: 'Custom', icon: 'bi-sliders' },
   ];
@@ -136,7 +120,6 @@
   let chapters = $state([]);
   let formatPages = $state([]); // ALL project-level pages
   let exclusions = $state([]); // [{ page_id, profile_id }]
-  let selectedPresetLabel = $state(null); // tracks which target card is selected
 
   // Profile management UI state
   let showProfileMenu = $state(false);
@@ -406,63 +389,14 @@
     }
 
     await reloadPages();
-    syncPresetLabel(profs.find(p => p.id === activeProfileId));
     loading = false;
 
     // Kick off rendering after load
     compileAndShow();
   }
 
-  function syncPresetLabel(prof) {
-    if (!prof) { selectedPresetLabel = null; return; }
-    const allPresets = [...TARGET_PRESETS.print, ...TARGET_PRESETS.ebook];
-    const match = allPresets.find(t => Math.abs(t.w - prof.trim_width_in) < 0.01 && Math.abs(t.h - prof.trim_height_in) < 0.01);
-    selectedPresetLabel = match?.label || null;
-  }
-
   async function switchProfile(id) {
     activeProfileId = id;
-    syncPresetLabel(profiles.find(p => p.id === id));
-    compileAndShow();
-  }
-
-  async function selectTarget(preset, type) {
-    if (!activeProfileId) return;
-    const prof = activeProfile;
-    if (!prof) return;
-
-    // Auto-apply recommended margins if the user hasn't customised them yet.
-    // We check print_layout_json for any margin keys — their presence means
-    // the user has explicitly set margins, so we leave them alone.
-    let existingLayout = {};
-    try { existingLayout = JSON.parse(prof.print_layout_json || '{}'); } catch {}
-    const hasCustomMargins =
-      existingLayout.margin_top_in != null ||
-      existingLayout.margin_bottom_in != null ||
-      existingLayout.margin_outside_in != null ||
-      existingLayout.margin_inside_in != null;
-
-    if (!hasCustomMargins) {
-      const m = getRecommendedMargins(preset.w, preset.h);
-      const newLayout = {
-        ...existingLayout,
-        margin_top_in:     m.top,
-        margin_bottom_in:  m.bottom,
-        margin_outside_in: m.outside,
-        margin_inside_in:  m.inside,
-      };
-      await updateProfileCategory(prof.id, 'print_layout_json', JSON.stringify(newLayout));
-    }
-
-    await updateFormatProfile(
-      prof.id, prof.name, type,
-      preset.w, preset.h,
-      prof.margin_top_in, prof.margin_bottom_in,
-      prof.margin_outside_in, prof.margin_inside_in,
-      prof.font_body, prof.font_size_pt, prof.line_spacing,
-    );
-    profiles = await getFormatProfiles();
-    selectedPresetLabel = preset.label;
     compileAndShow();
   }
 
@@ -609,7 +543,6 @@
     showCreateProfileModal = false;
     activeProfileId = newId;
     await reloadPages();
-    syncPresetLabel(profiles.find(p => p.id === newId));
     compileAndShow();
   }
 
@@ -649,7 +582,6 @@
     activeProfileId = remainingProfile?.id ?? null;
     confirmDeleteProfileId = null;
     showProfileMenu = false;
-    syncPresetLabel(profiles.find(p => p.id === activeProfileId));
     compileAndShow();
   }
 
@@ -726,7 +658,20 @@
     scrollToPage(idx);
   }
 
+  let hasLoaded = false;
   onMount(loadData);
+
+  // Recompile whenever the user navigates TO this page (e.g. after editing
+  // chapter images/content in the editor tab). afterNavigate fires on every
+  // route transition including the initial load — we skip the first one since
+  // onMount already handles it.
+  afterNavigate(() => {
+    if (hasLoaded) {
+      compileAndShow();
+    }
+    hasLoaded = true;
+  });
+
   onDestroy(() => {
     teardownObserver();
     clearTimeout(scrollIdleTimer);
@@ -1018,41 +963,6 @@
                     {/each}
                   </div>
                 </div>
-              {/each}
-            </div>
-          </div>
-        {:else if sidebarMode === 'target'}
-          <div class="mode-panel">
-            <div class="target-group">
-              <div class="target-group-label">Print</div>
-              {#each TARGET_PRESETS.print as preset}
-                <button class="target-card" class:selected={selectedPresetLabel === preset.label}
-                  onclick={() => selectTarget(preset, 'print')}>
-                  <div class="target-card-icon">
-                    <div class="target-thumb print-thumb"
-                      style="aspect-ratio: {preset.w} / {preset.h};"></div>
-                  </div>
-                  <div class="target-card-info">
-                    <span class="target-card-label">{preset.label}</span>
-                    <span class="target-card-dims">{preset.w}" &times; {preset.h}"</span>
-                  </div>
-                </button>
-              {/each}
-            </div>
-            <div class="target-group">
-              <div class="target-group-label">Ebook</div>
-              {#each TARGET_PRESETS.ebook as preset}
-                <button class="target-card" class:selected={selectedPresetLabel === preset.label}
-                  onclick={() => selectTarget(preset, 'ebook')}>
-                  <div class="target-card-icon">
-                    <div class="target-thumb ebook-thumb"
-                      style="aspect-ratio: {preset.w} / {preset.h};"></div>
-                  </div>
-                  <div class="target-card-info">
-                    <span class="target-card-label">{preset.label}</span>
-                    <span class="target-card-dims">{preset.w}" &times; {preset.h}"</span>
-                  </div>
-                </button>
               {/each}
             </div>
           </div>
@@ -1468,41 +1378,6 @@
     text-align: center; padding: 1.5rem 0;
   }
 
-  /* Target cards */
-  .target-group { margin-bottom: 0.6rem; }
-  .target-group-label {
-    font-family: var(--iwe-font-ui); font-size: 0.65rem;
-    color: var(--iwe-text-muted); text-transform: uppercase;
-    letter-spacing: 0.05em; font-weight: 600;
-    padding: 0.3rem 0; margin-bottom: 0.2rem;
-  }
-  .target-card {
-    display: flex; align-items: center; gap: 0.6rem;
-    width: 100%; padding: 0.4rem 0.5rem;
-    border: 1px solid transparent; border-radius: var(--iwe-radius-sm);
-    background: none; cursor: pointer;
-    font-family: var(--iwe-font-ui); text-align: left;
-    transition: all 120ms;
-  }
-  .target-card:hover { background: var(--iwe-bg-hover); }
-  .target-card.selected {
-    border-color: var(--iwe-accent);
-    background: rgba(45, 106, 94, 0.06);
-  }
-  .target-card-icon {
-    width: 28px; display: flex; align-items: center; justify-content: center;
-    flex-shrink: 0;
-  }
-  .target-thumb {
-    height: 32px; border: 1px solid var(--iwe-border);
-    border-radius: 1px; background: #fff;
-  }
-  .target-thumb.ebook-thumb { border-radius: 3px; border-color: #555; }
-  .target-card.selected .target-thumb { border-color: var(--iwe-accent); }
-  .target-card-info { display: flex; flex-direction: column; }
-  .target-card-label { font-size: 0.78rem; color: var(--iwe-text); }
-  .target-card-dims { font-size: 0.65rem; color: var(--iwe-text-muted); }
-  .target-card.selected .target-card-label { color: var(--iwe-accent); font-weight: 500; }
 
   /* Custom mode sub-tab selector */
   .custom-selector-wrap {

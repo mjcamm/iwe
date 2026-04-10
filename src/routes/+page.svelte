@@ -19,6 +19,7 @@
   let semanticIndexDelay = $state(30);
   let typewriterMode = $state(false);
   let backupInterval = $state(60);
+  let formatUnit = $state('in');
 
   // Navigation
   let activeView = $state('projects');
@@ -55,6 +56,9 @@
     if (settings.backupInterval !== undefined) {
       backupInterval = settings.backupInterval;
       try { await setSpellLanguage(spellLang); } catch {}
+    }
+    if (settings.formatLengthUnit) {
+      formatUnit = settings.formatLengthUnit;
     }
     loading = false;
 
@@ -100,6 +104,13 @@
     backupInterval = parseInt(e.target.value) || 0;
     const settings = await getSettings();
     settings.backupInterval = backupInterval;
+    await saveSettings(settings);
+  }
+
+  async function handleFormatUnitChange(e) {
+    formatUnit = e.target.value;
+    const settings = await getSettings();
+    settings.formatLengthUnit = formatUnit;
     await saveSettings(settings);
   }
 
@@ -314,6 +325,18 @@
               </p>
             {/if}
             <p class="settings-hint">Backups within 7 days are kept in full. Older backups are pruned to 1 per day.</p>
+          </div>
+
+          <div class="settings-section">
+            <h3 class="settings-heading">Formatting</h3>
+            <div class="settings-row">
+              <label class="settings-label">Measurement unit</label>
+              <select class="settings-select" value={formatUnit} onchange={handleFormatUnitChange}>
+                <option value="in">Inches (in)</option>
+                <option value="mm">Millimetres (mm)</option>
+              </select>
+            </div>
+            <p class="settings-hint">Used for margins, trim sizes, and header/footer insets throughout the formatting system.</p>
           </div>
 
           <div class="settings-section settings-credits">

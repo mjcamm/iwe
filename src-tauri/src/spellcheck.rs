@@ -7,10 +7,27 @@ use crate::db::AppState;
 
 /// Holds one or two spellbook dictionaries (en_US + en_GB).
 /// The active language determines which is used for checking.
+/// Dictionaries are loaded on a background thread to avoid blocking app startup.
 pub struct SpellState {
-    pub en_us: Dictionary,
-    pub en_gb: Dictionary,
+    inner: std::sync::OnceLock<SpellInner>,
     pub language: Mutex<String>, // "en_US" or "en_GB"
+}
+
+struct SpellInner {
+    en_us: Dictionary,
+    en_gb: Dictionary,
+}
+
+impl SpellState {
+    fn get(&self) -> &SpellInner {
+        self.inner.get_or_init(|| {
+            let en_us = Dictionary::new(EN_US_AFF, EN_US_DIC)
+                .expect("Failed to load en_US dictionary");
+            let en_gb = Dictionary::new(EN_GB_AFF, EN_GB_DIC)
+                .expect("Failed to load en_GB dictionary");
+            SpellInner { en_us, en_gb }
+        })
+    }
 }
 
 // Embedded dictionary files (SCOWL large variants)
@@ -37,16 +54,10 @@ fn normalize_apostrophes(word: &str) -> String {
     word.replace('\u{2019}', "'").replace('\u{2018}', "'")
 }
 
-/// Initialize both dictionaries at startup.
+/// Create spell state (dictionaries load lazily on first use).
 pub fn init_spellcheck() -> SpellState {
-    let en_us = Dictionary::new(EN_US_AFF, EN_US_DIC)
-        .expect("Failed to load en_US dictionary");
-    let en_gb = Dictionary::new(EN_GB_AFF, EN_GB_DIC)
-        .expect("Failed to load en_GB dictionary");
-
     SpellState {
-        en_us,
-        en_gb,
+        inner: std::sync::OnceLock::new(),
         language: Mutex::new("en_US".to_string()),
     }
 }
@@ -73,7 +84,7 @@ fn is_correct(word: &str, spell: &SpellState, custom: &HashSet<String>) -> bool 
 
     // Get the active dictionary
     let lang = spell.language.lock().unwrap_or_else(|e| e.into_inner());
-    let dict = if *lang == "en_GB" { &spell.en_gb } else { &spell.en_us };
+    let dict = if *lang == "en_GB" { &spell.get().en_gb } else { &spell.get().en_us };
 
     // Check the dictionary — try original case, lowercase, and normalized apostrophes
     if dict.check(word) || dict.check(&lower) || dict.check(&normalized) {
@@ -98,7 +109,7 @@ fn is_correct(word: &str, spell: &SpellState, custom: &HashSet<String>) -> bool 
 fn get_suggestions(word: &str, spell: &SpellState, max: usize) -> Vec<String> {
     let normalized = normalize_apostrophes(word);
     let lang = spell.language.lock().unwrap_or_else(|e| e.into_inner());
-    let dict = if *lang == "en_GB" { &spell.en_gb } else { &spell.en_us };
+    let dict = if *lang == "en_GB" { &spell.get().en_gb } else { &spell.get().en_us };
 
     let mut suggestions = Vec::new();
     dict.suggest(&normalized, &mut suggestions);
@@ -158,10 +169,10 @@ pub fn debug_spell_check(
 ) -> Result<String, String> {
     let lower = word.to_lowercase();
     let normalized = normalize_apostrophes(&lower);
-    let us_check = spell.en_us.check(&lower);
-    let gb_check = spell.en_gb.check(&lower);
-    let us_orig = spell.en_us.check(&word);
-    let gb_orig = spell.en_gb.check(&word);
+    let us_check = spell.get().en_us.check(&lower);
+    let gb_check = spell.get().en_gb.check(&lower);
+    let us_orig = spell.get().en_us.check(&word);
+    let gb_orig = spell.get().en_gb.check(&word);
     let lang = spell.language.lock().unwrap_or_else(|e| e.into_inner());
     Ok(format!(
         "word={:?} lower={:?} normalized={:?} lang={} us_lower={} gb_lower={} us_orig={} gb_orig={}",

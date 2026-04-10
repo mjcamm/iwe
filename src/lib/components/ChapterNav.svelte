@@ -1,7 +1,10 @@
 <script>
   import { getDeletedChapters, restoreChapter } from '$lib/db.js';
+  import ChapterSettingsModal from './ChapterSettingsModal.svelte';
 
-  let { chapters, activeTabId, onselect, onadd, onrename, ondelete, onrestore } = $props();
+  let { chapters, activeTabId, onselect, onadd, onrename, ondelete, onrestore, onupdate } = $props();
+
+  let settingsChapter = $state(null);
 
   let editingId = $state(null);
   let editTitle = $state('');
@@ -73,42 +76,14 @@
   <ul class="chapter-list">
     {#each chapters as ch (ch.id)}
       <li class="chapter-item" class:active={ch.id === activeTabId}>
-        {#if editingId === ch.id}
-          <form class="rename-form" onsubmit={e => { e.preventDefault(); commitRename(ch.id); }}>
-            <input
-              class="input-author rename-input"
-              bind:value={editTitle}
-              onkeydown={e => { if (e.key === 'Escape') editingId = null; }}
-            />
-            <button type="submit" class="ch-action ch-action-save" title="Save">
-              <i class="bi bi-check-lg"></i>
-            </button>
-            <button type="button" class="ch-action" onclick={() => editingId = null} title="Cancel">
-              <i class="bi bi-x-lg"></i>
-            </button>
-          </form>
-        {:else}
           <button class="chapter-btn" onclick={() => onselect(ch.id)}>
             <span class="ch-title">{ch.title}</span>
           </button>
           <div class="ch-actions">
-            <button class="ch-action" onclick={e => startRename(e, ch)} title="Rename">
-              <i class="bi bi-pencil"></i>
+            <button class="ch-action" onclick={(e) => { e.stopPropagation(); settingsChapter = ch; }} title="Chapter settings">
+              <i class="bi bi-gear"></i>
             </button>
-            {#if confirmDeleteId === ch.id}
-              <button class="ch-action ch-action-confirm" onclick={e => handleDelete(e, ch)} title="Confirm delete">
-                <i class="bi bi-check-lg"></i>
-              </button>
-              <button class="ch-action" onclick={cancelDelete} title="Cancel">
-                <i class="bi bi-x-lg"></i>
-              </button>
-            {:else}
-              <button class="ch-action ch-action-delete" onclick={e => handleDelete(e, ch)} title="Delete">
-                <i class="bi bi-trash3"></i>
-              </button>
-            {/if}
           </div>
-        {/if}
       </li>
     {/each}
   </ul>
@@ -142,6 +117,14 @@
       </div>
     </div>
   </div>
+{/if}
+
+{#if settingsChapter}
+  <ChapterSettingsModal
+    chapter={settingsChapter}
+    onsave={() => { settingsChapter = null; onupdate?.(); }}
+    oncancel={() => settingsChapter = null}
+    ondelete={(id) => { settingsChapter = null; ondelete?.(id); }} />
 {/if}
 
 <svelte:window onkeydown={e => { if (e.key === 'Escape' && showDeleted) showDeleted = false; }} />

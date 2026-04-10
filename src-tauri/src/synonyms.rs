@@ -10,45 +10,53 @@ pub struct SynonymResult {
 }
 
 /// In-memory synonym lookup loaded from the bundled Moby Thesaurus file.
+/// Loads lazily on first use to avoid blocking app startup.
 pub struct SynonymState {
-    pub entries: Mutex<HashMap<String, Vec<String>>>,
+    entries: std::sync::OnceLock<HashMap<String, Vec<String>>>,
 }
 
-/// Build the synonym map from the embedded Moby Thesaurus text file.
-/// Format: each line is "root_word,syn1,syn2,syn3,..."
-pub fn init_synonyms() -> SynonymState {
-    let content = include_str!("../resources/mthesaur.txt");
-    let mut entries: HashMap<String, Vec<String>> = HashMap::with_capacity(31000);
+impl SynonymState {
+    pub fn get(&self) -> &HashMap<String, Vec<String>> {
+        self.entries.get_or_init(|| {
+            let content = include_str!("../resources/mthesaur.txt");
+            let mut entries: HashMap<String, Vec<String>> = HashMap::with_capacity(31000);
 
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
+            for line in content.lines() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
 
-        let mut parts = line.splitn(2, ',');
-        let word = match parts.next() {
-            Some(w) => w.trim().to_lowercase(),
-            None => continue,
-        };
-        let syns_str = match parts.next() {
-            Some(s) => s,
-            None => continue,
-        };
+                let mut parts = line.splitn(2, ',');
+                let word = match parts.next() {
+                    Some(w) => w.trim().to_lowercase(),
+                    None => return entries,
+                };
+                let syns_str = match parts.next() {
+                    Some(s) => s,
+                    None => continue,
+                };
 
-        let syns: Vec<String> = syns_str
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
+                let syns: Vec<String> = syns_str
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
 
-        if !syns.is_empty() {
-            entries.insert(word, syns);
-        }
+                if !syns.is_empty() {
+                    entries.insert(word, syns);
+                }
+            }
+
+            entries
+        })
     }
+}
 
+/// Create synonym state (thesaurus loads lazily on first use).
+pub fn init_synonyms() -> SynonymState {
     SynonymState {
-        entries: Mutex::new(entries),
+        entries: std::sync::OnceLock::new(),
     }
 }
 
@@ -96,9 +104,9 @@ pub fn get_synonyms(
     syn_state: tauri::State<'_, SynonymState>,
     word: String,
 ) -> Result<SynonymResult, String> {
-    let entries = syn_state.entries.lock().map_err(|e| e.to_string())?;
+    let entries = syn_state.get();
 
-    match lookup(&entries, &word) {
+    match lookup(entries, &word) {
         Some(syns) => {
             let limited: Vec<String> = syns.into_iter().take(200).collect();
             Ok(SynonymResult {

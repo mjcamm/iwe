@@ -14,6 +14,11 @@ pub struct Chapter {
     pub content: Vec<u8>,
     pub sort_order: i64,
     pub deleted: bool,
+    pub subtitle: String,
+    pub chapter_image: String,
+    pub ornament_above: String,
+    pub ornament_mid: String,
+    pub ornament_below: String,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -222,6 +227,25 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         .is_ok();
     if !has_chapter_deleted {
         conn.execute_batch("ALTER TABLE chapters ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0;")?;
+    }
+
+    // Migration: add per-chapter heading metadata
+    let has_chapter_subtitle: bool = conn
+        .prepare("SELECT subtitle FROM chapters LIMIT 0")
+        .is_ok();
+    if !has_chapter_subtitle {
+        conn.execute_batch("ALTER TABLE chapters ADD COLUMN subtitle TEXT NOT NULL DEFAULT '';")?;
+        conn.execute_batch("ALTER TABLE chapters ADD COLUMN ornament_above TEXT NOT NULL DEFAULT '';")?;
+        conn.execute_batch("ALTER TABLE chapters ADD COLUMN ornament_mid TEXT NOT NULL DEFAULT '';")?;
+        conn.execute_batch("ALTER TABLE chapters ADD COLUMN ornament_below TEXT NOT NULL DEFAULT '';")?;
+    }
+
+    // Migration: add chapter_image column
+    let has_chapter_image: bool = conn
+        .prepare("SELECT chapter_image FROM chapters LIMIT 0")
+        .is_ok();
+    if !has_chapter_image {
+        conn.execute_batch("ALTER TABLE chapters ADD COLUMN chapter_image TEXT NOT NULL DEFAULT '';")?;
     }
 
     // Migration: add backup columns to writing_settings
@@ -442,7 +466,7 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
 
 pub fn list_chapters(conn: &Connection) -> rusqlite::Result<Vec<Chapter>> {
     let mut stmt = conn.prepare(
-        "SELECT id, title, content, sort_order, COALESCE(deleted, 0), created_at, updated_at FROM chapters WHERE COALESCE(deleted, 0) = 0 ORDER BY sort_order ASC"
+        "SELECT id, title, content, sort_order, COALESCE(deleted, 0), COALESCE(subtitle, ''), COALESCE(chapter_image, ''), COALESCE(ornament_above, ''), COALESCE(ornament_mid, ''), COALESCE(ornament_below, ''), created_at, updated_at FROM chapters WHERE COALESCE(deleted, 0) = 0 ORDER BY sort_order ASC"
     )?;
     let rows = stmt.query_map([], |row| {
         Ok(Chapter {
@@ -451,8 +475,13 @@ pub fn list_chapters(conn: &Connection) -> rusqlite::Result<Vec<Chapter>> {
             content: row.get(2)?,
             sort_order: row.get(3)?,
             deleted: row.get::<_, i64>(4)? != 0,
-            created_at: row.get(5)?,
-            updated_at: row.get(6)?,
+            subtitle: row.get(5)?,
+            chapter_image: row.get(6)?,
+            ornament_above: row.get(7)?,
+            ornament_mid: row.get(8)?,
+            ornament_below: row.get(9)?,
+            created_at: row.get(10)?,
+            updated_at: row.get(11)?,
         })
     })?;
     rows.collect()
@@ -460,7 +489,7 @@ pub fn list_chapters(conn: &Connection) -> rusqlite::Result<Vec<Chapter>> {
 
 pub fn list_deleted_chapters(conn: &Connection) -> rusqlite::Result<Vec<Chapter>> {
     let mut stmt = conn.prepare(
-        "SELECT id, title, content, sort_order, COALESCE(deleted, 0), created_at, updated_at FROM chapters WHERE COALESCE(deleted, 0) = 1 ORDER BY updated_at DESC"
+        "SELECT id, title, content, sort_order, COALESCE(deleted, 0), COALESCE(subtitle, ''), COALESCE(chapter_image, ''), COALESCE(ornament_above, ''), COALESCE(ornament_mid, ''), COALESCE(ornament_below, ''), created_at, updated_at FROM chapters WHERE COALESCE(deleted, 0) = 1 ORDER BY updated_at DESC"
     )?;
     let rows = stmt.query_map([], |row| {
         Ok(Chapter {
@@ -469,8 +498,13 @@ pub fn list_deleted_chapters(conn: &Connection) -> rusqlite::Result<Vec<Chapter>
             content: row.get(2)?,
             sort_order: row.get(3)?,
             deleted: row.get::<_, i64>(4)? != 0,
-            created_at: row.get(5)?,
-            updated_at: row.get(6)?,
+            subtitle: row.get(5)?,
+            chapter_image: row.get(6)?,
+            ornament_above: row.get(7)?,
+            ornament_mid: row.get(8)?,
+            ornament_below: row.get(9)?,
+            created_at: row.get(10)?,
+            updated_at: row.get(11)?,
         })
     })?;
     rows.collect()
@@ -478,7 +512,7 @@ pub fn list_deleted_chapters(conn: &Connection) -> rusqlite::Result<Vec<Chapter>
 
 pub fn get_chapter(conn: &Connection, id: i64) -> rusqlite::Result<Option<Chapter>> {
     let mut stmt = conn.prepare(
-        "SELECT id, title, content, sort_order, COALESCE(deleted, 0), created_at, updated_at FROM chapters WHERE id = ?1"
+        "SELECT id, title, content, sort_order, COALESCE(deleted, 0), COALESCE(subtitle, ''), COALESCE(chapter_image, ''), COALESCE(ornament_above, ''), COALESCE(ornament_mid, ''), COALESCE(ornament_below, ''), created_at, updated_at FROM chapters WHERE id = ?1"
     )?;
     let mut rows = stmt.query_map(params![id], |row| {
         Ok(Chapter {
@@ -487,8 +521,13 @@ pub fn get_chapter(conn: &Connection, id: i64) -> rusqlite::Result<Option<Chapte
             content: row.get(2)?,
             sort_order: row.get(3)?,
             deleted: row.get::<_, i64>(4)? != 0,
-            created_at: row.get(5)?,
-            updated_at: row.get(6)?,
+            subtitle: row.get(5)?,
+            chapter_image: row.get(6)?,
+            ornament_above: row.get(7)?,
+            ornament_mid: row.get(8)?,
+            ornament_below: row.get(9)?,
+            created_at: row.get(10)?,
+            updated_at: row.get(11)?,
         })
     })?;
     match rows.next() {
@@ -530,6 +569,23 @@ pub fn rename_chapter(conn: &Connection, id: i64, title: &str) -> rusqlite::Resu
     conn.execute(
         "UPDATE chapters SET title = ?1, updated_at = CURRENT_TIMESTAMP WHERE id = ?2",
         params![title, id],
+    )?;
+    Ok(())
+}
+
+pub fn update_chapter_metadata(
+    conn: &Connection,
+    id: i64,
+    title: &str,
+    subtitle: &str,
+    chapter_image: &str,
+    ornament_above: &str,
+    ornament_mid: &str,
+    ornament_below: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE chapters SET title = ?1, subtitle = ?2, chapter_image = ?3, ornament_above = ?4, ornament_mid = ?5, ornament_below = ?6, updated_at = CURRENT_TIMESTAMP WHERE id = ?7",
+        params![title, subtitle, chapter_image, ornament_above, ornament_mid, ornament_below, id],
     )?;
     Ok(())
 }

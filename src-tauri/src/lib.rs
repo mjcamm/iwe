@@ -305,6 +305,18 @@ fn rename_chapter(state: tauri::State<'_, AppState>, id: i64, title: String) -> 
 }
 
 #[tauri::command]
+fn update_chapter_metadata(
+    state: tauri::State<'_, AppState>,
+    id: i64, title: String, subtitle: String, chapter_image: String,
+    ornament_above: String, ornament_mid: String, ornament_below: String,
+) -> Result<(), String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::update_chapter_metadata(conn, id, &title, &subtitle, &chapter_image, &ornament_above, &ornament_mid, &ornament_below)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn delete_chapter(state: tauri::State<'_, AppState>, id: i64) -> Result<(), String> {
     let guard = state.db.lock().map_err(|e| e.to_string())?;
     let conn = guard.as_ref().ok_or("No project open")?;
@@ -1309,6 +1321,7 @@ pub fn run() {
             add_chapter,
             update_chapter_content,
             rename_chapter,
+            update_chapter_metadata,
             delete_chapter,
             reorder_chapters,
             get_deleted_chapters,
