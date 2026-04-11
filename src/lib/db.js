@@ -764,6 +764,10 @@ export async function compilePreview(profileId) {
   return invoke('compile_preview', { profileId });
 }
 
+export async function exportFormatPdf() {
+  return invoke('export_format_pdf');
+}
+
 export async function listSystemFonts() {
   return invoke('list_system_fonts');
 }

@@ -9,9 +9,10 @@
     duplicateFormatProfile, pasteFormatProfileSettings, addFormatPage,
     updateFormatPage, deleteFormatPage, reorderFormatPages,
     addPageExclusion, removePageExclusion, listPageExclusions,
-    compilePreview, getProjectSetting, setProjectSetting,
+    compilePreview, exportFormatPdf, getProjectSetting, setProjectSetting,
     updateProfileCategory,
   } from '$lib/db.js';
+  import { save } from '@tauri-apps/plugin-dialog';
   import { addToast } from '$lib/toast.js';
   import PageContentEditor from '$lib/components/PageContentEditor.svelte';
   import ChapterHeadings from '$lib/components/format/ChapterHeadings.svelte';
@@ -73,6 +74,7 @@
     { key: 'pages', label: 'Pages', icon: 'bi-file-earmark-text' },
     { key: 'themes', label: 'Themes', icon: 'bi-palette' },
     { key: 'custom', label: 'Custom', icon: 'bi-sliders' },
+    { key: 'export', label: 'Export', icon: 'bi-download' },
   ];
 
   // Resize
@@ -165,6 +167,10 @@
   let renderError = $state(null);
   let lastTiming = $state(null); // CompileTiming from Rust
   let compileGeneration = $state(0); // incremented on each compile to bust img cache
+
+  // Export state
+  let exporting = $state(false);
+  let exportError = $state(null);
   let sectionPages = $state({}); // section_id -> 0-based page index
 
   // Lazy-load state — IntersectionObserver tracks visible pages, scroll-idle commits loads
@@ -647,6 +653,39 @@
     compileAndShow();
   }
 
+  async function handleExportPdf() {
+    if (exporting || pageCount === 0) return;
+    exporting = true;
+    exportError = null;
+    try {
+      // Ensure we have a fresh compile
+      if (!pageCount) await compileAndShow();
+
+      const pdfBytes = await exportFormatPdf();
+      const arr = pdfBytes instanceof Uint8Array ? pdfBytes : new Uint8Array(pdfBytes);
+
+      // Save dialog
+      const profileName = activeProfile?.name || 'export';
+      const filePath = await save({
+        title: 'Save PDF',
+        defaultPath: `${profileName}.pdf`,
+        filters: [{ name: 'PDF', extensions: ['pdf'] }],
+      });
+
+      if (filePath) {
+        const { writeFile } = await import('@tauri-apps/plugin-fs');
+        await writeFile(filePath, arr);
+        addToast(`PDF exported to ${filePath.split(/[/\\]/).pop()}`, 'success');
+      }
+    } catch (e) {
+      console.error('[format] export failed:', e);
+      exportError = String(e);
+      addToast('Export failed: ' + e, 'error');
+    } finally {
+      exporting = false;
+    }
+  }
+
   function scrollToPage(index) {
     const el = document.getElementById(`preview-page-${index}`);
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -1018,6 +1057,50 @@
             {:else if customTab === 'trim'}
               <TrimSettings profile={activeProfile} onchange={handleCustomSettingChange} />
             {/if}
+          </div>
+        {:else if sidebarMode === 'export'}
+          <div class="mode-panel">
+            <div class="export-panel">
+              <h4 class="export-title">Export</h4>
+
+              {#if activeProfile}
+                <div class="export-info">
+                  <div class="export-info-row">
+                    <span class="export-info-label">Profile</span>
+                    <span class="export-info-value">{activeProfile.name}</span>
+                  </div>
+                  <div class="export-info-row">
+                    <span class="export-info-label">Trim</span>
+                    <span class="export-info-value">{activeProfile.trim_width_in}″ × {activeProfile.trim_height_in}″</span>
+                  </div>
+                  <div class="export-info-row">
+                    <span class="export-info-label">Pages</span>
+                    <span class="export-info-value">{pageCount || '—'}</span>
+                  </div>
+                </div>
+              {/if}
+
+              <button class="export-btn-main" onclick={handleExportPdf}
+                disabled={exporting || pageCount === 0}>
+                {#if exporting}
+                  <span class="export-spinner"></span> Exporting...
+                {:else}
+                  <i class="bi bi-file-earmark-pdf"></i> Export PDF
+                {/if}
+              </button>
+
+              {#if exportError}
+                <div class="export-error">
+                  <i class="bi bi-exclamation-triangle"></i>
+                  {exportError}
+                </div>
+              {/if}
+
+              <p class="export-hint">
+                Exports the current profile as a print-ready PDF with all fonts embedded.
+                Make sure the preview looks correct before exporting.
+              </p>
+            </div>
           </div>
         {/if}
       </div>
@@ -1427,6 +1510,67 @@
   .custom-option i:first-child { width: 16px; text-align: center; }
   .custom-option-check {
     margin-left: auto; color: var(--iwe-accent);
+  }
+
+  /* Export panel */
+  .export-panel { padding: 0.4rem 0; }
+  .export-title {
+    font-family: var(--iwe-font-prose);
+    font-weight: 400; font-size: 0.95rem;
+    margin: 0 0 1rem 0; color: var(--iwe-text);
+  }
+  .export-info {
+    background: var(--iwe-bg-warm);
+    border: 1px solid var(--iwe-border);
+    border-radius: var(--iwe-radius-sm);
+    padding: 0.6rem 0.8rem;
+    margin-bottom: 1rem;
+  }
+  .export-info-row {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 0.25rem 0;
+  }
+  .export-info-row + .export-info-row { border-top: 1px solid var(--iwe-border); }
+  .export-info-label {
+    font-family: var(--iwe-font-ui); font-size: 0.72rem;
+    color: var(--iwe-text-muted); text-transform: uppercase;
+    letter-spacing: 0.03em; font-weight: 600;
+  }
+  .export-info-value {
+    font-family: var(--iwe-font-ui); font-size: 0.85rem;
+    color: var(--iwe-text);
+  }
+  .export-btn-main {
+    width: 100%;
+    display: flex; align-items: center; justify-content: center; gap: 0.5rem;
+    padding: 0.75rem 1rem;
+    font-family: var(--iwe-font-ui); font-size: 0.95rem; font-weight: 500;
+    background: var(--iwe-accent); border: 1px solid var(--iwe-accent);
+    color: #fff; border-radius: var(--iwe-radius-sm);
+    cursor: pointer; transition: all 120ms;
+  }
+  .export-btn-main:hover:not(:disabled) { background: #245a4f; }
+  .export-btn-main:disabled { opacity: 0.5; cursor: not-allowed; }
+  .export-btn-main i { font-size: 1.1rem; }
+  .export-spinner {
+    width: 16px; height: 16px;
+    border: 2px solid rgba(255,255,255,0.3); border-top-color: #fff;
+    border-radius: 50%; animation: spin 0.8s linear infinite;
+  }
+  .export-error {
+    margin-top: 0.7rem;
+    padding: 0.5rem 0.7rem;
+    background: rgba(192, 57, 43, 0.08);
+    border: 1px solid rgba(192, 57, 43, 0.2);
+    border-radius: var(--iwe-radius-sm);
+    font-family: var(--iwe-font-ui); font-size: 0.78rem;
+    color: #c0392b;
+    display: flex; align-items: flex-start; gap: 0.4rem;
+  }
+  .export-hint {
+    margin-top: 1rem;
+    font-family: var(--iwe-font-ui); font-size: 0.72rem;
+    color: var(--iwe-text-muted); line-height: 1.5;
   }
 
   /* Tag bar */

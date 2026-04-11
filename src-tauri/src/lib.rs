@@ -1458,6 +1458,7 @@ pub fn run() {
             semantic::semantic_search,
             semantic::get_semantic_index_status,
             format::compile_preview,
+            format::export_format_pdf,
             format::list_system_fonts,
             import::parse_import_file,
             famous_books::list_library_books,

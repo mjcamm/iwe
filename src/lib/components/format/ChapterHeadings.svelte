@@ -82,6 +82,7 @@
       image_width_pct: 50,
       image_align: 'center',
       image_light_text: false,
+      image_dedicated_page: false,
     };
   }
 
@@ -133,6 +134,7 @@
   let imgWidthPct = $state(50);
   let imgAlign = $state('center');
   let imgLightText = $state(false);
+  let imgDedicatedPage = $state(false);
 
   let fileInputDefault;
 
@@ -171,6 +173,7 @@
     imgWidthPct = settings.image_width_pct;
     imgAlign = settings.image_align;
     imgLightText = settings.image_light_text;
+    imgDedicatedPage = settings.image_dedicated_page;
   });
 
   let saveTimer = null;
@@ -197,6 +200,7 @@
       image_default: imgDefault, image_position: imgPosition,
       image_width_pct: imgWidthPct, image_align: imgAlign,
       image_light_text: imgLightText,
+      image_dedicated_page: imgDedicatedPage,
     });
     await updateProfileCategory(profile.id, 'chapter_headings_json', json);
     onchange?.();
@@ -485,7 +489,7 @@
             {/if}
             <option value="below_heading">Below heading block</option>
             <option value="cover_heading">Cover entire heading area</option>
-            <option value="cover_page">Cover entire page</option>
+            <option value="dedicated_page">Dedicated image page</option>
           </select>
         </div>
 
@@ -504,12 +508,12 @@
           </select>
         </div>
 
-        {#if imgPosition === 'cover_page' || imgPosition === 'cover_heading'}
+        {#if imgPosition === 'cover_heading'}
           <button class="toggle-row" onclick={() => { imgLightText = !imgLightText; scheduleSave(); }}>
             <span class="toggle-switch" class:on={imgLightText}><span class="toggle-knob"></span></span>
             <div class="toggle-text">
               <span class="toggle-label">Light text (white)</span>
-              <span class="field-hint">Use white text over dark images</span>
+              <span class="field-hint">Use white heading text over dark images</span>
             </div>
           </button>
         {/if}

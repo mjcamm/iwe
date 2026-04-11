@@ -631,7 +631,7 @@
       element: element,
       extensions: [
         StarterKit.configure({
-          heading: { levels: [1, 2, 3] },
+          heading: { levels: [1, 2, 3, 4] },
           history: false, // Disable — using yUndoPlugin instead
         }),
         Placeholder.configure({
@@ -792,9 +792,10 @@
   function getCurrentStyle() {
     const ed = editorState.editor;
     if (!ed) return 'Body';
-    if (ed.isActive('heading', { level: 1 })) return 'Title';
-    if (ed.isActive('heading', { level: 2 })) return 'Chapter Heading';
-    if (ed.isActive('heading', { level: 3 })) return 'Scene Heading';
+    if (ed.isActive('heading', { level: 1 })) return 'Heading 1'; // legacy — shouldn't be used in body
+    if (ed.isActive('heading', { level: 2 })) return 'Heading 2';
+    if (ed.isActive('heading', { level: 3 })) return 'Heading 3';
+    if (ed.isActive('heading', { level: 4 })) return 'Heading 4';
     return 'Body';
   }
 
@@ -805,6 +806,7 @@
     else if (style === 'h1') ed.chain().focus().toggleHeading({ level: 1 }).run();
     else if (style === 'h2') ed.chain().focus().toggleHeading({ level: 2 }).run();
     else if (style === 'h3') ed.chain().focus().toggleHeading({ level: 3 }).run();
+    else if (style === 'h4') ed.chain().focus().toggleHeading({ level: 4 }).run();
     showStyleDropdown = false;
   }
 </script>
@@ -852,17 +854,17 @@
               <span class="style-preview body-preview">Body</span>
               <span class="style-shortcut">Ctrl+Alt+0</span>
             </button>
-            <button class="style-option" class:active={ed.isActive('heading', { level: 1 })} onclick={() => setStyle('h1')}>
-              <span class="style-preview h1-preview">Title</span>
-              <span class="style-shortcut">Ctrl+Alt+1</span>
-            </button>
             <button class="style-option" class:active={ed.isActive('heading', { level: 2 })} onclick={() => setStyle('h2')}>
-              <span class="style-preview h2-preview">Chapter Heading</span>
+              <span class="style-preview h2-preview">Heading 2</span>
               <span class="style-shortcut">Ctrl+Alt+2</span>
             </button>
             <button class="style-option" class:active={ed.isActive('heading', { level: 3 })} onclick={() => setStyle('h3')}>
-              <span class="style-preview h3-preview">Scene Heading</span>
+              <span class="style-preview h3-preview">Heading 3</span>
               <span class="style-shortcut">Ctrl+Alt+3</span>
+            </button>
+            <button class="style-option" class:active={ed.isActive('heading', { level: 4 })} onclick={() => setStyle('h4')}>
+              <span class="style-preview h4-preview">Heading 4</span>
+              <span class="style-shortcut">Ctrl+Alt+4</span>
             </button>
           </div>
         {/if}
@@ -1112,9 +1114,10 @@
   .style-option.active { background: var(--iwe-accent-light); }
   .style-preview { color: var(--iwe-text); }
   .body-preview { font-family: var(--iwe-font-prose); font-size: 0.9rem; }
-  .h1-preview { font-family: var(--iwe-font-prose); font-size: 1.1rem; font-weight: 700; }
-  .h2-preview { font-family: var(--iwe-font-prose); font-size: 1rem; font-weight: 700; }
-  .h3-preview { font-family: var(--iwe-font-prose); font-size: 0.9rem; font-weight: 700; font-style: italic; }
+  .h1-preview { font-family: var(--iwe-font-prose); font-size: 1.15rem; font-weight: 700; }
+  .h2-preview { font-family: var(--iwe-font-prose); font-size: 1.05rem; font-weight: 700; }
+  .h3-preview { font-family: var(--iwe-font-prose); font-size: 0.95rem; font-weight: 700; }
+  .h4-preview { font-family: var(--iwe-font-prose); font-size: 0.88rem; font-weight: 700; }
   .style-shortcut { font-size: 0.65rem; color: var(--iwe-text-faint); font-family: var(--iwe-font-ui); }
 
   .editor-scroll {
@@ -1141,7 +1144,11 @@
   }
   .editor-page :global(.prose-editor h3) {
     font-family: var(--iwe-font-prose); font-size: 1.1rem; font-weight: 700;
-    margin: 1.25em 0 0.4em; line-height: 1.4; font-style: italic;
+    margin: 1.25em 0 0.4em; line-height: 1.4;
+  }
+  .editor-page :global(.prose-editor h4) {
+    font-family: var(--iwe-font-prose); font-size: 1rem; font-weight: 700;
+    margin: 1em 0 0.35em; line-height: 1.4;
   }
   .editor-page :global(.prose-editor blockquote) {
     border-left: 2px solid var(--iwe-text-faint);

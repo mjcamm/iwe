@@ -29,3 +29,4 @@ vite.config.ts.timestamp-*
 # Bundled resources (too large for git, embedded via include_str!)
 /src-tauri/resources/dictionaries/
 /src-tauri/resources/mthesaur.txt
+src-tauri/resources/models/model.onnx.bak

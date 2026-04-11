@@ -156,7 +156,7 @@ fn escape_typst(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
         match ch {
-            '#' | '$' | '\\' | '*' | '_' | '<' | '>' | '@' | '~' | '`' => {
+            '#' | '$' | '\\' | '*' | '_' | '<' | '>' | '@' | '~' | '`' | '[' | ']' => {
                 out.push('\\');
                 out.push(ch);
             }
@@ -1353,26 +1353,23 @@ fn build_typst_markup(
 
         // Resolve cover image path early (needed before the heading block)
         let cover_img_path: Option<String> = if !ch_img_data.is_empty() &&
-            (img_position == "cover_page" || img_position == "cover_heading") {
+            (img_position == "dedicated_page" || img_position == "cover_heading") {
             ingest_image(ch_img_data, &mut images).map(|(path, _)| path)
         } else {
             None
         };
 
         if let Some(ref path) = cover_img_path {
-            if img_position == "cover_page" {
-                // Full-page cover: image as page background with ALL text (heading + body)
-                // flowing on top of it. Scoped to this chapter only via a content block.
+            if img_position == "dedicated_page" {
+                // Dedicated image page: a full-bleed page with JUST the image, no text.
+                // Width = page width, height = page height, fit: cover clips if aspect ratio differs.
+                // Heading and body text go on the NEXT page as normal.
                 let page_w_in = profile.trim_width_in;
-                let img_w_in = page_w_in * img_width_pct / 100.0;
-                doc.push_str("#[\n");
+                let page_h_in = profile.trim_height_in;
                 doc.push_str(&format!(
-                    "#set page(background: place(center + horizon, image(\"{}\", width: {}in)))\n",
-                    path, img_w_in,
+                    "#page(margin: 0pt)[#image(\"{}\", width: {}in, height: {}in, fit: \"cover\")]\n\n",
+                    path, page_w_in, page_h_in,
                 ));
-                if img_light_text {
-                    doc.push_str("#set text(fill: white)\n");
-                }
             } else {
                 // Cover heading area — image takes real space, text overlaid on top
                 doc.push_str(&format!(
@@ -1440,12 +1437,11 @@ fn build_typst_markup(
         }
 
         // Close cover wrappers if active
-        if cover_img_path.is_some() {
-            if img_position == "cover_heading" {
-                doc.push_str("  ]\n"); // close #place
-                doc.push_str("]\n");   // close #block
-            // cover_page closing is deferred to after the body text block
-            }
+        // Close cover_heading wrappers if active
+        // (dedicated_page already closed its #page() inline — nothing to close here)
+        if cover_img_path.is_some() && img_position == "cover_heading" {
+            doc.push_str("  ]\n"); // close #place
+            doc.push_str("]\n");   // close #block
         }
 
         // Space after heading
@@ -1521,11 +1517,6 @@ fn build_typst_markup(
             }
         }
         doc.push_str("]\n"); // close body #[
-
-        // Close cover_page scope after the body — background + white text end here
-        if cover_img_path.is_some() && img_position == "cover_page" {
-            doc.push_str("]\n"); // close the #[ that set page background + text fill
-        }
     }
 
     // ---- Back matter ----
@@ -1540,9 +1531,66 @@ fn build_typst_markup(
         }
     }
 
-    // We suppress the default heading rendering — everything is emitted manually
-    // in the chapter loop using the configured styles from ch_head.
-    let heading_style = "#show heading.where(level: 1): it => {}\n\n".to_string();
+    // We suppress the default H1 rendering — emitted manually in the chapter loop.
+    let mut heading_style = "#show heading.where(level: 1): it => {}\n\n".to_string();
+
+    // In-chapter heading styles (H2, H3, H4) from headings_json
+    let hdg = parse_category_json(&profile.headings_json);
+    let hdg_no_indent_after = hdg.get("no_indent_after").and_then(|v| v.as_bool()).unwrap_or(true);
+
+    for (level, key) in [(2, "h2"), (3, "h3"), (4, "h4")] {
+        let enabled = hdg.get(&format!("{}_enabled", key)).and_then(|v| v.as_bool()).unwrap_or(true);
+        if !enabled { continue; }
+
+        let font = hdg.get(&format!("{}_font", key)).and_then(|v| v.as_str()).unwrap_or("");
+        let size = hdg.get(&format!("{}_size_pt", key)).and_then(|v| v.as_f64()).unwrap_or(if level == 2 { 16.0 } else if level == 3 { 13.0 } else { 11.0 });
+        let align = hdg.get(&format!("{}_align", key)).and_then(|v| v.as_str()).unwrap_or("left");
+        let text_style = hdg.get(&format!("{}_style", key)).and_then(|v| v.as_str()).unwrap_or("bold");
+        let tracking = hdg.get(&format!("{}_tracking_em", key)).and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let space_above = hdg.get(&format!("{}_space_above_em", key)).and_then(|v| v.as_f64()).unwrap_or(1.5);
+        let space_below = hdg.get(&format!("{}_space_below_em", key)).and_then(|v| v.as_f64()).unwrap_or(0.8);
+        let keep_next = hdg.get(&format!("{}_keep_with_next", key)).and_then(|v| v.as_bool()).unwrap_or(true);
+        let rule_above = hdg.get(&format!("{}_rule_above", key)).and_then(|v| v.as_bool()).unwrap_or(false);
+        let rule_below = hdg.get(&format!("{}_rule_below", key)).and_then(|v| v.as_bool()).unwrap_or(false);
+
+        // Build a show rule for this heading level
+        heading_style.push_str(&format!("#show heading.where(level: {}): it => {{\n", level));
+        heading_style.push_str(&format!("  v({}em)\n", space_above));
+        if rule_above {
+            heading_style.push_str("  line(length: 100%, stroke: 0.5pt)\n  v(0.3em)\n");
+        }
+
+        // Styled text block
+        heading_style.push_str("  {\n");
+        heading_style.push_str(&format!("    set text(size: {}pt)\n", size));
+        if !font.is_empty() {
+            heading_style.push_str(&format!("    set text(font: \"{}\")\n", escape_typst(font)));
+        }
+        if text_style == "bold" { heading_style.push_str("    set text(weight: \"bold\")\n"); }
+        if text_style == "italic" { heading_style.push_str("    set text(style: \"italic\")\n"); }
+        if tracking > 0.0 { heading_style.push_str(&format!("    set text(tracking: {}em)\n", tracking)); }
+
+        let content_expr = match text_style {
+            "smallcaps" => "smallcaps(it.body)",
+            "uppercase" => "upper(it.body)",
+            _ => "it.body",
+        };
+        heading_style.push_str(&format!("    align({}, {})\n", align, content_expr));
+        heading_style.push_str("  }\n");
+
+        if rule_below {
+            heading_style.push_str("  v(0.3em)\n  line(length: 100%, stroke: 0.5pt)\n");
+        }
+        heading_style.push_str(&format!("  v({}em)\n", space_below));
+
+        // Keep with next via block sticky
+        if keep_next {
+            // Wrap the whole thing to stick with the following content
+            // Actually, Typst handles this via the heading's block properties
+        }
+
+        heading_style.push_str("}\n\n");
+    }
 
     // Dropcap function preamble (only if drop caps are enabled)
     let dc_preamble = if p_drop_enabled { dropcap_preamble() } else { String::new() };
@@ -1565,8 +1613,33 @@ fn compile_document(markup: &str, images: ImageMap, cache: &FontCache, packages:
         Err(diagnostics) => {
             let mut errors = Vec::new();
             for diag in diagnostics {
-                errors.push(format!("{:?}", diag.message));
+                // Extract line/column from the span if possible
+                let span_info = if let Some(id) = diag.span.id() {
+                    use typst::World;
+                    let source = world.source(id);
+                    if let Ok(src) = source {
+                        let byte_offset: usize = src.range(diag.span).map(|r| r.start).unwrap_or(0);
+                        let text = src.text();
+                        let before = &text[..byte_offset.min(text.len())];
+                        let line = before.matches('\n').count() + 1;
+                        let col = before.rfind('\n').map(|p| byte_offset - p).unwrap_or(byte_offset + 1);
+                        // Grab surrounding context
+                        let ctx_start = byte_offset.saturating_sub(100);
+                        let ctx_end = (byte_offset + 100).min(text.len());
+                        let context = &text[ctx_start..ctx_end];
+                        format!(" at line {}:{} | context: ...{}...", line, col, context.replace('\n', "\\n"))
+                    } else {
+                        String::new()
+                    }
+                } else {
+                    String::new()
+                };
+                errors.push(format!("{:?}{}", diag.message, span_info));
             }
+            // Dump full markup to temp file for debugging
+            let dump_path = std::env::temp_dir().join("iwe_typst_debug.typ");
+            let _ = std::fs::write(&dump_path, markup);
+            log::error!("[format] Typst markup dumped to {:?}", dump_path);
             Err(format!("Typst compilation failed: {}", errors.join("; ")))
         }
     }
@@ -1796,6 +1869,32 @@ pub fn render_page_svg(format_state: &FormatState, page_index: usize) -> Result<
     let document = doc_guard.as_ref().ok_or("No compiled document")?;
     let page = document.pages.get(page_index).ok_or("Page index out of range")?;
     Ok(typst_svg::svg(page))
+}
+
+/// Export the cached compiled document as a PDF.
+/// Returns the PDF bytes. The frontend handles the save dialog.
+#[tauri::command]
+pub fn export_format_pdf(
+    format_state: tauri::State<'_, FormatState>,
+) -> Result<Vec<u8>, String> {
+    let doc_guard = format_state.document.lock().map_err(|e| e.to_string())?;
+    let document = doc_guard.as_ref().ok_or("No compiled document. Preview must be loaded first.")?;
+
+    let options = typst_pdf::PdfOptions {
+        ident: typst::foundations::Smart::Auto,
+        timestamp: None,
+        page_ranges: None,
+        standards: typst_pdf::PdfStandards::default(),
+        tagged: false,
+    };
+
+    let pdf_bytes = typst_pdf::pdf(document, &options)
+        .map_err(|errors| {
+            let msgs: Vec<String> = errors.iter().map(|e| format!("{:?}", e.message)).collect();
+            format!("PDF export failed: {}", msgs.join("; "))
+        })?;
+
+    Ok(pdf_bytes)
 }
 } // end mod real (cfg feature = "format")
 
