@@ -5,7 +5,7 @@
   import { revealItemInDir } from '@tauri-apps/plugin-opener';
   import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
   import { listen } from '@tauri-apps/api/event';
-  import { getProjectsDir, setProjectsDir, listProjects, createProject, deleteProject, getSettings, saveSettings, setSpellLanguage } from '$lib/db.js';
+  import { getProjectsDir, setProjectsDir, listProjects, createProject, deleteProject, getSettings, saveSettings, setSpellLanguage, getProjectCoverByPath, coverToObjectUrl } from '$lib/db.js';
   import WordPalettes from '$lib/components/WordPalettes.svelte';
 
   let projectsDir = $state(null);
@@ -38,10 +38,38 @@
     });
   }
 
+  // Load covers for each project in the background. The list itself renders
+  // immediately; cover thumbnails fill in as each read completes. Failed reads
+  // (missing table, file lock, corrupt) leave `coverUrl` as null which the
+  // template renders as a fallback glyph.
+  async function loadCoversFor(list) {
+    await Promise.all(list.map(async (p) => {
+      try {
+        const cover = await getProjectCoverByPath(p.filepath);
+        p.coverUrl = coverToObjectUrl(cover);
+      } catch {
+        p.coverUrl = null;
+      }
+    }));
+    // Reassign to trigger Svelte reactivity (we mutated objects in place).
+    projects = [...list];
+  }
+
+  // Wrapper: list projects, reassign, then kick off cover loading in parallel.
+  async function refreshProjects() {
+    // Revoke any existing object URLs before discarding the old list.
+    for (const p of projects) {
+      if (p.coverUrl) URL.revokeObjectURL(p.coverUrl);
+    }
+    const fresh = await listProjects();
+    projects = fresh;
+    loadCoversFor(fresh);
+  }
+
   onMount(async () => {
     projectsDir = await getProjectsDir();
     if (projectsDir) {
-      projects = await listProjects();
+      await refreshProjects();
     }
     const settings = await getSettings();
     if (settings.spellLanguage) {
@@ -64,7 +92,7 @@
 
     // Refresh project list when an import completes
     await listen('projects-changed', async () => {
-      projects = await listProjects();
+      await refreshProjects();
     });
   });
 
@@ -126,7 +154,7 @@
     if (selected) {
       projectsDir = selected;
       await setProjectsDir(selected);
-      projects = await listProjects();
+      await refreshProjects();
     }
   }
 
@@ -153,7 +181,7 @@
     await deleteProject(deleteModal.project.filepath);
     deleteModal = { show: false, project: null };
     deleteConfirmText = '';
-    projects = await listProjects();
+    await refreshProjects();
   }
 
   function cancelDelete() {
@@ -223,7 +251,7 @@
                 <button class="btn-author btn-author-primary" onclick={() => showNewForm = true}>+ New Manuscript</button>
                 <button class="btn-author btn-author-subtle" onclick={handleImport}>Import…</button>
                 <div class="action-links">
-                  <button class="btn-text" onclick={async () => { projects = await listProjects(); }}>Refresh</button>
+                  <button class="btn-text" onclick={refreshProjects}>Refresh</button>
                   <span class="dot-sep"></span>
                   <button class="btn-text" onclick={openFolder}>Open Folder</button>
                   <span class="dot-sep"></span>
@@ -240,7 +268,13 @@
               {#each projects as project (project.filepath)}
                 <li class="project-item">
                   <a href="/project/{encodeURIComponent(project.filename)}" class="project-link">
-                    <span class="project-icon">&#9782;</span>
+                    <div class="project-cover" class:has-image={project.coverUrl}>
+                      {#if project.coverUrl}
+                        <img src={project.coverUrl} alt="" />
+                      {:else}
+                        <span class="project-cover-fallback">&#9782;</span>
+                      {/if}
+                    </div>
                     <div class="project-meta">
                       <span class="project-name">{project.title}</span>
                       <span class="project-file">{project.filename}</span>
@@ -489,10 +523,42 @@
   .project-item:hover { background: var(--iwe-bg-hover); }
   .project-item:hover .project-delete { opacity: 1; }
   .project-link {
-    flex: 1; display: flex; align-items: center; gap: 0.75rem;
-    padding: 0.85rem 0.5rem; text-decoration: none; color: inherit; min-width: 0;
+    flex: 1; display: flex; align-items: center; gap: 1rem;
+    padding: 0.7rem 0.5rem; text-decoration: none; color: inherit; min-width: 0;
   }
-  .project-icon { font-size: 1.2rem; color: var(--iwe-accent); opacity: 0.5; flex-shrink: 0; }
+  .project-cover {
+    flex-shrink: 0;
+    width: 44px;
+    aspect-ratio: 2 / 3;
+    border-radius: 3px;
+    background: var(--iwe-bg-warm);
+    border: 1px solid var(--iwe-border-light);
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: box-shadow 150ms, transform 150ms;
+  }
+  .project-cover.has-image {
+    background: #000;
+    border-color: transparent;
+  }
+  .project-cover img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+  .project-cover-fallback {
+    font-size: 1.3rem;
+    color: var(--iwe-accent);
+    opacity: 0.45;
+  }
+  .project-item:hover .project-cover {
+    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+    transform: translateY(-1px);
+  }
   .project-meta { display: flex; flex-direction: column; min-width: 0; }
   .project-name {
     font-family: var(--iwe-font-prose); font-size: 0.95rem; color: var(--iwe-text);

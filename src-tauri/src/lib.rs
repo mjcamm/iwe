@@ -1,5 +1,7 @@
 mod analysis;
 mod db;
+mod epub;
+mod epub_validate;
 mod famous_books;
 mod format;
 mod import;
@@ -239,6 +241,76 @@ fn close_project(state: tauri::State<'_, AppState>) -> Result<(), String> {
     let mut path_guard = state.db_path.lock().map_err(|e| e.to_string())?;
     *path_guard = None;
     Ok(())
+}
+
+// ---- Book cover commands ----
+
+#[derive(serde::Serialize)]
+pub struct BookCoverData {
+    pub data: Vec<u8>,
+    pub mime_type: String,
+}
+
+/// Run the lightweight EPUB sanity checker on a byte buffer. Returns a
+/// list of issues (empty = passes). Called by the frontend after every
+/// EPUB export so the user gets an immediate warning if the file is
+/// malformed, rather than finding out later in a reader.
+#[tauri::command]
+fn validate_epub_bytes(bytes: Vec<u8>) -> Vec<epub_validate::EpubIssue> {
+    epub_validate::validate(&bytes)
+}
+
+#[tauri::command]
+fn get_book_cover(state: tauri::State<'_, AppState>) -> Result<Option<BookCoverData>, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    match db::get_book_cover(conn).map_err(|e| e.to_string())? {
+        Some((data, mime_type)) => Ok(Some(BookCoverData { data, mime_type })),
+        None => Ok(None),
+    }
+}
+
+#[tauri::command]
+fn set_book_cover(
+    state: tauri::State<'_, AppState>,
+    data: Vec<u8>,
+    mime_type: String,
+) -> Result<(), String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::set_book_cover(conn, &data, &mime_type).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn clear_book_cover(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    db::clear_book_cover(conn).map_err(|e| e.to_string())
+}
+
+/// Peek the cover of an arbitrary project file by path, without going through
+/// the open_project / AppState machinery. Used by the home page to show cover
+/// thumbnails next to each project in the list.
+///
+/// Uses a short-lived read-only connection so it doesn't fight with the main
+/// project connection for file locks. Tolerant of schemas that predate the
+/// book_cover table (returns None on the error instead of propagating).
+#[tauri::command]
+fn get_project_cover_by_path(filepath: String) -> Result<Option<BookCoverData>, String> {
+    use rusqlite::OpenFlags;
+    let conn = match Connection::open_with_flags(
+        &filepath,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    ) {
+        Ok(c) => c,
+        Err(_) => return Ok(None),
+    };
+    match db::get_book_cover(&conn) {
+        Ok(Some((data, mime_type))) => Ok(Some(BookCoverData { data, mime_type })),
+        Ok(None) => Ok(None),
+        // Table doesn't exist yet on pre-migration projects — not an error.
+        Err(_) => Ok(None),
+    }
 }
 
 // ---- Chapter commands ----
@@ -1316,6 +1388,10 @@ pub fn run() {
             close_project,
             get_project_setting,
             set_project_setting,
+            get_book_cover,
+            set_book_cover,
+            clear_book_cover,
+            get_project_cover_by_path,
             get_chapters,
             get_chapter,
             add_chapter,
@@ -1458,6 +1534,8 @@ pub fn run() {
             semantic::semantic_search,
             semantic::get_semantic_index_status,
             format::compile_preview,
+            epub::export_epub,
+            validate_epub_bytes,
             format::export_format_pdf,
             format::list_system_fonts,
             import::parse_import_file,

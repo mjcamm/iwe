@@ -190,10 +190,11 @@ Kanban, Editor, Palettes, Stats, Time Flow, Formatting — these are nav tabs in
 
 **Cross-window events:** Popup analysis windows can navigate the main editor via `emitTo('main', 'navigate-to-position', payload)` from `@tauri-apps/api/event`. The project layout listens, forwards to a `window` CustomEvent `iwe-navigate-to-position`, and the editor page's listener calls `handleGoToChapter`. Payload: `{ chapterId, searchText, charPosition }`.
 
-**Two independent PDF paths:**
+**Four independent export paths — keep them straight:**
 - `/print/+page.svelte` (popup) is NOT Typst — it converts Y.Doc → ProseMirror JSON → HTML via `yDocToProsemirrorJSON` + `generateHTML`, applies A4 or Book CSS, and triggers `window.print()`. Fast, rough, zero layout control.
 - The toolbar `Export → PDF` uses `genpdf` in Rust (`lib.rs:686-823`) with embedded Liberation Serif, A4 or 5×8 book preset. Also independent of Typst.
-- The `Formatting` project subroute is the Typst path: `format::compile_preview` compiles a cached `PagedDocument` and exposes pages as SVG via the custom `iwe://localhost/preview/page/{n}.svg` URI scheme (see `lib.rs:1265-1298`). This is the "publication-quality" path. Do not confuse it with the other two.
+- The Format editor's **print** profiles use Typst: `format::compile_preview` compiles a cached `PagedDocument`, exposes pages as SVG via the custom `iwe://localhost/preview/page/{n}.svg` URI scheme (see `lib.rs:1278-1312`), and exports via `format::export_format_pdf` → `typst_pdf::pdf(...)`. This is the "publication-quality" path.
+- The Format editor's **ebook** profiles use `epub::export_epub` in Rust (`epub-builder` crate, stateless) — the frontend pre-converts chapters to HTML via `yDocToProsemirrorJSON` + `generateHTML` with an `epubExtensions` set. Ebook preview is a device-frame HTML render on the frontend (`generateEbookPreview`), never touches Typst. See the Format editor section below for details.
 
 ## Project Structure
 
@@ -265,7 +266,8 @@ src-tauri/
 │   ├── syllable_data.rs          # AUTO-GENERATED phf map of word→syllable counts
 │   ├── wordlists.rs              # Speech-verb / adverb / etc. lists for analysis
 │   ├── semantic.rs               # ONNX session + tokenizer, embedding index, semantic_search, indexing events
-│   ├── format.rs                 # Typst-based Format editor: FormatState, compile_preview, render_page_svg, list_system_fonts
+│   ├── format.rs                 # Typst-based Format editor: FormatState, compile_preview, render_page_svg, list_system_fonts (feature-gated: cfg(feature = "format"))
+│   ├── epub.rs                   # Stateless EPUB export via epub-builder crate — consumed by Format editor's ebook profiles
 │   ├── import.rs                 # DOCX + EPUB parse → flat blocks → 5-strategy chapter break detection
 │   ├── palettes.rs               # Word Palettes: separate SQLite DB in app data dir, 21 palette commands
 │   ├── famous_books.rs           # Comparative-works library: separate SQLite DB in app data dir
@@ -372,26 +374,331 @@ Project subroute (NOT a popup). Header inputs for daily_goal (50–10000 words) 
 
 Data source: `logWritingActivity` is called on every 500ms-debounced content save from the editor page; Rust aggregates into `daily_stats`.
 
-### Format & Layout editor — `src/routes/project/[filename]/format/+page.svelte` + `src-tauri/src/format.rs`
-The "publication-quality" path. Project subroute. Two-column layout: **Typst-rendered SVG preview (left) + profile sidebar (right, resizable, width persisted to `settings.json`)**.
+### Format & Layout editor — `src/routes/project/[filename]/format/+page.svelte` + `src-tauri/src/format.rs` + `src-tauri/src/epub.rs`
 
-**How the preview works:**
-1. `compile_preview(profile_id)` in `format.rs` loads chapters + format_pages + exclusions, extracts Y.Doc text, builds a Typst markup document via `build_typst_markup`, compiles with the `typst` crate, caches the resulting `PagedDocument` in `FormatState.document`.
-2. The frontend receives `page_count` and renders `<img src="http://iwe.localhost/preview/page/{i}.svg?v={generation}">` per page. These URIs go through a custom protocol handler registered in `lib.rs::run` (`register_uri_scheme_protocol("iwe", ...)`) which calls `format::render_page_svg(page_index)`.
-3. **Pages lazy-load** via an IntersectionObserver + 150ms scroll-idle commit. Only pages within ±2 of the visible range get their `<img src>` set; the rest show aspect-correct placeholders. Re-observes on page-count or compile-generation change.
-4. A **timing bar** at the bottom shows DB load / Y.Doc extract / markup build / Typst compile / total ms (debug aid — keep it).
+The "publication-quality" path. Project subroute. Two-column layout: **preview column (left) + profile sidebar (right, resizable 220–600px, width persisted to `settings.json` as `formatSidebarWidth`)**. Read this entire section before touching any formatting code — the subsystem has a lot of load-bearing details.
 
-**Profile management** (`format_profiles` table): dropdown + rename + **Copy settings** (serializes profile minus target/size to `settings.json` clipboard) + **Paste settings** (applies clipboard to active profile via `paste_format_profile_settings`) + **New** (optionally duplicate existing + pick Print/Ebook target) + **Delete** (inline Yes/No, disabled when only one profile remains).
+#### Feature gating: the whole Typst path is `#[cfg(feature = "format")]`
 
-**Sidebar modes:**
-- **Pages** — tag bar with 17 `page_role` values (half-title, title, copyright, dedication, epigraph, toc, foreword, preface, prologue, epilogue, afterword, acknowledgments, about-author, also-by, glossary, excerpt, blurbs). Click to arm, then click a page in the list to insert below. Used tags show ×. Three draggable sections: Front Matter, Chapters (locked), Back Matter. Each page has a row of **profile-inclusion pills** that toggle `format_page_exclusions` for per-profile visibility. Full-content editing opens `PageContentEditor.svelte` (rich HTML editor with drag-resizable image support).
-- **Target** — preset cards. **Print:** 6×9 Paperback, 5.5×8.5 Paperback, 5×8 Paperback, A5 (5.83×8.27), US Letter. **Ebook:** Kindle (4.5×7.2), EPUB generic (5×7.5), Apple Books (5×7.5).
-- **Themes** — placeholder ("Theme presets will appear here"). **Not implemented.**
-- **Custom** — dropdown with 8 settings subpanels (each a component in `src/lib/components/format/`): Chapter Headings, Paragraph, Headings, Breaks, Print Layout, Typography, Header/Footer, Trim. Changes flush to `format_profiles.{category}_json` via `update_profile_category`.
+The real implementation in `format.rs` is wrapped in `mod real` inside `#[cfg(feature = "format")]`. When the feature is off, lightweight stub types + stub commands compile instead (`format.rs:1901-1957`), which lets `lib.rs` build without pulling in the Typst crate family. Activated in `Cargo.toml` as `format = ["dep:typst", "dep:typst-pdf", "dep:typst-svg", "dep:typst-kit"]`. Neither `format` nor `semantic` is in `default`, so plain `cargo build` skips both. **Tauri dev/build must pass `--features format` explicitly** or you'll get "Format features not enabled" at runtime. Typst builds are slow — the stub mode keeps everyday dev fast.
 
-**Ebook output** currently shows a placeholder ("Ebook preview coming soon — Ebooks use reflowable HTML — no fixed pages to preview") when a profile's `target_type === 'ebook'`. The compile path returns 0 pages for ebook profiles. **Not implemented yet.**
+Typst crates used (all pinned at `0.14`): `typst` (core, `World` trait, `PagedDocument`), `typst-pdf` (PDF export), `typst-svg` (per-page SVG), `typst-kit` (system font discovery + package storage, `default-features = false, features = ["fonts", "packages"]`). The `epub-builder = "0.8"` crate is **not** feature-gated and always compiles.
 
-**Fonts:** `list_system_fonts` uses `typst_kit::fonts::FontSearcher` to discover system fonts, with the four embedded Liberation Serif variants as fallback (`format.rs:15-18`). `FontPicker.svelte` renders each family in its own face for WYSIWYG preview.
+#### How the preview works, end to end
+
+1. **`compile_preview(profile_id)`** (format.rs:1711-1826) is the entry point. It:
+   - Takes the `AppState.db` mutex at the start and **holds it for the whole compile** (DB load → Y.Doc extract → markup build → Typst compile). This is 4 serial phases on one mutex; any other DB operation blocks during a compile. Architectural gotcha to be aware of.
+   - Early returns for ebook: if `profile.target_type == "ebook"`, clears `FormatState.document = None` and returns `CompileResult { page_count: 0, ... }`. Typst is never invoked for ebook profiles. Ebook preview is rendered entirely on the frontend as HTML (see below).
+   - Loads pages via `list_format_pages`, filters via `list_excluded_page_ids_for_profile`, loads `list_chapters`, then reads four `project_settings` keys inline via `query_row`: `book_title`, `author_name`, `series_name`, `series_number`.
+   - Extracts chapter text via `ydoc::extract_text_for_format_from_bytes` — **this is a distinct function** from `extract_text_with_breaks` used elsewhere. It additionally emits the literal string `"* * *"` for top-level `horizontalRule` nodes, which the Typst builder detects as scene break sentinels. **Never substitute `extract_text_with_breaks` in the format path or scene breaks will silently become blank lines.**
+   - Calls `build_typst_markup(...)` → returns `(String markup, Vec<String> section_ids, ImageMap images)`.
+   - Lazy-inits the font cache via `FormatState::get_or_init_fonts()` on first call.
+   - Calls `compile_document(...)` which builds a fresh `IweWorld` per compile and runs `typst::compile::<PagedDocument>(&world)`. On error, dumps the full markup to `$TEMP/iwe_typst_debug.typ` and returns a descriptive error with line/column context — check that file first when debugging markup issues.
+   - After compile, `resolve_section_pages(&document, &section_ids)` walks the Typst introspector using `Label::new()` on each `"iwe-ch-{id}"` / `"iwe-fp-{id}"` label to map section → 0-indexed page number. Returned as `section_pages: HashMap<String, usize>` for the frontend's scroll-to-section feature.
+   - Stores the new `PagedDocument` in `format_state.document` (behind a `Mutex<Option<PagedDocument>>`). **There is no generation counter in Rust** — the "generation" in the URL is a frontend JS variable.
+
+2. **The `iwe://` URI scheme** (lib.rs:1278-1312) is registered once before `invoke_handler`. It handles exactly one route: `/preview/page/{N}` (with optional `.svg` suffix stripped). Calls `format::render_page_svg(format_state.inner(), page_index)` which locks `FormatState.document`, indexes into `document.pages[page_index]`, calls `typst_svg::svg(page)`, returns the SVG string with `Content-Type: image/svg+xml` and `Access-Control-Allow-Origin: *`. Frontend requests `http://iwe.localhost/preview/page/{i}.svg?v={generation}` (Tauri normalizes custom schemes to `http://{scheme}.localhost/...`). `render_page_svg` is a plain public function, **not** a Tauri command. When adding new `iwe://` asset routes in the future, extend the existing handler — Tauri only allows one `register_uri_scheme_protocol` call per scheme.
+
+3. **Lazy page loading** (`format/+page.svelte:249-310`): the frontend renders `pageCount` page wrappers with placeholders sized via `width: {trim_width_in * 72}px; aspect-ratio: {w}/{h}` so the scroll height is correct before any SVG loads.
+   - An `IntersectionObserver` with `root: previewContainer, rootMargin: '200px 0px 200px 0px', threshold: 0` tracks `visibleSet` (non-reactive Set).
+   - On scroll, `scrolling = true` + 150ms debounce (`SCROLL_IDLE_MS`) to `commitVisible()`.
+   - `commitVisible()` computes `[min(visible)-2, max(visible)+2]` (`VISIBLE_BUFFER = 2`) and adds any new indices to `loadedPages` ($state Set). Svelte reactivity then sets `<img src>` on those pages only — pages outside the buffer stay as placeholders forever until scrolled near.
+   - A `$effect` on `[pageCount, compileGeneration]` calls `queueMicrotask(() => setupObserver())` so the observer re-attaches to fresh DOM nodes after every compile.
+   - `compileGeneration` is a frontend counter incremented on each successful compile, used as the `?v=` cache-bust query param so the browser re-fetches even if the URL path is identical.
+   - Scroll restoration: `compileAndShow()` reads `previewContainer.scrollTop` and `loadSavedScroll(profileId)` (from `project_settings`), waits TWO `requestAnimationFrame` calls after compile (to let Svelte commit placeholders and let the browser compute layout), then jumps. Per-profile scroll persistence is intentional.
+
+4. **Timing bar** (bottom of preview) shows five values from the `CompileTiming` struct: `total_ms`, `db_load_ms`, `ydoc_extract_ms`, `markup_build_ms`, `typst_compile_ms`, plus `page_count`. Debug aid — keep it.
+
+5. **Compile triggering** — there is **NO debounce** on compile. `compileAndShow()` is called directly after: initial load, route navigation, profile switch, every Custom subpanel save (via `handleCustomSettingChange`), page add/edit/delete/reorder, profile-inclusion pill toggle (if affected profile is active), profile create/paste/delete. Every trigger fires a full recompile. The `rendering` flag shows a spinner while in flight; overlapping compiles are not debounced or cancelled.
+
+#### Profile management UI (top of sidebar)
+
+Dropdown + pencil-rename (inline `<input>`, commits on blur/Enter via `updateFormatProfile` preserving all other scalar fields) + **Copy settings** (snapshots the active profile as `formatClipboard = { ...activeProfile }` and persists to `settings.json`) + **Paste settings** (calls `pasteFormatProfileSettings(activeProfile.id, formatClipboard)`; disabled when clipboard is null or its id matches the active profile) + **New profile** modal (optionally duplicate from an existing profile + pick Print/Ebook target) + **Delete** (inline Yes/No confirmation, auto-picks a remaining profile before calling `deleteFormatProfile`).
+
+#### Sidebar modes — FOUR modes, not five
+
+`SIDEBAR_MODES = [pages, themes, custom, export]`. **There is no standalone "Target" mode anymore** — trim size / target type selection was moved into the Custom → "Target Format" subpanel (`TrimSettings.svelte`). If you see docs or comments referencing a "Target" sidebar tab, they're out of date.
+
+**Pages mode:**
+- Tag bar with the 18 `ASSIGNABLE_ROLES` (the 17 known roles + explicit ordering). Click a role to arm → click an existing page in the list to insert the new page below it (via `addFormatPage` + `reorderFormatPages`). Esc cancels. Used tags show ×; clicking × calls `deleteTaggedPage(role)`.
+- Three sections rendered with `svelte-dnd-action`: **Front Matter** (draggable, `position: 'front'`), **Chapters** (locked, iterates `chapters`), **Back Matter** (draggable, `position: 'back'`). Front/back use `handleFrontFinalize`/`handleBackFinalize` which extract ordered ids and call `reorderFormatPages`. Clicking a non-armed page calls `scrollToSection('iwe-fp-{id}')` which looks up `sectionPages` (returned by compile) and smooth-scrolls. Clicking a chapter calls `scrollToSection('iwe-ch-{chapter_id}')`.
+- **Profile-inclusion pills**: below each page, one pill per profile. `isPageIncludedIn(pageId, profileId) = !exclusions.some(e => e.page_id === pageId && e.profile_id === profileId)` — **absence of an exclusion row means inclusion** (default on). Clicking toggles via `addPageExclusion` / `removePageExclusion`; if the toggled profile is active, `compileAndShow()` runs.
+- **Full content editing**: the `bi-card-text` button opens `PageContentEditor.svelte` (see below). Inline rename via pencil icon.
+
+**Themes mode:** Still a placeholder. Renders `<p class="shell-placeholder">Theme presets will appear here.</p>`. No preset data, no apply logic. Unchanged.
+
+**Custom mode:** Dropdown selector driven by `filteredCustomTabs`, a `$derived` that filters `ALL_CUSTOM_TABS` by `activeProfile?.target_type`. Tabs marked `targets: ['print']` (i.e. `print-layout` and `header-footer`) are **hidden for ebook profiles**. The full tab list:
+
+```js
+const ALL_CUSTOM_TABS = [
+  { id: 'chapter-headings', targets: ['print', 'ebook'] },
+  { id: 'paragraph',        targets: ['print', 'ebook'] },
+  { id: 'headings',         targets: ['print', 'ebook'] },
+  { id: 'breaks',           targets: ['print', 'ebook'] },
+  { id: 'print-layout',     targets: ['print'] },
+  { id: 'typography',       targets: ['print', 'ebook'] },
+  { id: 'header-footer',    targets: ['print'] },
+  { id: 'trim',             label: 'Target Format', targets: ['print', 'ebook'] },
+];
+```
+
+Each subpanel receives `profile={activeProfile}` and `onchange={handleCustomSettingChange}`. On change, the parent refreshes `profiles` and recompiles. `TrimSettings.svelte` is the only subpanel that also receives `bind:ebookDevice` — it controls which device frame renders in the ebook preview.
+
+**Export mode:** Shows profile info (name, trim size, page count). For print profiles: "Export PDF" → `handleExportPdf()` → ensures fresh compile → `exportFormatPdf()` (Typst-based; `typst_pdf::pdf(document, &PdfOptions { tagged: false })`) → save dialog → `writeFile`. For ebook profiles: "Export EPUB" → `handleExportEpub()` → `chapterToHtml()` per chapter (via `yDocToProsemirrorJSON` + `generateHTML` with `epubExtensions`) → assembles an `EpubExportRequest` → `exportEpub(request)` → save dialog.
+
+#### Custom subpanels — field reference
+
+All 8 subpanels follow the identical pattern: `$props() = { profile, onchange }`, `$derived.by` parses `profile?.{category}_json` merged with hardcoded `defaults()`, local `$state` mirrors, `scheduleSave()` debounces, `persist()` calls `updateProfileCategory(profile.id, '{category}_json', JSON.stringify(state))`, then `onchange?.()`. Only **full-object** JSON writes — no per-key updates.
+
+| Subpanel | DB column | Debounce | Notable fields (enum values in parens) |
+|---|---|---|---|
+| `ChapterHeadings.svelte` | `chapter_headings_json` | 250ms | `number_format` (none/numeric/chapter_numeric/word/chapter_word/roman/chapter_roman), `{number,title,subtitle}_{enabled,font,size_pt,align,style,tracking_em}`, `sink_em`, `space_*_em`, `start_on` (any/recto, print-only), `rule_{above,below}` + `rule_thickness_pt`, `image_enabled`, `image_individual`, `image_default` (base64), `image_position` (above_number/between_number_title/between_title_subtitle/below_heading/cover_heading/dedicated_page), `image_width_pct`, `image_align`, `image_light_text` (only when position=cover_heading) |
+| `ParagraphSettings.svelte` | `paragraph_json` | 250ms | `drop_cap_{enabled,lines,font,color,quote_mode,fill_pct}` (quote_mode: first_char/both_together/letter_only/disable_on_dialogue), `small_caps_{enabled,words}` (words: 3/5/8/-1), `apply_when` (chapter/breaks/both), `paragraph_style` (indented/spaced/both), `indent_em`, `spacing_em`, `prevent_widows`, `prevent_orphans`, `max_consecutive_hyphens` (2/3/4/99), `last_line_min_chars` (0/3/5/8), `hyphen_aggressiveness` (low/normal/high). **Gotcha:** uses `eval()` in its `set(field, value)` helper — don't copy that pattern. |
+| `HeadingsSettings.svelte` | `headings_json` | 250ms | Flat map of `{h2,h3,h4}_{enabled,font,size_pt,align,style,tracking_em,space_above_em,space_below_em,keep_with_next,rule_above,rule_below}` for H2/H3/H4 + global `no_indent_after`. State is a flat object keyed by prefixed strings, not a nested structure. |
+| `BreaksSettings.svelte` | `breaks_json` | 250ms | `style` (none/blank/dinkus/asterism/rule/custom/image), `custom_text`, `image_data` (base64), `image_width_pct`, `space_above_em`, `space_below_em`, `keep_with_content` |
+| `PrintLayoutSettings.svelte` | `print_layout_json` | 300ms | `margin_{top,bottom,outside,inside}_in` (always inches internally, UI converts mm via `$lib/unitPreference.js`), `justify`, `hyphens`. "Reset to recommended" button calls `getRecommendedMargins(w, h)` from `$lib/marginDefaults.js` and persists immediately. **Hidden for ebook profiles.** |
+| `TypographySettings.svelte` | `typography_json` | 200ms | `font`, `size_pt` (9–18), `line_spacing` (1.15/1.25/1.4/1.5/1.75/2.0). **Fallback pattern**: when the JSON column is empty or unparseable, falls back to legacy scalar columns `font_body`, `font_size_pt`, `line_spacing` — preserving older profiles. |
+| `HeaderFooterSettings.svelte` | `header_footer_json` | 250ms | Most complex. `slots` map with 12 keys (`{verso,recto}_{header,footer}_{left,center,right}`), each `{content, custom, font, size_pt, style}`. Content enum: none/page_number/book_title/chapter_title/author_name/series_name/book_number/custom. Style: normal/italic/smallcaps/uppercase. Size: 7–12pt. Visual page diagram with clickable slot cells. Globals: `suppress_on_chapter_start`, `header_separator`, `footer_separator`, `separator_thickness_pt`, `margin_{left,right}_in`, `extend_no_header`, `extend_no_footer`. **Hidden for ebook profiles.** |
+| `TrimSettings.svelte` | **none (writes to scalar columns)** | immediate | **The exception.** Does NOT call `updateProfileCategory`; calls `updateFormatProfile(...)` directly to update scalar `trim_width_in`, `trim_height_in`, `target_type`. Uses `$lib/trimSizes.js` (`TRIM_CATEGORIES`, `PLATFORMS`, `findSize`, `supportedPlatforms`) for the size catalog. Also exposes the ebook device picker as a `$bindable()` `ebookDevice` prop. **Print mode:** proportional thumbnail + search + category-grouped catalog + custom dimensions. **Ebook mode:** device list (Kindle Paperwhite, Kindle Oasis, iPad variants, iPhone variants, Android, Kobo Libra). **The `trim_json` column exists but is completely inert — never read by `format.rs` or written by any subpanel. Reserved space.** |
+
+#### `PageContentEditor.svelte` — rich HTML page editor
+
+Full-screen modal (`fixed inset: 0, z-index: 2000`) opened via the edit-content button on each format page. Uses TipTap with: `StarterKit.configure({ heading: false, history: true })` (headings disabled — font sizes used instead; history ON, unlike the main editor which uses Yjs undo), `TextStyle`, `FontSize` + `FontFamily` (from `@tiptap/extension-text-style`), a custom `ImageNode`, `TextAlign.configure({ types: ['paragraph'] })`, `Placeholder`.
+
+**Custom image node** is `inline: false, group: 'block', draggable: true` with attributes `src, alt, width` (string like `"300px"`). Manual DOM NodeView: outer centering div + inline-block frame + `<img>` + bottom-right teal resize handle. Handle drag attaches `document` mousemove/mouseup listeners, `newWidth = max(40, startWidth + dx)`, on mouseup dispatches `tr.setNodeMarkup(pos, undefined, { ...attrs, width: finalWidth })` to persist.
+
+**Content format:** stored as ProseMirror JSON stringified (`editor.getJSON() → JSON.stringify`). `parseInitialContent(raw)` handles: empty → blank doc / starts with `{` → JSON.parse / else → split by `\n\n` and wrap paragraphs. The page canvas is sized to exact profile inches at 72dpi (`width: {w}in; height: {h}in; padding: {margins}in`) with a red dashed "Page boundary" marker below — content can overflow visibly so the author sees it. `verticalAlign` state (`'top'` | `'center'` | `'bottom'`) is read from `page.vertical_align`, sent back via `onsave({ content, verticalAlign })`, applied via `data-valign` CSS. Explicit Save button + Ctrl+S; no auto-save. **Images are embedded as base64 data URIs** — large images grow the `.iwe` file directly.
+
+#### Ebook output — now real, no longer a placeholder
+
+Ebook output previously showed "Ebook preview coming soon". That has been replaced with a live preview + real EPUB export.
+
+**Ebook preview** (`format/+page.svelte:345-458`): when `activeProfile?.target_type === 'ebook'`, `compileAndShow()` skips `compilePreview()` and calls `generateEbookPreview()` instead. The function generates a self-contained HTML string with a `<style>` block sourced from `activeProfile.typography_json`, concatenates front-matter pages + chapter content (via `chapterToHtml()`) + back-matter pages, and sets `ebookPreviewHtml`. The template then renders a device frame:
+
+```svelte
+<div class="ebook-device" style="width: {deviceDims.w + 24}px;">
+  <div class="ebook-screen" style="width: {deviceDims.w}px; height: {deviceDims.h}px;">
+    {@html ebookPreviewHtml}
+  </div>
+</div>
+```
+
+Device dimensions come from `DEVICE_DIMS` keyed by `ebookDevice` (default `'kindle-paperwhite'`, 300×480px). The outer device adds 24px padding for a bezel look. `pageCount` is 0 in ebook mode; the timing bar is hidden; the IntersectionObserver is torn down.
+
+**EPUB export** — `src-tauri/src/epub.rs` is fully implemented and registered. Single command `export_epub(request: EpubExportRequest) -> Result<Vec<u8>, String>`, **stateless** (takes no `AppState` — all content comes from the frontend payload). Uses `epub-builder = "0.8"` with `ZipLibrary::new()` at EPUB 3.0. Request shape:
+
+```rust
+struct EpubExportRequest {
+    title, author, language, description: String,
+    chapters: Vec<EpubChapter>,       // { title, subtitle, html }
+    front_pages: Vec<EpubPage>,       // { title, role, html, position }
+    back_pages: Vec<EpubPage>,
+    cover_image: Option<String>,      // base64 data URL, decoded via hand-rolled base64 decoder
+    css: String,                      // written as epub stylesheet.css
+}
+```
+
+Flow: set metadata → decode cover image + `add_cover_image` → `stylesheet(css)` → iterate front pages (`build_page_html` + `wrap_xhtml`, TOC pages use `ReferenceType::Toc`, title pages `TitlePage`, else `Text`) → iterate chapters (`build_chapter_html`, wrapped in `<section epub:type="chapter">`) → iterate back pages → `builder.generate(&mut output)` → return bytes. `epub_type_for_role(role)` maps IWE page roles to EPUB semantic types (e.g. `acknowledgments → acknowledgments`, unknown → `bodymatter`).
+
+**Known EPUB gaps:**
+- `EpubChapter.subtitle` is in the struct but no UI populates it.
+- `EpubPage.position` is carried but unused in the epub builder (front/back is encoded by which Vec the page is in).
+- The CSS source is profile-dependent — the frontend decides what to send.
+
+#### Typst markup generation — `build_typst_markup` (format.rs:1017-1599)
+
+Signature: `fn build_typst_markup(profile, front_pages, chapters, back_pages, book_title, author_name, series_name, series_number) -> (String, Vec<String>, ImageMap)`. Chapters param is `&[(i64 chapter_id, String title, String subtitle, String chapter_image_data, String text)]`.
+
+Generated Typst document structure:
+
+1. **Metadata variables** (top): `#let iwe-book-title = [...]`, `#let iwe-author-name = [...]`, `#let iwe-series-name = [...]`, `#let iwe-series-number = [...]`. Referenced by header/footer slot expressions.
+2. **Page setup**: `#set page(width: Xin, height: Xin, margin: (top:..., bottom:..., outside:..., inside:...))`. Margins read from `print_layout_json` with fallback to scalar columns. If `extend_no_header`/`extend_no_footer` is set and no header/footer slot has content, top/bottom margin is reduced to `(margin * 0.6).max(0.375)`.
+3. **Header/footer**: `#set page(header: context { ... })` — uses a `context {}` code block (not markup mode) with `calc.even(here().page())` for recto/verso branching, and a `grid(columns: (1fr, 1fr, 1fr), ...)` for three-column alignment. Separator lines use `line(length: 100%, stroke: Npt)`. Chapter-start suppression checks `counter(page).at(here()).first() > 1`.
+4. **Typography**: `#set par(first-line-indent: Nem, spacing: Nem)` and `#set text(costs: (widow: X, orphan: Y))`. Body font/size/leading are scoped per-chapter in `#[...]` blocks, not at document level.
+5. **Heading show rules**: **H1 is suppressed entirely** with `#show heading.where(level: 1): it => {}` — chapter titles are rendered manually via the chapter-heading block. H2/H3/H4 get show rules built from `headings_json`. The dropcap preamble `#import "@preview/droplet:0.3.1": dropcap` is prepended only when drop caps are enabled.
+6. **Front matter**: each `FormatPage` in position=front gets an anchor `#[#metadata(none) <iwe-fp-{id}>]`, then `build_front_matter_page()`, then `#pagebreak()`. Roman numeral page numbering if any slot uses `page_number`.
+7. **Chapter loop**: `#pagebreak()` or `#pagebreak(to: "odd")` → anchor `<iwe-ch-{chapter_id}>` → `#heading(level: 1, outlined: true)[title]` (invisible via show rule but indexed for TOC/outline) → sink `#v(Nem)` → optional rules + number + title + subtitle → chapter image at configured position → body in `#[` block with scoped `#set text` + `#set par` → paragraph loop: scene-break sentinels trigger `emit_scene_break()`, opener paragraphs get `emit_opener_paragraph()` (drop cap + small caps), subsequent paragraphs after breaks/chapter start get `#par(first-line-indent: 0em)[...]`.
+8. **Back matter**: same as front matter but after a `#pagebreak()`.
+
+**Image ingestion**: `ingest_image(src, images)` decodes data URLs, assigns virtual path `/iwe-img-{fnv1a_hash}.{ext}` (dedupes identical images by hash), stores bytes in `ImageMap`. `IweWorld.file()` serves these when Typst requests them.
+
+**Scene break detection**: `is_scene_break_sentinel(para)` returns true if the paragraph contains only `*` and whitespace with ≥3 stars. This is why `extract_text_for_format_from_bytes` must emit `"* * *"` for `horizontalRule` nodes.
+
+#### The `IweWorld` — Typst `World` trait implementation (format.rs:60-150)
+
+```rust
+struct IweWorld {
+    library: LazyHash<Library>,
+    book: Arc<LazyHash<FontBook>>,     // shared with FormatState.font_cache
+    slots: Arc<Vec<FontSlot>>,          // system fonts via typst-kit
+    embedded: Vec<Font>,                // the 4 Liberation Serif variants
+    source: Source,                     // single detached source, the markup string
+    images: HashMap<String, Vec<u8>>,   // keyed by /iwe-img-{hash}.{ext}
+    packages: Arc<PackageStorage>,      // shared package cache
+}
+```
+
+Key points:
+- **Single in-memory source.** `Source::detached(markup)` — no on-disk path. `main()` returns `self.source.id()`.
+- **File resolution order** in `file(id)`: check `self.images` first (for `/iwe-img-*` paths), then try package resolution via `PackageStorage::prepare_package()`, else `FileError::NotFound`.
+- **Font resolution**: `font(index)` tries `self.slots[index]` (system fonts), falls back to `self.embedded[index - slots.len()]`. Embedded fonts are appended to the font index space.
+- `today()` returns `None` — Typst date features silently fail.
+- **A new `IweWorld` is created per compile.** Only the `FontCache` is reused via `Arc`.
+
+#### `FormatState` (format.rs:1650-1683) — Tauri managed state
+
+```rust
+pub struct FormatState {
+    document: Mutex<Option<PagedDocument>>,  // last compiled doc
+    font_cache: Mutex<Option<Arc<FontCache>>>, // lazy init on first compile
+    packages: Arc<PackageStorage>,           // $TEMP/iwe-typst-packages
+}
+```
+
+Built in `run()` via `.manage(format::FormatState::new())`. The stub version (non-format builds) is just `Mutex<()>`. The `PackageStorage` uses `std::env::temp_dir().join("iwe-typst-packages")` with `Downloader::new("iwe/0.1.0")`. **Typst package downloads happen at first compile with network access** — machines offline during a first drop-cap compile will fail on `@preview/droplet:0.3.1`. Cache lives in the OS temp dir, not app data dir, so it can be cleared by OS cleanup.
+
+#### Fonts: `list_system_fonts` (format.rs:1851-1864)
+
+Calls `FormatState::get_or_init_fonts()` (which lazy-inits via `typst_kit::fonts::FontSearcher::new().include_system_fonts(true).search()`), collects families from `cache.book.families()`, sorts and dedupes. **Calling `list_system_fonts` before the first compile initializes the font cache** — this is deliberate so `FontPicker.svelte` can trigger discovery without needing a compile first. The 4 Liberation Serif embedded variants (`include_bytes!` at format.rs:22-25) are always available as a fallback tail in the font index space.
+
+#### Three PDF paths + EPUB path — crucial to keep straight
+
+- `/print/+page.svelte` (popup): Y.Doc → PM JSON → HTML via `yDocToProsemirrorJSON` + `generateHTML`, applies A4/Book CSS, `window.print()`. Fast, rough, no layout control.
+- Toolbar `Export → PDF`: `genpdf` crate in Rust (`lib.rs:686-823`) with embedded Liberation Serif, A4 or 5×8 preset. Not Typst.
+- Format editor print profiles: `format::export_format_pdf` → `typst_pdf::pdf(document, &PdfOptions { tagged: false })` on the cached `PagedDocument`. **Publication quality.**
+- Format editor ebook profiles: `epub::export_epub` → `epub-builder` crate, stateless, frontend pre-renders all HTML. **Not Typst at all** — EPUBs are reflowable HTML, Typst produces paged documents.
+
+#### Known gaps and gotchas (READ BEFORE EDITING)
+
+1. **`duplicate_format_profile` does not copy JSON category columns** (db.rs:2086-2089). The INSERT SELECT lists only scalar columns (`target_type`, trim, margins, font, size, leading). The duplicate starts with `'{}'` for all 8 JSON columns. Duplicating a heavily customized profile silently loses all Custom mode settings. **Fix candidate.**
+2. **`trim_json` is inert.** The column exists, is in `FORMAT_CATEGORY_COLUMNS`, but `TrimSettings.svelte` calls `updateFormatProfile` directly (not `updateProfileCategory`) and `format.rs` never reads `trim_json`. Reserved for future use.
+3. **Dual margin representation.** Margins live in both scalar columns AND `print_layout_json`. Typst prefers `print_layout_json` with fallback to scalars. `update_format_profile` updates only scalars; `PrintLayoutSettings` writes only JSON. On older profiles, both may be populated with different values — JSON wins.
+4. **No SQL CHECK constraints on `target_type`, `position`, `include_in`, `vertical_align`, `page_role`.** All enforcement is UI-side. Any string passes the DB layer.
+5. **`list_page_exclusions` returns the entire table.** Filtering by profile is client-side. There's also `list_excluded_page_ids_for_profile` used only internally by `compile_preview`.
+6. **Images stored inline as base64** in `format_pages.content` AND in `chapter_headings_json.image_default` AND in `breaks_json.image_data`. Large images grow the `.iwe` file significantly.
+7. **`compile_preview` holds the DB mutex through the entire compile** (4 phases, potentially several seconds). Blocks all other DB operations. Architectural issue if we ever want concurrent DB reads.
+8. **No compile debounce.** Rapid setting changes trigger overlapping compiles. The `rendering` flag shows a spinner but doesn't cancel or queue.
+9. **Chapter/page label introspector lookups can silently miss.** If a chapter anchor fails to resolve (e.g. empty chapter text), `section_pages` just won't have an entry — no error. Scroll-to-section will no-op.
+
+#### EPUB export pipeline (how preview and export stay in sync)
+
+The ebook preview (`generateEbookPreview`) and the EPUB export (`handleExportEpub`) share the same code path for content rendering, CSS generation, and image handling. This is deliberate — any time you change one, you should verify the other still works.
+
+**Shared helpers** (all in `format/+page.svelte`):
+- `resolveEbookSettings(profile)` — parses the five Custom category JSONs (`chapter_headings_json`, `paragraph_json`, `headings_json`, `breaks_json`, `typography_json`) merged with hand-kept `*_DEFAULTS` constants. Typography falls back to legacy scalar columns (`font_body`, `font_size_pt`, `line_spacing`) when the JSON is empty.
+- `buildEbookCss(settings, { inline })` — returns the full ebook CSS string. `inline: true` wraps in a `<style>` tag and adds preview-only `.ebook-chapter-break` scaffolding (for the preview). `inline: false` returns raw CSS (for the exported `stylesheet.css`).
+- `buildParagraphCss` / `buildHeadingsCss` / `buildBreaksCss` — per-category CSS builders. All output is prefixed with `.ebook-body` so a single class scopes everything.
+- `renderChapterHeadingHtml(chapter, index, chHeadings)` — generates the chapter heading block (number / title / subtitle / rules / image) honoring all `chapter_headings_json` settings. Used by both preview and export so they produce identical heading markup.
+- `substituteImageBreaks(html, breaks)` — post-processes HTML to replace every `<hr>` with a `<div class="scene-break-img"><img/></div>` wrapper when `breaks.style === 'image'`. Done via HTML substitution rather than CSS `::after` because replaced-content pseudo-elements size unpredictably across arbitrary image aspect ratios.
+- `htmlToXhtml(html)` — self-closes HTML void elements (`<hr>` → `<hr/>`, `<img ...>` → `<img .../>`, plus the other 12 void tags). EPUB is strict XHTML — browsers tolerate the HTML form, epubcheck does not. **Only applied on the export path** — the in-app preview uses plain HTML because browsers parse it fine.
+- `chapterToHtml(chapter)` — Y.Doc → PM JSON → HTML via `generateHTML(json, chapterHtmlExtensions)`. The extension list MUST include `NoteMarker`, `StateMarker`, `TimeBreak` custom nodes or chapters that contain them silently render as empty (the catch swallowed the schema error). See import at top of file.
+- `pageToHtml(page)` — parses the format_pages row's PM JSON (from PageContentEditor) and runs `generateHTML(parsed, pageHtmlExtensions)`. A minimal inline `ImageNodeForHtml` handles the image node with width baked into the style attribute (no NodeView available in HTML generation).
+
+**Preview pipeline** (`generateEbookPreview`):
+1. Resolve settings, build inline CSS with `.ebook-chapter-break` scaffolding
+2. Iterate front pages → emit `<h1>{title}</h1>` + `pageToHtml(p)`
+3. Iterate chapters → emit `renderChapterHeadingHtml(ch, i, chHeadings)` + `chapterToHtml(ch)`
+4. Iterate back pages → same as front
+5. Wrap everything in `<div class="ebook-body">`
+6. Run `substituteImageBreaks` over the whole thing
+7. Set `ebookPreviewHtml` (shown via `{@html}` inside the device-frame wrapper)
+
+**Export pipeline** (`handleExportEpub`):
+1. Resolve settings, build raw CSS (no `<style>` wrapper, no preview-only scaffolding)
+2. For each chapter: `renderChapterHeadingHtml(ch, i) + chapterToHtml(ch)` → `substituteImageBreaks` → `htmlToXhtml` → chapter body
+3. For each front/back page: `pageToHtml(p)` → `substituteImageBreaks` → `htmlToXhtml` → page body
+4. Send to Rust `export_epub` with `{ chapters, front_pages, back_pages, css, title, author, language, description }`
+5. Rust `extract_inline_images` scans every chapter/page HTML for `<img src="data:...">`, decodes each unique image via FNV-1a-hashed filename, stores as separate `OEBPS/images/img-{hash}.{ext}` zip entries, rewrites the HTML `src` to relative paths. Image deduplication is automatic across all chapters/pages
+6. Rust `build_chapter_html` wraps each chapter body in `<section epub:type="chapter">` — does NOT auto-generate a `<h1>{title}</h1>` (the JS side already provided the styled heading via `renderChapterHeadingHtml`)
+7. Rust `wrap_xhtml` wraps body content in `<div class="ebook-body">` inside `<body>` so the exported XHTML matches the preview's class structure. Same CSS selectors work for both
+8. Rust `fix_opf_ids` post-processes the generated zip to strip the buggy `id="epub-creator-0"` from `<dc:language>` (epub-builder 0.8 emits it with a hardcoded wrong id in its OPF template)
+9. Frontend calls `validateEpubBytes(arr)` on the returned bytes — runs the lightweight Rust validator and surfaces any issues via toasts before showing the save dialog
+10. Save dialog → write file to disk
+
+**Rust-side epub.rs invariants**:
+- `EpubExportRequest` has NO `cover_image` field — Rust reads the cover BLOB directly from `book_cover` in the project DB
+- `build_chapter_html` takes a pre-rewritten body (with data URLs already extracted). The `chapter` parameter is kept for future use but currently only the index is used
+- `wrap_xhtml` takes a `css` parameter for historical reasons but doesn't use it — CSS is attached via the separate `stylesheet.css` file. The param is kept for API stability
+- Metadata call order is `title → lang → author` (not author → lang). Swapping this re-introduces the duplicate-id bug because epub-builder's `lang` inherits the previous creator's id if set after `author`
+- All inline images get extracted into `OEBPS/images/` BEFORE any `add_content` call, so they appear in the manifest ahead of the chapters that reference them
+
+#### EPUB validation and cross-device testing
+
+**Built-in Rust validator** (`src-tauri/src/epub_validate.rs`) runs automatically after every EPUB export via the `validate_epub_bytes` Tauri command (called from `handleExportEpub`). Uses only `quick-xml` and `zip` — no external dependencies. Catches:
+1. Any `.xhtml` / `.html` file in the zip failing to parse as well-formed XML (catches `<hr>`/`<img>`/`<br>` not self-closed, malformed attributes, unclosed tags)
+2. `content.opf` not well-formed
+3. Duplicate XML `id` attributes in `content.opf` (catches the epub-builder creator/language collision if it ever regresses)
+4. Manifest `<item href>` values that don't resolve to files in the zip
+5. Spine `<itemref idref>` values that don't resolve to manifest item ids
+
+Issues are returned as `Vec<EpubIssue>` with `{ level, code, file, message }`. The frontend shows an error toast for any `level: "error"` entries and logs the full list to the DevTools console. **Not a full epubcheck replacement** — doesn't validate EPUB3 conformance rules, OCF container structure, accessibility, media-type correctness, or NCX format. It's a regression net for the specific bugs that have actually shipped.
+
+**Official epubcheck** (the W3C/IDPF standard validator) is Java-only. For ad-hoc validation during development, use the Python wrapper (bundles the JAR):
+
+```bash
+# One-time install (user site to avoid permission issues on Windows):
+pip install --user epubcheck
+
+# Requires Java to be in PATH. On Windows:
+where java
+# Should return something like C:\Program Files\Eclipse Adoptium\jdk-25.0.1.8-hotspot\bin\java.exe
+```
+
+**Run epubcheck on a file**:
+```bash
+python -c "
+from epubcheck import EpubCheck
+r = EpubCheck(r'C:\path\to\book.epub')
+print('VALID:', r.valid)
+print(f'{len(r.messages)} messages')
+for m in r.messages:
+    print(f'[{m.level}] {m.id} @ {m.location}')
+    print(f'  {m.message[:250]}')
+"
+```
+
+Severity levels: `FATAL` (file won't open), `ERROR` (malformed, some readers may tolerate), `WARNING` (stylistically wrong but opens), `USAGE` (conformance nitpicks). Common error codes:
+- `RSC-005` — general parse / structural error (also covers duplicate ids)
+- `RSC-016` — fatal XHTML/XML parse error (void elements not self-closed)
+- `OPF-0xx` — OPF manifest/spine issues
+- `HTM-0xx` — XHTML content issues
+
+**Inspecting EPUB contents without a reader**: EPUBs are ZIP archives. Use Python to peek inside:
+```bash
+python -c "
+import zipfile
+with zipfile.ZipFile(r'C:\path\to\book.epub', 'r') as z:
+    for info in z.infolist():
+        flag = '[STORE]' if info.compress_type == zipfile.ZIP_STORED else '[DEFL] '
+        print(f'  {flag} {info.file_size:>10} {info.filename}')
+    # Print a specific file:
+    print(z.read('OEBPS/content.opf').decode('utf-8'))
+"
+```
+
+Key files in every EPUB:
+- `mimetype` — must be STORED (uncompressed), must be the first entry, contains literal `application/epub+zip`
+- `META-INF/container.xml` — points at the OPF file
+- `OEBPS/content.opf` — manifest (all files) + spine (reading order) + metadata (title/author/language/etc.)
+- `OEBPS/toc.ncx` — legacy EPUB2 TOC (still used by some readers)
+- `OEBPS/nav.xhtml` — EPUB3 navigation document
+- `OEBPS/stylesheet.css` — CSS (when using `epub-builder`'s `stylesheet()` method)
+- Chapter and page XHTML files
+
+**Cross-device testing — epubcheck passing is necessary but not sufficient.** Validation confirms the file is structurally valid EPUB3; it doesn't confirm it *renders correctly* in real readers, which varies wildly due to reader-specific CSS subsets and font handling. Known quirks:
+- **Kindle** (KF8/AZW3): strict CSS subset, drop-caps via `::first-letter` often broken, `background-image` on divs patchy, flexbox unreliable, many modern font features stripped
+- **Apple Books**: generally spec-compliant but picky about embedded font licensing and has its own font-fallback quirks
+- **Kobo**: based on Adobe RMSDK, mostly-compliant but differs on line-height and widow-control
+- **Adobe Digital Editions**: conservative baseline most readers emulate, limited flexbox
+- **Thorium** (W3C reference): most permissive, renders closest to a browser
+
+**Testing tools to install before releasing a book**:
+1. **Kindle Previewer 3** (free, Amazon) — tests all Kindle device models. Biggest market, strictest renderer. Install first.
+2. **Apple Books** (macOS/iPadOS native) — second biggest market
+3. **Calibre** (free, cross-platform) — tests generic ADE-compatible rendering
+4. **Thorium Reader** (free, cross-platform) — W3C reference implementation
+
+Typical iteration: export → check in all four → find quirks → adjust CSS / layout → re-export. This is inherent to the format and there's no way to automate it away.
 
 ### Manuscript import — `src/routes/import/+page.svelte` + `src-tauri/src/import.rs`
 Popup window. Launched from the Home page's "Import…" button. Supported formats: `.docx` and `.epub`, detected by extension. The Rust side parses into `ImportBlock`s (text, style, `page_break_before`, `is_heading`) and runs a `detect_breaks` pass.
@@ -590,8 +897,13 @@ This list is authoritative. If you're an agent working on this codebase, do not 
 
 **UI surfaces that are placeholder or shell-only:**
 - **Format editor → Themes mode** — the sidebar tab exists and renders "Theme presets will appear here." No preset data or apply logic.
-- **Format editor → Ebook output** — when a profile has `target_type === 'ebook'`, the preview shows "Ebook preview coming soon" and `compile_preview` returns 0 pages. No EPUB generation path.
 - **Entity custom fields** — the `entity_fields` table exists in the schema but has zero UI. Don't delete the table; it's reserved.
+- **`trim_json` column on `format_profiles`** — declared, migrated, and in `FORMAT_CATEGORY_COLUMNS`, but completely inert. `TrimSettings.svelte` writes to scalar columns directly via `updateFormatProfile`, and `format.rs` never reads `trim_json`. Reserved space for future trim-specific metadata (bleed, safe zones, etc.).
+
+**Format editor — partially built but with known gaps (NOT fully "not built"):**
+- **Ebook preview and EPUB export are live** (no longer placeholder). The ebook preview renders a device-framed HTML view via `generateEbookPreview`, and `epub::export_epub` is fully wired through `handleExportEpub()` in the Export sidebar mode. What's still weak: `EpubChapter.subtitle` has no UI that populates it, `EpubPage.position` is carried but unused by the builder, and the CSS sent to Rust is generated ad-hoc from `typography_json` — there's no per-profile ebook stylesheet editor yet.
+- **`duplicate_format_profile` does not copy JSON category columns.** The INSERT SELECT at db.rs:2086-2089 copies only scalar fields. Duplicating a heavily customized profile silently resets all 8 Custom-mode categories to `'{}'`. Scoped to fix but not done.
+- **No compile debounce.** Rapid setting changes trigger overlapping Typst compiles. Harmless but wasteful.
 
 **Features from `spec.md` that are NOT in the code:**
 - Minimap (thin scrollbar preview with entity dots)

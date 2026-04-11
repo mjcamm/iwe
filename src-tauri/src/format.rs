@@ -1947,6 +1947,11 @@ mod real {
     pub fn list_system_fonts() -> Result<Vec<String>, String> {
         Err("Format features not enabled (build with --features format)".into())
     }
+
+    #[tauri::command]
+    pub fn export_format_pdf() -> Result<Vec<u8>, String> {
+        Err("Format features not enabled (build with --features format)".into())
+    }
 }
 
 pub use real::*;

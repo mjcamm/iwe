@@ -4,6 +4,7 @@
   import FontPicker from '$lib/components/FontPicker.svelte';
 
   let { profile, onchange } = $props();
+  let isPrint = $derived(profile?.target_type !== 'ebook');
 
   function defaults() {
     return {
@@ -296,6 +297,7 @@
     </div>
   </div>
 
+  {#if isPrint}
   <!-- ============ WIDOW / ORPHAN ============ -->
   <div class="setting-group">
     <div class="group-label">Widow & Orphan Control</div>
@@ -362,6 +364,7 @@
       </div>
     </label>
   </div>
+  {/if}
 </div>
 
 <style>

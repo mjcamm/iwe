@@ -3,6 +3,7 @@
   import FontPicker from '$lib/components/FontPicker.svelte';
 
   let { profile, onchange } = $props();
+  let isPrint = $derived(profile?.target_type !== 'ebook');
 
   const STYLES = [
     { id: 'regular', label: 'Regular' },
@@ -152,6 +153,7 @@
             </label>
           </div>
 
+          {#if isPrint}
           <button class="toggle-row" onclick={() => set(`${lvl.key}_keep_with_next`, !get(`${lvl.key}_keep_with_next`))}>
             <span class="toggle-switch" class:on={get(`${lvl.key}_keep_with_next`)}><span class="toggle-knob"></span></span>
             <div class="toggle-text">
@@ -159,6 +161,7 @@
               <span class="toggle-hint">Prevent heading from being orphaned at the bottom of a page</span>
             </div>
           </button>
+          {/if}
 
           <div class="row-2col">
             <button class="toggle-row" onclick={() => set(`${lvl.key}_rule_above`, !get(`${lvl.key}_rule_above`))}>

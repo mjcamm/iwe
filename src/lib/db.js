@@ -65,6 +65,40 @@ export async function listProjects() {
   }
 }
 
+// --- Book cover (BLOB storage, per-project) ---
+
+// Returns { data: number[], mime_type: string } | null
+export async function getBookCover() {
+  return invoke('get_book_cover');
+}
+
+// data: Uint8Array or number[]; mimeType: string like "image/jpeg"
+export async function setBookCover(data, mimeType) {
+  const bytes = data instanceof Uint8Array ? Array.from(data) : data;
+  return invoke('set_book_cover', { data: bytes, mimeType });
+}
+
+export async function clearBookCover() {
+  return invoke('clear_book_cover');
+}
+
+// Peek the cover of any .iwe file by path, without opening it as the current
+// project. Used by the home page to show cover thumbnails. Returns null if
+// the project has no cover or the schema predates the book_cover table.
+export async function getProjectCoverByPath(filepath) {
+  return invoke('get_project_cover_by_path', { filepath });
+}
+
+// Helper: convert a BookCoverData response into an object URL the browser
+// can use directly as an <img src>. Caller is responsible for calling
+// URL.revokeObjectURL() when done, or accepting the GC cleanup.
+export function coverToObjectUrl(cover) {
+  if (!cover || !cover.data || cover.data.length === 0) return null;
+  const bytes = new Uint8Array(cover.data);
+  const blob = new Blob([bytes], { type: cover.mime_type || 'image/jpeg' });
+  return URL.createObjectURL(blob);
+}
+
 // --- Project creation ---
 
 export async function createProject(title) {
@@ -766,6 +800,18 @@ export async function compilePreview(profileId) {
 
 export async function exportFormatPdf() {
   return invoke('export_format_pdf');
+}
+
+// Run the Rust-side EPUB sanity checker on a byte buffer.
+// Returns a (possibly empty) array of { level, code, file, message }.
+// Empty = passes sanity checks (not a full epubcheck guarantee).
+export async function validateEpubBytes(bytes) {
+  const arr = bytes instanceof Uint8Array ? Array.from(bytes) : bytes;
+  return invoke('validate_epub_bytes', { bytes: arr });
+}
+
+export async function exportEpub(request) {
+  return invoke('export_epub', { request });
 }
 
 export async function listSystemFonts() {

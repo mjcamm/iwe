@@ -459,6 +459,52 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         }
     }
 
+    // book_cover — singleton table holding the book's front cover as a BLOB.
+    // CHECK(id = 1) enforces one row per project so we don't need UPSERT logic.
+    // Stored as BLOB rather than base64 text to save ~33% space and avoid
+    // JSON-escaping problems — the cover is a standalone binary, not embedded
+    // in markup like chapter/break images are.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS book_cover (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            image_data BLOB NOT NULL,
+            mime_type TEXT NOT NULL,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );",
+    )?;
+
+    Ok(())
+}
+
+// ---- Book cover ----
+
+pub fn get_book_cover(conn: &Connection) -> rusqlite::Result<Option<(Vec<u8>, String)>> {
+    let mut stmt = conn.prepare("SELECT image_data, mime_type FROM book_cover WHERE id = 1")?;
+    let mut rows = stmt.query([])?;
+    if let Some(row) = rows.next()? {
+        let data: Vec<u8> = row.get(0)?;
+        let mime: String = row.get(1)?;
+        Ok(Some((data, mime)))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn set_book_cover(conn: &Connection, data: &[u8], mime: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO book_cover (id, image_data, mime_type, updated_at)
+         VALUES (1, ?1, ?2, CURRENT_TIMESTAMP)
+         ON CONFLICT(id) DO UPDATE SET
+            image_data = excluded.image_data,
+            mime_type = excluded.mime_type,
+            updated_at = CURRENT_TIMESTAMP",
+        rusqlite::params![data, mime],
+    )?;
+    Ok(())
+}
+
+pub fn clear_book_cover(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM book_cover WHERE id = 1", [])?;
     Ok(())
 }
 

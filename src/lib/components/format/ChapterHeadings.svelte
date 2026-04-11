@@ -3,6 +3,7 @@
   import FontPicker from '$lib/components/FontPicker.svelte';
 
   let { profile, onchange } = $props();
+  let isPrint = $derived(profile?.target_type !== 'ebook');
 
   const STYLES = [
     { id: 'regular', label: 'Regular' },
@@ -346,6 +347,7 @@
   <div class="setting-group">
     <div class="group-label">Spacing</div>
     <div class="row-2col">
+      {#if isPrint}
       <label class="field">
         <span class="field-label">Chapter sink</span>
         <span class="field-hint">How far down the page before the heading starts</span>
@@ -355,6 +357,7 @@
           <span class="unit">em</span>
         </div>
       </label>
+      {/if}
       <label class="field">
         <span class="field-label">After heading</span>
         <span class="field-hint">Gap between the heading block and the first paragraph</span>
@@ -393,6 +396,7 @@
     {/if}
   </div>
 
+  {#if isPrint}
   <!-- ============ PAGE BEHAVIOR ============ -->
   <div class="setting-group">
     <div class="group-label">Page Behavior</div>
@@ -403,6 +407,7 @@
       </select>
     </div>
   </div>
+  {/if}
 
   <!-- ============ RULES ============ -->
   <div class="setting-group">

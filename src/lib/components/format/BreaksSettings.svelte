@@ -2,6 +2,7 @@
   import { updateProfileCategory } from '$lib/db.js';
 
   let { profile, onchange } = $props();
+  let isPrint = $derived(profile?.target_type !== 'ebook');
 
   const STYLES = [
     { id: 'none',     label: 'None',             preview: '(nothing)' },
@@ -197,6 +198,7 @@
     </div>
   </div>
 
+  {#if isPrint}
   <div class="setting-group">
     <div class="group-label">Page Breaks</div>
     <button class="toggle-row" onclick={toggleKeep}>
@@ -209,6 +211,7 @@
       </div>
     </button>
   </div>
+  {/if}
 </div>
 
 <style>

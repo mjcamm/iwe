@@ -4,7 +4,7 @@
   import { TRIM_CATEGORIES, PLATFORMS, findSize, supportedPlatforms } from '$lib/trimSizes.js';
   import { ensureUnitLoaded, getUnit, subscribe, MM_PER_IN } from '$lib/unitPreference.js';
 
-  let { profile, onchange } = $props();
+  let { profile, onchange, ebookDevice = $bindable('kindle-paperwhite') } = $props();
 
   let unit = $state('in');
   onMount(async () => {
@@ -17,10 +17,29 @@
   let customW = $state('');
   let customH = $state('');
 
+  // Target type
+  let targetType = $derived(profile?.target_type ?? 'print');
+
   // Current profile dimensions
   let currentW = $derived(profile?.trim_width_in ?? 6);
   let currentH = $derived(profile?.trim_height_in ?? 9);
   let currentMatch = $derived(findSize(currentW, currentH));
+
+  // Ebook device presets for preview dimensions
+  const EBOOK_DEVICES = [
+    { id: 'kindle-paperwhite', label: 'Kindle Paperwhite', w: 300, h: 480, desc: '6" e-ink' },
+    { id: 'kindle-oasis', label: 'Kindle Oasis', w: 320, h: 500, desc: '7" e-ink' },
+    { id: 'ipad-mini', label: 'iPad Mini', w: 380, h: 540, desc: '8.3"' },
+    { id: 'ipad', label: 'iPad', w: 420, h: 600, desc: '10.9"' },
+    { id: 'ipad-pro', label: 'iPad Pro', w: 460, h: 660, desc: '12.9"' },
+    { id: 'iphone', label: 'iPhone', w: 260, h: 480, desc: '6.1"' },
+    { id: 'iphone-max', label: 'iPhone Pro Max', w: 280, h: 520, desc: '6.7"' },
+    { id: 'android-phone', label: 'Android Phone', w: 270, h: 500, desc: '6.4"' },
+    { id: 'android-tablet', label: 'Android Tablet', w: 400, h: 580, desc: '10"' },
+    { id: 'kobo-libra', label: 'Kobo Libra', w: 310, h: 490, desc: '7" e-ink' },
+  ];
+
+  let activeDevice = $derived(EBOOK_DEVICES.find(d => d.id === ebookDevice) || EBOOK_DEVICES[0]);
 
   function dimDisplay(inches) {
     if (unit === 'mm') return (inches * MM_PER_IN).toFixed(0);
@@ -65,10 +84,22 @@
     return Math.abs(size.w - currentW) < 0.05 && Math.abs(size.h - currentH) < 0.05;
   }
 
+  async function setTargetType(type) {
+    if (!profile) return;
+    await updateFormatProfile(
+      profile.id, profile.name, type,
+      profile.trim_width_in, profile.trim_height_in,
+      profile.margin_top_in, profile.margin_bottom_in,
+      profile.margin_outside_in, profile.margin_inside_in,
+      profile.font_body, profile.font_size_pt, profile.line_spacing,
+    );
+    onchange?.();
+  }
+
   async function selectSize(w, h) {
     if (!profile) return;
     await updateFormatProfile(
-      profile.id, profile.name, profile.target_type,
+      profile.id, profile.name, 'print',
       w, h,
       profile.margin_top_in, profile.margin_bottom_in,
       profile.margin_outside_in, profile.margin_inside_in,
@@ -93,9 +124,38 @@
 </script>
 
 <div class="custom-section">
-  <h4 class="custom-section-title">Trim Size</h4>
+  <h4 class="custom-section-title">Target Format</h4>
 
-  <!-- Current -->
+  <!-- Print / Ebook toggle -->
+  <div class="format-toggle">
+    <button class="format-btn" class:active={targetType === 'print'}
+      onclick={() => setTargetType('print')}>
+      <i class="bi bi-book"></i> Print
+    </button>
+    <button class="format-btn" class:active={targetType === 'ebook'}
+      onclick={() => setTargetType('ebook')}>
+      <i class="bi bi-phone"></i> Ebook
+    </button>
+  </div>
+
+  {#if targetType === 'ebook'}
+    <!-- Device preview picker -->
+    <div class="group-label">Preview as Device</div>
+    <div class="device-list">
+      {#each EBOOK_DEVICES as device}
+        <button class="device-option" class:selected={ebookDevice === device.id}
+          onclick={() => ebookDevice = device.id}>
+          <span class="device-label">{device.label}</span>
+          <span class="device-desc">{device.desc}</span>
+        </button>
+      {/each}
+    </div>
+    <p class="ebook-hint">
+      Ebooks are reflowable — the reader controls font size, margins, and page layout.
+      The preview simulates how your book appears on each device.
+    </p>
+  {:else}
+  <!-- Print: Current trim -->
   <div class="current-trim">
     <div class="current-trim-preview"
       style="aspect-ratio: {currentW} / {currentH};"></div>
@@ -191,10 +251,61 @@
       </p>
     </div>
   {/if}
+  {/if}
 </div>
 
 <style>
   .custom-section { padding: 0.4rem 0; }
+
+  /* Format toggle */
+  .format-toggle {
+    display: flex; gap: 0;
+    border: 1px solid var(--iwe-border); border-radius: var(--iwe-radius-sm);
+    overflow: hidden; margin-bottom: 1rem;
+  }
+  .format-btn {
+    flex: 1; display: flex; align-items: center; justify-content: center; gap: 0.4rem;
+    padding: 0.55rem 0;
+    font-family: var(--iwe-font-ui); font-size: 0.85rem;
+    border: none; background: var(--iwe-bg); color: var(--iwe-text-muted);
+    cursor: pointer; transition: all 120ms;
+  }
+  .format-btn:first-child { border-right: 1px solid var(--iwe-border); }
+  .format-btn:hover { background: var(--iwe-bg-hover); }
+  .format-btn.active {
+    background: var(--iwe-accent); color: #fff; font-weight: 500;
+  }
+
+  /* Device picker */
+  .device-list {
+    display: flex; flex-direction: column; gap: 3px;
+    margin-bottom: 0.8rem; max-height: 350px; overflow-y: auto;
+  }
+  .device-option {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0.45rem 0.6rem; width: 100%;
+    border: 1px solid transparent; border-radius: var(--iwe-radius-sm);
+    background: none; cursor: pointer;
+    font-family: var(--iwe-font-ui); text-align: left;
+    transition: all 100ms;
+  }
+  .device-option:hover { background: var(--iwe-bg-hover); border-color: var(--iwe-border); }
+  .device-option.selected {
+    border-color: var(--iwe-accent); background: rgba(45, 106, 94, 0.06);
+  }
+  .device-label { font-size: 0.82rem; color: var(--iwe-text); }
+  .device-option.selected .device-label { color: var(--iwe-accent); font-weight: 500; }
+  .device-desc { font-size: 0.65rem; color: var(--iwe-text-muted); }
+  .group-label {
+    font-family: var(--iwe-font-ui); font-size: 0.7rem;
+    color: var(--iwe-text-muted); text-transform: uppercase;
+    letter-spacing: 0.04em; font-weight: 600;
+    margin-bottom: 0.4rem;
+  }
+  .ebook-hint {
+    font-family: var(--iwe-font-ui); font-size: 0.72rem;
+    color: var(--iwe-text-muted); line-height: 1.5; font-style: italic;
+  }
   .custom-section-title {
     font-family: var(--iwe-font-prose);
     font-weight: 400; font-size: 0.95rem;

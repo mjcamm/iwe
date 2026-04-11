@@ -9,9 +9,22 @@
     duplicateFormatProfile, pasteFormatProfileSettings, addFormatPage,
     updateFormatPage, deleteFormatPage, reorderFormatPages,
     addPageExclusion, removePageExclusion, listPageExclusions,
-    compilePreview, exportFormatPdf, getProjectSetting, setProjectSetting,
+    compilePreview, exportFormatPdf, exportEpub, validateEpubBytes,
+    getProjectSetting, setProjectSetting,
     updateProfileCategory,
+    getBookCover,
   } from '$lib/db.js';
+  import { createChapterDoc, destroyDoc } from '$lib/ydoc.js';
+  import { yDocToProsemirrorJSON } from 'y-prosemirror';
+  import { generateHTML, Node, mergeAttributes } from '@tiptap/core';
+  import StarterKit from '@tiptap/starter-kit';
+  import TextAlign from '@tiptap/extension-text-align';
+  import { TextStyle, FontSize, FontFamily } from '@tiptap/extension-text-style';
+  import Superscript from '@tiptap/extension-superscript';
+  import Subscript from '@tiptap/extension-subscript';
+  import { NoteMarker } from '$lib/noteMarker.js';
+  import { StateMarker } from '$lib/stateMarker.js';
+  import { TimeBreak } from '$lib/timeBreak.js';
   import { save } from '@tauri-apps/plugin-dialog';
   import { addToast } from '$lib/toast.js';
   import PageContentEditor from '$lib/components/PageContentEditor.svelte';
@@ -50,19 +63,22 @@
   const ASSIGNABLE_ROLES = PAGE_ROLES.filter(r => r !== 'custom');
 
   // Custom mode sub-tabs (each is a settings component)
-  const CUSTOM_TABS = [
-    { id: 'chapter-headings', label: 'Chapter Headings', icon: 'bi-bookmark' },
-    { id: 'paragraph',        label: 'Paragraph',        icon: 'bi-paragraph' },
-    { id: 'headings',         label: 'Headings',         icon: 'bi-type-h1' },
-    { id: 'breaks',           label: 'Breaks',           icon: 'bi-asterisk' },
-    { id: 'print-layout',     label: 'Print Layout',     icon: 'bi-layout-text-window' },
-    { id: 'typography',       label: 'Typography',       icon: 'bi-fonts' },
-    { id: 'header-footer',    label: 'Header / Footer',  icon: 'bi-distribute-vertical' },
-    { id: 'trim',             label: 'Trim',             icon: 'bi-aspect-ratio' },
+  const ALL_CUSTOM_TABS = [
+    { id: 'chapter-headings', label: 'Chapter Headings', icon: 'bi-bookmark', targets: ['print', 'ebook'] },
+    { id: 'paragraph',        label: 'Paragraph',        icon: 'bi-paragraph', targets: ['print', 'ebook'] },
+    { id: 'headings',         label: 'Headings',         icon: 'bi-type-h1', targets: ['print', 'ebook'] },
+    { id: 'breaks',           label: 'Breaks',           icon: 'bi-asterisk', targets: ['print', 'ebook'] },
+    { id: 'print-layout',     label: 'Print Layout',     icon: 'bi-layout-text-window', targets: ['print'] },
+    { id: 'typography',       label: 'Typography',       icon: 'bi-fonts', targets: ['print', 'ebook'] },
+    { id: 'header-footer',    label: 'Header / Footer',  icon: 'bi-distribute-vertical', targets: ['print'] },
+    { id: 'trim',             label: 'Target Format',    icon: 'bi-aspect-ratio', targets: ['print', 'ebook'] },
   ];
   let customTab = $state('chapter-headings');
   let customSelectorOpen = $state(false);
-  let activeCustomTab = $derived(CUSTOM_TABS.find(t => t.id === customTab) || CUSTOM_TABS[0]);
+  let filteredCustomTabs = $derived(
+    ALL_CUSTOM_TABS.filter(t => t.targets.includes(activeProfile?.target_type || 'print'))
+  );
+  let activeCustomTab = $derived(filteredCustomTabs.find(t => t.id === customTab) || filteredCustomTabs[0]);
 
   function selectCustomTab(id) {
     customTab = id;
@@ -171,6 +187,29 @@
   // Export state
   let exporting = $state(false);
   let exportError = $state(null);
+  let sizeEstimate = $state(null); // { total, breakdown, imageCount } or null
+  let estimating = $state(false);
+  // Image compression preset for EPUB export: 'none' | 'balanced' | 'compact'
+  let compressionLevel = $state('none');
+
+  // Ebook preview
+  let ebookPreviewHtml = $state('');
+  let ebookDevice = $state('kindle-paperwhite');
+
+  // Device dimensions lookup
+  const DEVICE_DIMS = {
+    'kindle-paperwhite': { w: 300, h: 480 },
+    'kindle-oasis': { w: 320, h: 500 },
+    'ipad-mini': { w: 380, h: 540 },
+    'ipad': { w: 420, h: 600 },
+    'ipad-pro': { w: 460, h: 660 },
+    'iphone': { w: 260, h: 480 },
+    'iphone-max': { w: 280, h: 520 },
+    'android-phone': { w: 270, h: 500 },
+    'android-tablet': { w: 400, h: 580 },
+    'kobo-libra': { w: 310, h: 490 },
+  };
+  let deviceDims = $derived(DEVICE_DIMS[ebookDevice] || { w: 300, h: 480 });
   let sectionPages = $state({}); // section_id -> 0-based page index
 
   // Lazy-load state — IntersectionObserver tracks visible pages, scroll-idle commits loads
@@ -202,6 +241,34 @@
 
   let activeProfile = $derived(profiles.find(p => p.id === activeProfileId) || null);
   let isEbook = $derived(activeProfile?.target_type === 'ebook');
+
+  // Recompute the export size estimate when the user switches to the Export
+  // sidebar tab on an ebook profile, changes compression level, or content
+  // changes. Skipped for print profiles and non-export modes since it's
+  // only shown on the Export panel for ebooks.
+  $effect(() => {
+    // Track reactive dependencies explicitly
+    const _mode = sidebarMode;
+    const _ebook = isEbook;
+    const _chapters = chapters;
+    const _pages = formatPages;
+    const _profile = activeProfile;
+    const _level = compressionLevel;
+
+    if (_mode !== 'export' || !_ebook || !_profile) {
+      sizeEstimate = null;
+      return;
+    }
+
+    estimating = true;
+    estimateExportSize(_level)
+      .then(r => { sizeEstimate = r; })
+      .catch(e => {
+        console.error('[format] estimateExportSize failed', e);
+        sizeEstimate = null;
+      })
+      .finally(() => { estimating = false; });
+  });
 
   // Preview scroll ref
   let previewContainer;
@@ -312,6 +379,563 @@
     scheduleCommit();
   }
 
+  // ---- Chapter heading rendering (ebook preview) ----
+  // Keep these defaults in sync with ChapterHeadings.svelte's defaults() —
+  // they're the baseline used when a profile's chapter_headings_json is empty
+  // or missing keys.
+  const CHAPTER_HEADING_DEFAULTS = {
+    number_enabled: true,
+    number_format: 'chapter_numeric',
+    number_font: '',
+    number_size_pt: 14,
+    number_align: 'center',
+    number_style: 'uppercase',
+    number_tracking_em: 0,
+    title_enabled: true,
+    title_font: '',
+    title_size_pt: 18,
+    title_align: 'center',
+    title_style: 'regular',
+    title_tracking_em: 0,
+    subtitle_enabled: true,
+    subtitle_font: '',
+    subtitle_size_pt: 12,
+    subtitle_align: 'center',
+    subtitle_style: 'italic',
+    subtitle_tracking_em: 0,
+    space_number_title_em: 1.5,
+    space_title_subtitle_em: 0.8,
+    space_after_heading_em: 3,
+    rule_above: false,
+    rule_below: false,
+    rule_thickness_pt: 0.5,
+  };
+
+  const NUMBER_WORDS_ONES = [
+    'Zero','One','Two','Three','Four','Five','Six','Seven','Eight','Nine',
+    'Ten','Eleven','Twelve','Thirteen','Fourteen','Fifteen','Sixteen','Seventeen','Eighteen','Nineteen',
+  ];
+  const NUMBER_WORDS_TENS = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy', 'Eighty', 'Ninety'];
+
+  function numberToWords(n) {
+    if (n < 20) return NUMBER_WORDS_ONES[n];
+    if (n < 100) {
+      const tens = Math.floor(n / 10);
+      const ones = n % 10;
+      return NUMBER_WORDS_TENS[tens] + (ones ? '-' + NUMBER_WORDS_ONES[ones].toLowerCase() : '');
+    }
+    if (n < 1000) {
+      const hundreds = Math.floor(n / 100);
+      const rem = n % 100;
+      return NUMBER_WORDS_ONES[hundreds] + ' Hundred' + (rem ? ' ' + numberToWords(rem) : '');
+    }
+    return String(n);
+  }
+
+  function numberToRoman(n) {
+    const pairs = [
+      [1000, 'M'], [900, 'CM'], [500, 'D'], [400, 'CD'],
+      [100, 'C'], [90, 'XC'], [50, 'L'], [40, 'XL'],
+      [10, 'X'], [9, 'IX'], [5, 'V'], [4, 'IV'], [1, 'I'],
+    ];
+    let out = '';
+    for (const [v, s] of pairs) {
+      while (n >= v) { out += s; n -= v; }
+    }
+    return out;
+  }
+
+  function formatChapterNumber(n, format) {
+    switch (format) {
+      case 'none':           return '';
+      case 'numeric':        return String(n);
+      case 'chapter_numeric':return `Chapter ${n}`;
+      case 'word':           return numberToWords(n);
+      case 'chapter_word':   return `Chapter ${numberToWords(n)}`;
+      case 'roman':          return numberToRoman(n);
+      case 'chapter_roman':  return `Chapter ${numberToRoman(n)}`;
+      default:               return `Chapter ${n}`;
+    }
+  }
+
+  // Build the inline style string for one of the three heading elements
+  // (number, title, subtitle). Reads {kind}_font, {kind}_size_pt, {kind}_align,
+  // {kind}_style, {kind}_tracking_em from the resolved settings object.
+  function headingElementStyle(h, kind) {
+    const font = h[`${kind}_font`];
+    const size = h[`${kind}_size_pt`];
+    const align = h[`${kind}_align`];
+    const style = h[`${kind}_style`];
+    const tracking = h[`${kind}_tracking_em`] || 0;
+
+    let css = 'margin:0;text-indent:0;';
+    if (align) css += `text-align:${align};`;
+    if (size) css += `font-size:${size}pt;`;
+    if (font) css += `font-family:"${font}",serif;`;
+    if (tracking) css += `letter-spacing:${tracking}em;`;
+
+    switch (style) {
+      case 'bold':      css += 'font-weight:700;'; break;
+      case 'italic':    css += 'font-style:italic;font-weight:400;'; break;
+      case 'smallcaps': css += 'font-variant:small-caps;font-weight:400;'; break;
+      case 'uppercase': css += 'text-transform:uppercase;font-weight:400;'; break;
+      default:          css += 'font-weight:400;'; break;
+    }
+    return css;
+  }
+
+  // Resolve the chapter image src for a given chapter + chapter-heading settings.
+  // Returns a data URL / src string, or null if no image should be shown.
+  //   - image_enabled gates everything
+  //   - image_individual=true: prefer ch.chapter_image, fall back to profile default
+  //   - image_individual=false: always use profile default
+  function resolveChapterImageSrc(chapter, h) {
+    if (!h.image_enabled) return null;
+    if (h.image_individual) {
+      return (chapter.chapter_image && chapter.chapter_image.trim())
+        ? chapter.chapter_image
+        : (h.image_default || null);
+    }
+    return h.image_default || null;
+  }
+
+  function buildChapterImageHtml(src, widthPct, align) {
+    if (!src) return '';
+    let marginClause;
+    if (align === 'left')  marginClause = 'margin:0.5em auto 0.5em 0;';
+    else if (align === 'right') marginClause = 'margin:0.5em 0 0.5em auto;';
+    else marginClause = 'margin:0.5em auto;';
+    const w = Math.max(1, Math.min(150, Number(widthPct) || 50));
+    return `<img src="${src}" alt="" style="display:block;width:${w}%;max-width:100%;${marginClause}">`;
+  }
+
+  function renderChapterHeadingHtml(chapter, index, h) {
+    const chNum = index + 1;
+
+    const imgSrc = resolveChapterImageSrc(chapter, h);
+    const imgPosition = imgSrc ? h.image_position : null;
+    const imgHtml = buildChapterImageHtml(imgSrc, h.image_width_pct, h.image_align);
+
+    // Build the three text lines (number, title, subtitle) once — they're used
+    // both for the normal layout and for the cover_heading overlay.
+    const showNumber = h.number_enabled && h.number_format !== 'none';
+    const numberText = showNumber ? formatChapterNumber(chNum, h.number_format) : '';
+    const numberHtml = (showNumber && numberText)
+      ? `<p style="${headingElementStyle(h, 'number')}">${escapeHtml(numberText)}</p>`
+      : '';
+
+    const showTitle = h.title_enabled && chapter.title;
+    const titleHtml = showTitle
+      ? `<p style="${headingElementStyle(h, 'title')}${numberHtml ? `margin-top:${h.space_number_title_em}em;` : ''}">${escapeHtml(chapter.title)}</p>`
+      : '';
+
+    const showSubtitle = h.subtitle_enabled && chapter.subtitle;
+    const subtitleHtml = showSubtitle
+      ? `<p style="${headingElementStyle(h, 'subtitle')}${(titleHtml || numberHtml) ? `margin-top:${h.space_title_subtitle_em}em;` : ''}">${escapeHtml(chapter.subtitle)}</p>`
+      : '';
+
+    const ruleAboveHtml = h.rule_above
+      ? `<div style="border-top:${h.rule_thickness_pt}pt solid currentColor;margin:0 0 0.75em 0;"></div>`
+      : '';
+    const ruleBelowHtml = h.rule_below
+      ? `<div style="border-top:${h.rule_thickness_pt}pt solid currentColor;margin:0.75em 0 0 0;"></div>`
+      : '';
+
+    const wrapperStyle = `margin:2em 0 ${h.space_after_heading_em}em 0;`;
+
+    // Special case: cover_heading wraps the three text lines over a background
+    // image. The image itself isn't emitted as a separate <img> — it becomes
+    // the backdrop. image_light_text switches the text color to white.
+    //
+    // IMPORTANT: this goes into an inline `style="..."` attribute, so the CSS
+    // inside must not use double quotes (they'd close the attribute early).
+    // Use single quotes for the url() argument.
+    if (imgPosition === 'cover_heading') {
+      const textColor = h.image_light_text ? '#ffffff' : 'inherit';
+      const coverInner = numberHtml + titleHtml + subtitleHtml;
+      const safeSrc = String(imgSrc).replace(/'/g, "%27");
+      const coverStyle =
+        `background:url('${safeSrc}') center/cover no-repeat;` +
+        `padding:4em 1.5em;min-height:180px;color:${textColor};`;
+      return `<div class="ebook-chapter-heading" style="${wrapperStyle}">${ruleAboveHtml}<div style="${coverStyle}">${coverInner}</div>${ruleBelowHtml}</div>`;
+    }
+
+    // Special case: dedicated_page puts the image in its own standalone section
+    // BEFORE the chapter heading. In EPUB readers this becomes its own screen
+    // via page-break-after, and the chapter heading follows on the next screen.
+    //
+    // The wrapper has a FIXED height (not min-height) so the image's center
+    // point stays anchored as the user scales image_width_pct — otherwise the
+    // wrapper grows with the image and the center drifts downward.
+    // Using a fixed height also makes `max-height: 100%` on the img resolve
+    // correctly in flex layout.
+    let dedicatedPageHtml = '';
+    if (imgPosition === 'dedicated_page' && imgSrc) {
+      const w = Math.max(1, Math.min(100, Number(h.image_width_pct) || 80));
+      dedicatedPageHtml =
+        `<div class="ebook-dedicated-image-page" ` +
+        `style="page-break-before:always;page-break-after:always;` +
+        `break-before:page;break-after:page;` +
+        `display:flex;align-items:center;justify-content:center;` +
+        `height:400px;margin:3em 0;overflow:hidden;">` +
+        `<img src="${imgSrc}" alt="" ` +
+        `style="width:${w}%;max-width:100%;max-height:100%;height:auto;object-fit:contain;">` +
+        `</div>`;
+    }
+
+    // Normal layout: assemble image + text parts by position.
+    const parts = [];
+    parts.push(ruleAboveHtml);
+    if (imgPosition === 'above_number') parts.push(imgHtml);
+    parts.push(numberHtml);
+    if (imgPosition === 'between_number_title') parts.push(imgHtml);
+    parts.push(titleHtml);
+    if (imgPosition === 'between_title_subtitle') parts.push(imgHtml);
+    parts.push(subtitleHtml);
+    if (imgPosition === 'below_heading') parts.push(imgHtml);
+    parts.push(ruleBelowHtml);
+
+    return dedicatedPageHtml + `<div class="ebook-chapter-heading" style="${wrapperStyle}">${parts.join('')}</div>`;
+  }
+
+  // ---- Defaults for the other Custom subpanels. Keep in sync with
+  // the defaults() functions in each .svelte component.
+
+  const PARAGRAPH_DEFAULTS = {
+    drop_cap_enabled: false,
+    drop_cap_lines: 2,
+    drop_cap_font: '',
+    drop_cap_color: '#000000',
+    drop_cap_quote_mode: 'letter_only',
+    small_caps_enabled: false,
+    small_caps_words: 5,
+    apply_when: 'chapter',
+    paragraph_style: 'indented',
+    indent_em: 1.5,
+    spacing_em: 0.5,
+    prevent_widows: true,
+    prevent_orphans: true,
+  };
+
+  const HEADINGS_DEFAULTS = {
+    no_indent_after: true,
+    h2_enabled: true, h2_font: '', h2_size_pt: 16, h2_align: 'left', h2_style: 'bold',
+    h2_tracking_em: 0, h2_space_above_em: 1.5, h2_space_below_em: 0.8,
+    h2_rule_above: false, h2_rule_below: false,
+    h3_enabled: true, h3_font: '', h3_size_pt: 13, h3_align: 'left', h3_style: 'bold',
+    h3_tracking_em: 0, h3_space_above_em: 1.2, h3_space_below_em: 0.6,
+    h3_rule_above: false, h3_rule_below: false,
+    h4_enabled: true, h4_font: '', h4_size_pt: 11, h4_align: 'left', h4_style: 'italic',
+    h4_tracking_em: 0, h4_space_above_em: 1.0, h4_space_below_em: 0.4,
+    h4_rule_above: false, h4_rule_below: false,
+  };
+
+  const BREAKS_DEFAULTS = {
+    style: 'dinkus',
+    custom_text: '* * *',
+    space_above_em: 1.2,
+    space_below_em: 1.2,
+    image_data: '',
+    image_width_pct: 25,
+  };
+
+  // Emit the font-weight/style/variant/transform CSS clauses for a style enum.
+  // Shared between chapter heading renderer and h2/h3/h4 CSS builder.
+  function styleClauseFor(style) {
+    switch (style) {
+      case 'bold':      return 'font-weight:700;';
+      case 'italic':    return 'font-style:italic;font-weight:400;';
+      case 'smallcaps': return 'font-variant:small-caps;font-weight:400;';
+      case 'uppercase': return 'text-transform:uppercase;font-weight:400;';
+      default:          return 'font-weight:400;';
+    }
+  }
+
+  function parseProfileJson(raw, defaults) {
+    if (!raw) return { ...defaults };
+    try {
+      return { ...defaults, ...JSON.parse(raw) };
+    } catch {
+      return { ...defaults };
+    }
+  }
+
+  function buildParagraphCss(p) {
+    const useIndent = p.paragraph_style === 'indented' || p.paragraph_style === 'both';
+    const useSpacing = p.paragraph_style === 'spaced' || p.paragraph_style === 'both';
+    const indent = useIndent ? `${p.indent_em}em` : '0';
+    const spacing = useSpacing ? `${p.spacing_em}em` : '0';
+
+    const rules = [
+      `.ebook-body p { margin: 0 0 ${spacing}; text-indent: ${indent}; }`,
+      // First paragraph after a chapter heading or scene break loses its indent.
+      `.ebook-body .ebook-chapter-heading + p { text-indent: 0; }`,
+      `.ebook-body hr + p { text-indent: 0; }`,
+    ];
+
+    // Drop cap — CSS ::first-letter approximation. Quote mode nuances
+    // (first_char / both_together / letter_only / disable_on_dialogue) are
+    // not expressible in pure CSS — the preview shows default ::first-letter
+    // behavior which roughly matches "both_together".
+    if (p.drop_cap_enabled) {
+      const lines = p.drop_cap_lines || 2;
+      const size = lines * 1.2;
+      const fontClause = p.drop_cap_font ? `font-family:"${p.drop_cap_font}",serif;` : '';
+      const colorClause = p.drop_cap_color ? `color:${p.drop_cap_color};` : '';
+
+      const selectors = [];
+      if (p.apply_when === 'chapter' || p.apply_when === 'both') {
+        selectors.push('.ebook-body .ebook-chapter-heading + p::first-letter');
+      }
+      if (p.apply_when === 'breaks' || p.apply_when === 'both') {
+        selectors.push('.ebook-body hr + p::first-letter');
+      }
+      if (selectors.length) {
+        rules.push(`${selectors.join(', ')} {
+          float: left;
+          font-size: ${size}em;
+          line-height: 0.9;
+          padding: 0.08em 0.08em 0 0;
+          ${fontClause}${colorClause}
+        }`);
+      }
+    }
+
+    // Small caps — only the `first line` case (small_caps_words === -1) is
+    // expressible with CSS ::first-line. Specific word counts would require
+    // span-wrapping the HTML, which isn't done here.
+    if (p.small_caps_enabled && p.small_caps_words === -1) {
+      const selectors = [];
+      if (p.apply_when === 'chapter' || p.apply_when === 'both') {
+        selectors.push('.ebook-body .ebook-chapter-heading + p::first-line');
+      }
+      if (p.apply_when === 'breaks' || p.apply_when === 'both') {
+        selectors.push('.ebook-body hr + p::first-line');
+      }
+      if (selectors.length) {
+        rules.push(`${selectors.join(', ')} { font-variant: small-caps; }`);
+      }
+    }
+
+    return rules.join('\n        ');
+  }
+
+  function buildHeadingsCss(h) {
+    const rules = [];
+    for (const level of ['h2', 'h3', 'h4']) {
+      if (!h[`${level}_enabled`]) {
+        rules.push(`.ebook-body ${level} { display: none; }`);
+        continue;
+      }
+      const decl = [];
+      decl.push(`margin: ${h[`${level}_space_above_em`]}em 0 ${h[`${level}_space_below_em`]}em 0`);
+      if (h[`${level}_font`])        decl.push(`font-family: "${h[`${level}_font`]}", serif`);
+      if (h[`${level}_size_pt`])     decl.push(`font-size: ${h[`${level}_size_pt`]}pt`);
+      if (h[`${level}_align`])       decl.push(`text-align: ${h[`${level}_align`]}`);
+      if (h[`${level}_tracking_em`]) decl.push(`letter-spacing: ${h[`${level}_tracking_em`]}em`);
+      const styleClause = styleClauseFor(h[`${level}_style`]);
+      rules.push(`.ebook-body ${level} { ${decl.join('; ')}; ${styleClause} }`);
+      if (h[`${level}_rule_above`]) {
+        rules.push(`.ebook-body ${level} { border-top: 1px solid currentColor; padding-top: 0.35em; }`);
+      }
+      if (h[`${level}_rule_below`]) {
+        rules.push(`.ebook-body ${level} { border-bottom: 1px solid currentColor; padding-bottom: 0.2em; }`);
+      }
+    }
+    if (h.no_indent_after) {
+      rules.push(`.ebook-body h2 + p, .ebook-body h3 + p, .ebook-body h4 + p { text-indent: 0; }`);
+    }
+    return rules.join('\n        ');
+  }
+
+  function buildBreaksCss(b) {
+    const mTop = b.space_above_em || 0;
+    const mBot = b.space_below_em || 0;
+    const rules = [];
+
+    // Reset hr. Key points:
+    //   - `opacity: 1` overrides Bootstrap's global `hr { opacity: .25 }`
+    //     which otherwise fades every scene break.
+    //   - No `height: 0` or `overflow: visible` — those forced ::after content
+    //     to overflow outside the hr's layout box, so image breaks couldn't
+    //     grow the hr's height and would overlap neighbouring content.
+    //     Letting the hr auto-size to its ::after content fixes both issues.
+    rules.push(`.ebook-body hr {
+          border: none;
+          display: block;
+          text-align: center;
+          line-height: 1;
+          margin: ${mTop}em 0 ${mBot}em 0;
+          color: #666;
+          letter-spacing: 0.3em;
+          opacity: 1;
+          background: none;
+        }`);
+
+    switch (b.style) {
+      case 'none':
+        rules.push(`.ebook-body hr { display: none; }`);
+        break;
+      case 'blank':
+        // Margin alone provides the visual gap; no glyph.
+        break;
+      case 'dinkus':
+        rules.push(`.ebook-body hr::after { content: "* * *"; }`);
+        break;
+      case 'asterism':
+        rules.push(`.ebook-body hr::after { content: "⁂"; font-size: 1.3em; letter-spacing: 0; }`);
+        break;
+      case 'rule':
+        rules.push(`.ebook-body hr { border-top: 1px solid currentColor; width: 30%; margin-left: auto; margin-right: auto; }`);
+        break;
+      case 'custom': {
+        const txt = String(b.custom_text || '* * *').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+        rules.push(`.ebook-body hr::after { content: "${txt}"; }`);
+        break;
+      }
+      case 'image':
+        // Image breaks are NOT handled via CSS ::after on hr — browser
+        // sizing behavior on replaced-content pseudo-elements is too
+        // inconsistent to give reliable percentage widths across arbitrary
+        // image aspect ratios. Instead, generateEbookPreview post-processes
+        // the final HTML and replaces every <hr> with a real <img> wrapper.
+        // See substituteImageBreaks below.
+        rules.push(`.ebook-body hr { display: none; }`);
+        break;
+    }
+
+    return rules.join('\n        ');
+  }
+
+  // Resolve all five Custom category JSON blobs for a profile with defaults
+  // merged in. Shared by the preview and the EPUB export.
+  function resolveEbookSettings(profile) {
+    let typo = {};
+    try { typo = JSON.parse(profile?.typography_json || '{}'); } catch {}
+    return {
+      bodyFont: typo.font || profile?.font_body || 'Georgia',
+      fontSize: typo.size_pt || profile?.font_size_pt || 11,
+      lineSpacing: typo.line_spacing || profile?.line_spacing || 1.4,
+      chHeadings: parseProfileJson(profile?.chapter_headings_json, CHAPTER_HEADING_DEFAULTS),
+      paragraph: parseProfileJson(profile?.paragraph_json, PARAGRAPH_DEFAULTS),
+      headings: parseProfileJson(profile?.headings_json, HEADINGS_DEFAULTS),
+      breaks: parseProfileJson(profile?.breaks_json, BREAKS_DEFAULTS),
+    };
+  }
+
+  // Build the ebook CSS string. Used by both the preview ({ inline: true }
+  // wraps in a <style> tag and includes preview-only scaffolding) and the
+  // export ({ inline: false } returns a raw CSS string that becomes the
+  // EPUB's stylesheet.css).
+  function buildEbookCss(settings, opts = {}) {
+    const { bodyFont, fontSize, lineSpacing, paragraph, headings, breaks } = settings;
+    const inline = opts.inline ?? true;
+
+    const widowsOrphans = [
+      paragraph.prevent_widows ? 'widows: 3;' : '',
+      paragraph.prevent_orphans ? 'orphans: 3;' : '',
+    ].filter(Boolean).join(' ');
+
+    const previewOnly = inline ? `
+        /* Preview-only decoration between sections */
+        .ebook-chapter-break {
+          border-top: 1px solid #e0e0e0;
+          margin: 3em 0 0;
+          padding-top: 0;
+        }` : '';
+
+    const bodyPadding = inline ? 'padding: 1.5rem;' : '';
+
+    const css = `
+        .ebook-body {
+          font-family: "${bodyFont}", serif;
+          font-size: ${fontSize}pt;
+          line-height: ${lineSpacing};
+          color: #222;
+          ${bodyPadding}
+          ${widowsOrphans}
+        }
+        /* Front/back matter page titles */
+        .ebook-body h1 {
+          text-align: center; font-size: 1.5em; font-weight: 400;
+          margin: 2em 0 1em; font-family: "${bodyFont}", serif;
+        }
+        .ebook-body h1 + p { text-indent: 0; }
+        /* Paragraph category */
+        ${buildParagraphCss(paragraph)}
+        /* Headings category (h2/h3/h4) */
+        ${buildHeadingsCss(headings)}
+        /* Breaks category (scene break hr) */
+        ${buildBreaksCss(breaks)}${previewOnly}
+    `;
+
+    return inline ? `<style>${css}</style>` : css;
+  }
+
+  // Replace every <hr> in `html` with a real <img>-in-div wrapper when the
+  // break style is 'image'. Shared by preview and export because pseudo-element
+  // sizing on arbitrary image aspect ratios is too unreliable.
+  function substituteImageBreaks(html, breaks) {
+    if (breaks.style !== 'image' || !breaks.image_data) return html;
+    const w = Math.max(1, Math.min(100, Number(breaks.image_width_pct) || 25));
+    const mTop = breaks.space_above_em || 0;
+    const mBot = breaks.space_below_em || 0;
+    const safeSrc = String(breaks.image_data).replace(/"/g, '&quot;');
+    const wrapperStyle = `text-align:center;margin:${mTop}em 0 ${mBot}em 0;`;
+    const imgStyle = `display:inline-block;width:${w}%;max-width:100%;height:auto;vertical-align:middle;`;
+    const replacement = `<div class="scene-break-img" style="${wrapperStyle}"><img src="${safeSrc}" alt="" style="${imgStyle}"/></div>`;
+    return html.replace(/<hr\b[^>]*>/g, replacement);
+  }
+
+  function generateEbookPreview() {
+    if (!chapters || chapters.length === 0) {
+      ebookPreviewHtml = '<p style="color:#999;text-align:center;padding:2rem;">No chapters yet</p>';
+      return;
+    }
+
+    const settings = resolveEbookSettings(activeProfile);
+    const css = buildEbookCss(settings, { inline: true });
+
+    let html = css + '<div class="ebook-body">';
+
+    // Front matter pages
+    const frontPages = formatPages
+      .filter(p => p.position === 'front')
+      .sort((a, b) => a.sort_order - b.sort_order);
+    for (const page of frontPages) {
+      html += `<div id="ebook-fp-${page.id}" class="ebook-chapter-break"></div>`;
+      html += `<h1>${escapeHtml(page.title)}</h1>`;
+      html += pageToHtml(page);
+    }
+
+    // Chapters
+    for (let i = 0; i < chapters.length; i++) {
+      const ch = chapters[i];
+      html += '<div class="ebook-chapter-break"></div>';
+      html += `<div id="ebook-ch-${ch.id}"></div>`;
+      html += renderChapterHeadingHtml(ch, i, settings.chHeadings);
+      html += chapterToHtml(ch);
+    }
+
+    // Back matter pages
+    const backPages = formatPages
+      .filter(p => p.position === 'back')
+      .sort((a, b) => a.sort_order - b.sort_order);
+    for (const page of backPages) {
+      html += `<div id="ebook-fp-${page.id}" class="ebook-chapter-break"></div>`;
+      html += `<h1>${escapeHtml(page.title)}</h1>`;
+      html += pageToHtml(page);
+    }
+
+    html += '</div>';
+    html = substituteImageBreaks(html, settings.breaks);
+    ebookPreviewHtml = html;
+  }
+
+  function escapeHtml(s) {
+    return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
   async function compileAndShow() {
     if (!activeProfileId) return;
     if (isEbook) {
@@ -319,6 +943,7 @@
       lastTiming = null;
       teardownObserver();
       loadedPages = new Set();
+      generateEbookPreview();
       return;
     }
 
@@ -389,9 +1014,15 @@
     profiles = profs;
     chapters = chaps;
 
-    // Select first profile if none selected
-    if (!activeProfileId && profs.length > 0) {
-      activeProfileId = profs[0].id;
+    // Restore last active profile from project settings, or default to first
+    if (!activeProfileId) {
+      const savedId = await getProjectSetting('format_active_profile');
+      const savedNum = Number(savedId);
+      if (savedNum && profs.find(p => p.id === savedNum)) {
+        activeProfileId = savedNum;
+      } else if (profs.length > 0) {
+        activeProfileId = profs[0].id;
+      }
     }
 
     await reloadPages();
@@ -403,6 +1034,7 @@
 
   async function switchProfile(id) {
     activeProfileId = id;
+    setProjectSetting('format_active_profile', String(id)).catch(() => {});
     compileAndShow();
   }
 
@@ -548,6 +1180,7 @@
     profiles = await getFormatProfiles();
     showCreateProfileModal = false;
     activeProfileId = newId;
+    setProjectSetting('format_active_profile', String(newId)).catch(() => {});
     await reloadPages();
     compileAndShow();
   }
@@ -653,6 +1286,466 @@
     compileAndShow();
   }
 
+  // Minimal Image node for HTML generation — mirrors PageContentEditor's ImageNode.
+  // PageContentEditor has no alignment attribute on images; centering is done
+  // entirely via its NodeView's outer div CSS (text-align: center). In HTML
+  // generation there's no NodeView, so we bake the centering into the img's
+  // own style. `display: block; margin: * auto` works even under the narrow CSS
+  // subsets some EPUB readers allow.
+  const ImageNodeForHtml = Node.create({
+    name: 'image',
+    inline: false,
+    group: 'block',
+    draggable: true,
+    addAttributes() {
+      return {
+        src: { default: null },
+        alt: { default: null },
+        width: {
+          default: null,
+          renderHTML: attrs => attrs.width ? { style: `width: ${attrs.width}` } : {},
+        },
+      };
+    },
+    parseHTML() { return [{ tag: 'img[src]' }]; },
+    renderHTML({ HTMLAttributes }) {
+      return ['img', mergeAttributes(HTMLAttributes, {
+        style: 'display: block; margin-left: auto; margin-right: auto;',
+      })];
+    },
+  });
+
+  // Extension set for chapter Y.Doc content. Must include the custom editor nodes
+  // (noteMarker, stateMarker, timeBreak) or generateHTML throws on any chapter
+  // containing a comment, state marker, or time jump — which silently empties
+  // the chapter via chapterToHtml's catch.
+  const chapterHtmlExtensions = [
+    StarterKit.configure({ heading: { levels: [1, 2, 3, 4] }, history: false }),
+    TextAlign.configure({ types: ['heading', 'paragraph'] }),
+    Superscript,
+    Subscript,
+    NoteMarker,
+    StateMarker,
+    TimeBreak,
+  ];
+
+  // Extension set for format page content (PM JSON from PageContentEditor).
+  // Pages don't use headings or the Y.Doc custom nodes — they use font marks and images.
+  const pageHtmlExtensions = [
+    StarterKit.configure({ heading: false, history: false }),
+    TextStyle,
+    FontSize,
+    FontFamily,
+    ImageNodeForHtml,
+    TextAlign.configure({ types: ['paragraph'] }),
+  ];
+
+  function chapterToHtml(chapter) {
+    try {
+      const { doc } = createChapterDoc(chapter.content);
+      const json = yDocToProsemirrorJSON(doc, 'prosemirror');
+      destroyDoc(doc);
+      return generateHTML(json, chapterHtmlExtensions);
+    } catch (e) {
+      console.error('[format] chapterToHtml failed for chapter', chapter?.id, chapter?.title, e);
+      return '<p></p>';
+    }
+  }
+
+  // Transform HTML (as produced by TipTap's generateHTML) into XHTML-safe
+  // form by self-closing HTML void elements. EPUB is strict XHTML and
+  // epubcheck RSC-016 fatally rejects `<hr>` and `<img>` without a trailing
+  // slash. Browsers tolerate the HTML form, but EPUB parsers won't.
+  //
+  // Only applied on the EPUB export path. The in-app preview still uses
+  // loose HTML because browsers parse it fine and altering it there would
+  // just be wasted work.
+  function htmlToXhtml(html) {
+    if (!html) return '';
+    // Per HTML spec, these elements have no content and no end tag.
+    const VOID_TAGS = 'area|base|br|col|embed|hr|img|input|link|meta|param|source|track|wbr';
+    // Match `<tag>` or `<tag attr="val">` where the tag is NOT already
+    // self-closed. The optional group `(\s[^>]*[^/])?` requires at least one
+    // whitespace + at least one non-`/` char before the `>`, so `<tag/>` and
+    // `<tag />` are skipped as already-valid.
+    const pattern = new RegExp(`<(${VOID_TAGS})(\\s[^>]*[^/])?>`, 'gi');
+    return html.replace(pattern, '<$1$2/>');
+  }
+
+  // Convert a format_pages row's stored content to HTML. Content is one of:
+  //   - empty string
+  //   - ProseMirror JSON (stringified) from PageContentEditor — the normal case
+  //   - legacy plain text (paragraphs separated by \n\n)
+  function pageToHtml(page) {
+    const raw = page?.content;
+    if (!raw || !raw.trim()) return '';
+    if (raw.trim().startsWith('{')) {
+      try {
+        const parsed = JSON.parse(raw);
+        return generateHTML(parsed, pageHtmlExtensions);
+      } catch (e) {
+        console.error('[format] pageToHtml failed for page', page?.id, page?.title, e);
+        return '';
+      }
+    }
+    // Legacy plain text fallback
+    return raw.split('\n\n')
+      .map(p => `<p style="text-indent:0;">${escapeHtml(p.trim())}</p>`)
+      .join('\n');
+  }
+
+  // ---- Export size estimation ----
+  //
+  // Computes an estimate of the resulting EPUB size WITHOUT actually running
+  // the export. Dominated by images (cover + inline) which we measure exactly
+  // from their byte representation; XHTML text uses a DEFLATE estimate.
+  //
+  // The estimate is accurate within ~5% for typical books. It does NOT account
+  // for any future image compression — for that, we'd need to actually run the
+  // encoder. This is intentionally a lower bound on "what you'd get today".
+
+  // Every EPUB ships with these fixed files. The sizes are approximate (they
+  // vary with chapter count and metadata) but constant enough that we can
+  // treat them as a fixed ~10KB baseline.
+  const FIXED_EPUB_OVERHEAD_BYTES = 10 * 1024;
+
+  // DEFLATE typically compresses well-structured XHTML to ~30% of source.
+  // This is a rough rule of thumb; actual ratios range from 20% (lots of
+  // repeated markup) to 40% (dense text with little markup).
+  const XHTML_COMPRESSION_RATIO = 0.3;
+
+  // Decode the byte length of a base64 string without actually decoding.
+  // Each 4 base64 chars encode 3 bytes; padding `=` at the end reduces
+  // the output by 1 or 2 bytes.
+  function base64DecodedLength(b64) {
+    if (!b64) return 0;
+    const len = b64.length;
+    if (len === 0) return 0;
+    let padding = 0;
+    if (b64[len - 1] === '=') padding++;
+    if (b64[len - 2] === '=') padding++;
+    return Math.floor(len * 3 / 4) - padding;
+  }
+
+  // Scan an HTML string for inline base64 data URL images. Collects unique
+  // images into the `seen` Map (key → { dataUrl, mime, bytes }) so the
+  // caller can later read their dimensions for compression estimation.
+  // Also returns the total base64 character length in THIS HTML — not
+  // deduped — so the text estimator can subtract it from html.length to
+  // reflect the actual markup that ships after image extraction.
+  function measureInlineImages(html, seen) {
+    if (!html) return { base64CharsInHtml: 0 };
+    const re = /<img\b[^>]*\ssrc="(data:([^;]+);base64,([^"]+))"/gi;
+    let base64CharsInHtml = 0;
+    let match;
+    while ((match = re.exec(html)) !== null) {
+      const dataUrl = match[1];
+      const mime = match[2];
+      const b64 = match[3];
+      // Every occurrence counted for the text subtraction — duplicates all
+      // contribute their full base64 to the source HTML length, and all of
+      // them get replaced with short paths during export.
+      base64CharsInHtml += b64.length;
+      // Dedupe via a short key so the image-bytes accumulator matches what
+      // the Rust side actually stores in the zip (each unique image once).
+      const key = mime + ';' + b64.substring(0, 64) + ':' + b64.length;
+      if (seen.has(key)) continue;
+      seen.set(key, { dataUrl, mime, bytes: base64DecodedLength(b64), width: 0, height: 0 });
+    }
+    return { base64CharsInHtml };
+  }
+
+  // Read the natural dimensions of a data URL by letting the browser decode
+  // just the image header. Fast (milliseconds) and non-blocking.
+  function loadImageDimensions(dataUrl) {
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight });
+      img.onerror = () => resolve(null);
+      img.src = dataUrl;
+    });
+  }
+
+  // Compression presets. `max_dim` caps the longest edge; `target_bpp` is
+  // an assumed bytes-per-pixel floor for JPEG encoding at the preset's
+  // quality level. These bpp values are middle-ground for photographic
+  // content — simple graphics compress much smaller (~0.1 bpp), detailed
+  // photos somewhat larger.
+  const COMPRESSION_PRESETS = {
+    none:     { max_dim: Infinity, target_bpp: Infinity, factor_fallback: 1.0 },
+    minor:    { max_dim: 2500,     target_bpp: 0.5,      factor_fallback: 0.75 },
+    balanced: { max_dim: 2000,     target_bpp: 0.35,     factor_fallback: 0.5 },
+    compact:  { max_dim: 1500,     target_bpp: 0.18,     factor_fallback: 0.25 },
+  };
+
+  // Estimate the post-compression bytes for a single image. Uses actual
+  // dimensions when available — the downscale contribution (new_pixels /
+  // old_pixels) is the dominant factor for large source images, and we
+  // compute it exactly. The quality contribution caps the result at
+  // `new_pixels * target_bpp` (what a fresh Q85/Q70 encode would produce
+  // regardless of source), but also caps at original bytes-per-pixel
+  // since re-encoding can't magically increase information density.
+  //
+  // When dimensions aren't available (image header failed to decode) or
+  // level is "none", falls back to a flat multiplier.
+  function estimateImageBytes(img, level) {
+    const preset = COMPRESSION_PRESETS[level] || COMPRESSION_PRESETS.none;
+    if (level === 'none' || !img.width || !img.height) {
+      return Math.ceil(img.bytes * preset.factor_fallback);
+    }
+    const longest = Math.max(img.width, img.height);
+    const scale = longest > preset.max_dim ? preset.max_dim / longest : 1;
+    const new_pixels = img.width * img.height * scale * scale;
+    // original bytes-per-pixel — caps the target_bpp so we never "expand"
+    // a source that was already encoded smaller than the target quality
+    const original_bpp = img.bytes / (img.width * img.height);
+    const effective_bpp = Math.min(original_bpp, preset.target_bpp);
+    return Math.ceil(new_pixels * effective_bpp);
+  }
+
+  // Estimate the total size of an EPUB export for the currently active
+  // ebook profile. Returns a breakdown + compression metadata.
+  //
+  // How it works for compression estimates:
+  //   1. Scan all chapter/page HTML for inline data: URLs, collect unique
+  //      ones into a Map keyed by a short mime+b64 fingerprint
+  //   2. Read each unique image's natural dimensions via `new Image()`
+  //      (fast — browser decodes only the header)
+  //   3. For each image, compute estimated post-compression bytes using
+  //      actual downscale ratio × quality bpp floor. This is far more
+  //      accurate than a flat multiplier because the downscale contribution
+  //      is the dominant factor for large source images.
+  //   4. Same treatment for the cover (read its dimensions via an Image()).
+  //
+  // The text portion is html.length - base64_chars_in_html (since the base64
+  // payload gets extracted and replaced with short paths on the Rust side),
+  // then multiplied by the DEFLATE ratio.
+  async function estimateExportSize(level = 'none') {
+    if (!activeProfile || activeProfile.target_type !== 'ebook') {
+      return null;
+    }
+
+    // Map<key, { dataUrl, mime, bytes, width, height }> of unique inline images
+    const seen = new Map();
+    let markupBytes = 0;
+
+    // Chapter bodies — collect images + count markup
+    for (const ch of chapters || []) {
+      try {
+        const html = chapterToHtml(ch);
+        const { base64CharsInHtml } = measureInlineImages(html, seen);
+        markupBytes += Math.max(0, html.length - base64CharsInHtml);
+      } catch {
+        // Swallow — already logged by chapterToHtml
+      }
+    }
+
+    // Format page bodies
+    for (const p of formatPages || []) {
+      try {
+        const html = pageToHtml(p);
+        const { base64CharsInHtml } = measureInlineImages(html, seen);
+        markupBytes += Math.max(0, html.length - base64CharsInHtml);
+      } catch {
+        // Swallow
+      }
+    }
+
+    // Cover image (BLOB in project DB). Read bytes + dimensions.
+    let coverImage = null;
+    try {
+      const cover = await getBookCover();
+      if (cover && cover.data && cover.data.length > 0) {
+        // Build a data URL from the bytes so loadImageDimensions can decode it.
+        // Uint8Array → base64 via a chunked approach to avoid stack overflow
+        // on large images.
+        const bytes = new Uint8Array(cover.data);
+        let binary = '';
+        const chunk = 0x8000;
+        for (let i = 0; i < bytes.length; i += chunk) {
+          binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+        }
+        const dataUrl = `data:${cover.mime_type};base64,${btoa(binary)}`;
+        coverImage = {
+          dataUrl,
+          mime: cover.mime_type,
+          bytes: cover.data.length,
+          width: 0,
+          height: 0,
+        };
+      }
+    } catch (e) {
+      console.warn('[format] estimateExportSize: cover read failed', e);
+    }
+
+    // Read dimensions for all unique inline images + the cover in parallel.
+    // `new Image()` decodes the header only — fast and non-blocking.
+    const allImages = Array.from(seen.values());
+    if (coverImage) allImages.push(coverImage);
+    await Promise.all(
+      allImages.map(async (img) => {
+        const dims = await loadImageDimensions(img.dataUrl);
+        if (dims) {
+          img.width = dims.width;
+          img.height = dims.height;
+        }
+      })
+    );
+
+    // Tally raw bytes + estimated compressed bytes
+    let rawImagesBytes = 0;
+    let estImagesBytes = 0;
+    for (const img of seen.values()) {
+      rawImagesBytes += img.bytes;
+      estImagesBytes += estimateImageBytes(img, level);
+    }
+    const rawCoverBytes = coverImage ? coverImage.bytes : 0;
+    const estCoverBytes = coverImage ? estimateImageBytes(coverImage, level) : 0;
+
+    // XHTML compresses via DEFLATE to roughly 30% of source.
+    const compressedText = Math.ceil(markupBytes * XHTML_COMPRESSION_RATIO);
+
+    // Total
+    const total = estCoverBytes + estImagesBytes + compressedText + FIXED_EPUB_OVERHEAD_BYTES;
+
+    return {
+      total,
+      breakdown: {
+        cover: estCoverBytes,
+        images: estImagesBytes,
+        text: compressedText,
+        overhead: FIXED_EPUB_OVERHEAD_BYTES,
+      },
+      imageCount: seen.size,
+      rawImagesBytes,
+      rawCoverBytes,
+      compressionLevel: level,
+    };
+  }
+
+  // Format bytes as a human-readable string ("4.2 MB", "540 KB", "8.1 GB").
+  function formatBytes(n) {
+    if (n == null || n === 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB'];
+    let i = 0;
+    let v = n;
+    while (v >= 1024 && i < units.length - 1) {
+      v /= 1024;
+      i++;
+    }
+    return `${v < 10 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
+  }
+
+  async function handleExportEpub() {
+    if (exporting) return;
+    exporting = true;
+    exportError = null;
+    try {
+      const bookTitle = await getProjectSetting('book_title') || 'Untitled';
+      const authorName = await getProjectSetting('author_name') || 'Unknown Author';
+      const bookLanguage = (await getProjectSetting('language') || 'en').trim() || 'en';
+      const bookDescription = (await getProjectSetting('description') || '').trim();
+
+      // Resolve profile settings once so chapters and pages share the same
+      // chapter-heading rendering, image-break substitution, and CSS.
+      const settings = resolveEbookSettings(activeProfile);
+      const css = buildEbookCss(settings, { inline: false });
+
+      // Build each chapter's full HTML: the JS-rendered chapter heading
+      // (number/title/subtitle/image/rules honoring chapter_headings_json)
+      // + the chapter body. Rust's build_chapter_html no longer adds its own
+      // h1 — we provide everything here.
+      const epubChapters = chapters.map((ch, i) => {
+        const heading = renderChapterHeadingHtml(ch, i, settings.chHeadings);
+        const body = chapterToHtml(ch);
+        const combined = substituteImageBreaks(heading + body, settings.breaks);
+        return {
+          title: ch.title,
+          subtitle: ch.subtitle || '',
+          html: htmlToXhtml(combined),
+        };
+      });
+
+      const allPages = formatPages;
+      const frontPages = allPages
+        .filter(p => p.position === 'front')
+        .map(p => ({
+          title: p.title,
+          role: p.page_role,
+          html: htmlToXhtml(substituteImageBreaks(pageToHtml(p), settings.breaks)),
+          position: p.position,
+        }));
+      const backPages = allPages
+        .filter(p => p.position === 'back')
+        .map(p => ({
+          title: p.title,
+          role: p.page_role,
+          html: htmlToXhtml(substituteImageBreaks(pageToHtml(p), settings.breaks)),
+          position: p.position,
+        }));
+
+      // cover_image is NOT sent from JS — Rust reads the cover BLOB directly
+      // from the book_cover table so we don't round-trip binary through JSON.
+      const request = {
+        title: bookTitle,
+        author: authorName,
+        language: bookLanguage,
+        description: bookDescription,
+        chapters: epubChapters,
+        front_pages: frontPages,
+        back_pages: backPages,
+        css,
+        compression_level: compressionLevel,
+      };
+
+      const epubBytes = await exportEpub(request);
+      const arr = epubBytes instanceof Uint8Array ? epubBytes : new Uint8Array(epubBytes);
+
+      // Run the Rust-side sanity checker. This isn't a full epubcheck
+      // replacement — it catches the class of bugs we've hit in this
+      // codebase (bad XHTML, duplicate OPF ids, dangling manifest refs).
+      // Errors block the save with a toast explaining what's wrong;
+      // warnings surface but don't block.
+      const issues = await validateEpubBytes(arr);
+      const errors = issues.filter(i => i.level === 'error');
+      const warnings = issues.filter(i => i.level === 'warning');
+
+      if (errors.length > 0) {
+        console.error('[format] EPUB validation errors:', errors);
+        const summary = errors.slice(0, 3).map(e => `${e.code}: ${e.message}`).join(' | ');
+        const more = errors.length > 3 ? ` (+${errors.length - 3} more)` : '';
+        exportError = `Validation failed (${errors.length} error${errors.length > 1 ? 's' : ''}): ${summary}${more}`;
+        addToast(`EPUB validation failed — ${errors.length} error${errors.length > 1 ? 's' : ''}. See console for details.`, 'error');
+        // Still fall through to save so the user has the bytes to inspect.
+      } else if (warnings.length > 0) {
+        console.warn('[format] EPUB validation warnings:', warnings);
+        addToast(`EPUB exported with ${warnings.length} warning${warnings.length > 1 ? 's' : ''}`, 'info');
+      }
+
+      const filePath = await save({
+        title: 'Save EPUB',
+        defaultPath: `${bookTitle}.epub`,
+        filters: [{ name: 'EPUB', extensions: ['epub'] }],
+      });
+
+      if (filePath) {
+        const { writeFile } = await import('@tauri-apps/plugin-fs');
+        await writeFile(filePath, arr);
+        if (errors.length === 0) {
+          addToast(`EPUB exported to ${filePath.split(/[/\\]/).pop()}`, 'success');
+        } else {
+          addToast(`EPUB saved (with errors) to ${filePath.split(/[/\\]/).pop()}`, 'error');
+        }
+      }
+    } catch (e) {
+      console.error('[format] epub export failed:', e);
+      exportError = String(e);
+      addToast('EPUB export failed: ' + e, 'error');
+    } finally {
+      exporting = false;
+    }
+  }
+
   async function handleExportPdf() {
     if (exporting || pageCount === 0) return;
     exporting = true;
@@ -692,6 +1785,16 @@
   }
 
   function scrollToSection(sectionId) {
+    if (isEbook) {
+      // For ebook, scroll within the ebook preview to the anchor
+      const chMatch = sectionId.match(/iwe-ch-(\d+)/);
+      const fpMatch = sectionId.match(/iwe-fp-(\d+)/);
+      let el = null;
+      if (chMatch) el = document.getElementById(`ebook-ch-${chMatch[1]}`);
+      else if (fpMatch) el = document.getElementById(`ebook-fp-${fpMatch[1]}`);
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      return;
+    }
     const idx = sectionPages[sectionId];
     if (idx == null) return;
     scrollToPage(idx);
@@ -730,10 +1833,12 @@
     <div class="preview-column">
     <div class="preview-area" bind:this={previewContainer} onscroll={handlePreviewScroll}>
       {#if isEbook}
-        <div class="ebook-placeholder">
-          <i class="bi bi-phone" style="font-size: 2rem;"></i>
-          <p>Ebook preview coming soon</p>
-          <p class="ebook-hint">Ebooks use reflowable HTML — no fixed pages to preview.</p>
+        <div class="ebook-preview-wrap">
+          <div class="ebook-device" style="width: {deviceDims.w + 24}px;">
+            <div class="ebook-screen" style="width: {deviceDims.w}px; height: {deviceDims.h}px;">
+              {@html ebookPreviewHtml}
+            </div>
+          </div>
         </div>
       {:else if rendering}
         <div class="render-loading">
@@ -1024,7 +2129,7 @@
                   onclick={() => customSelectorOpen = false}
                   role="button" tabindex="-1" onkeydown={() => {}}></div>
                 <div class="custom-selector-dropdown">
-                  {#each CUSTOM_TABS as tab (tab.id)}
+                  {#each filteredCustomTabs as tab (tab.id)}
                     <button class="custom-option"
                       class:active={customTab === tab.id}
                       onclick={() => selectCustomTab(tab.id)}>
@@ -1055,7 +2160,7 @@
             {:else if customTab === 'header-footer'}
               <HeaderFooterSettings profile={activeProfile} onchange={handleCustomSettingChange} />
             {:else if customTab === 'trim'}
-              <TrimSettings profile={activeProfile} onchange={handleCustomSettingChange} />
+              <TrimSettings profile={activeProfile} onchange={handleCustomSettingChange} bind:ebookDevice />
             {/if}
           </div>
         {:else if sidebarMode === 'export'}
@@ -1069,25 +2174,146 @@
                     <span class="export-info-label">Profile</span>
                     <span class="export-info-value">{activeProfile.name}</span>
                   </div>
-                  <div class="export-info-row">
-                    <span class="export-info-label">Trim</span>
-                    <span class="export-info-value">{activeProfile.trim_width_in}″ × {activeProfile.trim_height_in}″</span>
-                  </div>
-                  <div class="export-info-row">
-                    <span class="export-info-label">Pages</span>
-                    <span class="export-info-value">{pageCount || '—'}</span>
-                  </div>
+                  {#if !isEbook}
+                    <div class="export-info-row">
+                      <span class="export-info-label">Trim</span>
+                      <span class="export-info-value">{activeProfile.trim_width_in}″ × {activeProfile.trim_height_in}″</span>
+                    </div>
+                    <div class="export-info-row">
+                      <span class="export-info-label">Pages</span>
+                      <span class="export-info-value">{pageCount || '—'}</span>
+                    </div>
+                  {:else}
+                    <div class="export-info-row">
+                      <span class="export-info-label">Estimated size</span>
+                      <span class="export-info-value">
+                        {#if estimating}
+                          <span class="export-info-muted">calculating…</span>
+                        {:else if sizeEstimate}
+                          ~{formatBytes(sizeEstimate.total)}
+                          <span class="estimate-badge" title="Rough estimate. Actual size depends on DEFLATE compression of the XHTML and per-image zip overhead — expect ±5% for uncompressed exports, ±30% when image compression is on.">rough</span>
+                        {:else}
+                          —
+                        {/if}
+                      </span>
+                    </div>
+                  {/if}
                 </div>
+
+                {#if isEbook}
+                  <div class="export-compression">
+                    <div class="compression-title">Image compression</div>
+                    <div class="compression-options">
+                      <label class="compression-option" class:active={compressionLevel === 'none'}>
+                        <input type="radio" name="compression" value="none"
+                          checked={compressionLevel === 'none'}
+                          onchange={() => compressionLevel = 'none'} />
+                        <div class="compression-option-body">
+                          <span class="compression-option-name">None</span>
+                          <span class="compression-option-desc">Original image bytes, no re-encoding.</span>
+                        </div>
+                      </label>
+                      <label class="compression-option" class:active={compressionLevel === 'minor'}>
+                        <input type="radio" name="compression" value="minor"
+                          checked={compressionLevel === 'minor'}
+                          onchange={() => compressionLevel = 'minor'} />
+                        <div class="compression-option-body">
+                          <span class="compression-option-name">Minor</span>
+                          <span class="compression-option-desc">JPEG Q90, max 2500px. Light touch — preserves quality, trims oversized images.</span>
+                        </div>
+                      </label>
+                      <label class="compression-option" class:active={compressionLevel === 'balanced'}>
+                        <input type="radio" name="compression" value="balanced"
+                          checked={compressionLevel === 'balanced'}
+                          onchange={() => compressionLevel = 'balanced'} />
+                        <div class="compression-option-body">
+                          <span class="compression-option-name">Balanced</span>
+                          <span class="compression-option-desc">JPEG Q85, max 2000px. Usually shrinks images ~50%.</span>
+                        </div>
+                      </label>
+                      <label class="compression-option" class:active={compressionLevel === 'compact'}>
+                        <input type="radio" name="compression" value="compact"
+                          checked={compressionLevel === 'compact'}
+                          onchange={() => compressionLevel = 'compact'} />
+                        <div class="compression-option-body">
+                          <span class="compression-option-name">Compact</span>
+                          <span class="compression-option-desc">JPEG Q70, max 1500px. Aggressive, ~75% reduction.</span>
+                        </div>
+                      </label>
+                    </div>
+                    <p class="compression-hint">
+                      Compression re-encodes every image when you hit Export. PNG images with transparency are kept as PNG to preserve alpha; everything else becomes JPEG.
+                    </p>
+                  </div>
+                {/if}
+
+                {#if isEbook && sizeEstimate}
+                  <div class="export-size-breakdown">
+                    <div class="breakdown-title">
+                      Where the bytes go
+                      <span class="breakdown-title-badge">estimate</span>
+                    </div>
+                    {#each [
+                      { label: 'Cover image',     bytes: sizeEstimate.breakdown.cover,    color: '#2d6a5e' },
+                      { label: `Inline images${sizeEstimate.imageCount ? ` (${sizeEstimate.imageCount})` : ''}`, bytes: sizeEstimate.breakdown.images,   color: '#d97706' },
+                      { label: 'Text (compressed)', bytes: sizeEstimate.breakdown.text,  color: '#6b6560' },
+                      { label: 'EPUB overhead',   bytes: sizeEstimate.breakdown.overhead, color: '#c0b8a8' },
+                    ] as row}
+                      {#if row.bytes > 0}
+                        <div class="breakdown-row">
+                          <span class="breakdown-dot" style="background:{row.color}"></span>
+                          <span class="breakdown-label">{row.label}</span>
+                          <span class="breakdown-value">{formatBytes(row.bytes)}</span>
+                        </div>
+                      {/if}
+                    {/each}
+                    <div class="breakdown-row breakdown-total">
+                      <span class="breakdown-dot breakdown-dot-total"></span>
+                      <span class="breakdown-label">Total</span>
+                      <span class="breakdown-value">~{formatBytes(sizeEstimate.total)}</span>
+                    </div>
+                    {#if compressionLevel !== 'none' && sizeEstimate.rawImagesBytes > 0}
+                      <div class="breakdown-savings">
+                        <i class="bi bi-arrow-down-right"></i>
+                        Down from ~{formatBytes(sizeEstimate.rawImagesBytes + sizeEstimate.rawCoverBytes)} uncompressed
+                      </div>
+                    {/if}
+                    <p class="breakdown-hint">
+                      {#if compressionLevel === 'none'}
+                        Rough estimate — actual file will be within ~5%. Images are the dominant cost.
+                      {:else}
+                        <strong>Compression estimates are particularly rough.</strong> Real savings depend on the source image quality and format — expect the final file anywhere from 30% smaller to 30% larger than this number. Check the exported file to see the real result.
+                      {/if}
+                    </p>
+                  </div>
+                {/if}
               {/if}
 
-              <button class="export-btn-main" onclick={handleExportPdf}
-                disabled={exporting || pageCount === 0}>
-                {#if exporting}
-                  <span class="export-spinner"></span> Exporting...
-                {:else}
-                  <i class="bi bi-file-earmark-pdf"></i> Export PDF
-                {/if}
-              </button>
+              {#if isEbook}
+                <button class="export-btn-main" onclick={handleExportEpub}
+                  disabled={exporting}>
+                  {#if exporting}
+                    <span class="export-spinner"></span> Exporting...
+                  {:else}
+                    <i class="bi bi-book"></i> Export EPUB
+                  {/if}
+                </button>
+                <p class="export-hint">
+                  Reflowable ebook for Kindle, Apple Books, Kobo, etc. Text reflows to fit the reader's screen and font preferences.
+                </p>
+              {:else}
+                <button class="export-btn-main" onclick={handleExportPdf}
+                  disabled={exporting || pageCount === 0}>
+                  {#if exporting}
+                    <span class="export-spinner"></span> Exporting...
+                  {:else}
+                    <i class="bi bi-file-earmark-pdf"></i> Export PDF
+                  {/if}
+                </button>
+                <p class="export-hint">
+                  Print-ready PDF with all fonts embedded. Uses the current profile's trim size, margins, and typography settings.
+                </p>
+              {/if}
 
               {#if exportError}
                 <div class="export-error">
@@ -1095,11 +2321,6 @@
                   {exportError}
                 </div>
               {/if}
-
-              <p class="export-hint">
-                Exports the current profile as a print-ready PDF with all fonts embedded.
-                Make sure the preview looks correct before exporting.
-              </p>
             </div>
           </div>
         {/if}
@@ -1204,14 +2425,24 @@
     color: var(--iwe-text-muted); text-align: center;
   }
 
-  /* Ebook placeholder */
-  .ebook-placeholder {
-    display: flex; flex-direction: column; align-items: center; justify-content: center;
-    height: 100%; gap: 0.5rem;
-    font-family: var(--iwe-font-ui); color: var(--iwe-text-muted);
+  /* Ebook preview */
+  .ebook-preview-wrap {
+    display: flex; justify-content: center; align-items: flex-start;
+    padding: 2rem; min-height: 100%;
   }
-  .ebook-placeholder p { margin: 0; }
-  .ebook-hint { font-size: 0.78rem; font-style: italic; }
+  .ebook-device {
+    background: #1a1a1a;
+    border-radius: 24px;
+    padding: 16px 12px;
+    box-shadow: 0 8px 40px rgba(0,0,0,0.3), 0 0 0 1px rgba(255,255,255,0.05);
+    transition: width 200ms ease;
+  }
+  .ebook-screen {
+    background: #fff;
+    border-radius: 4px;
+    overflow-y: auto;
+    transition: width 200ms ease, height 200ms ease;
+  }
 
   /* Render states */
   .render-loading {
@@ -1540,6 +2771,170 @@
     font-family: var(--iwe-font-ui); font-size: 0.85rem;
     color: var(--iwe-text);
   }
+  .export-info-muted {
+    color: var(--iwe-text-faint);
+    font-style: italic;
+  }
+
+  /* ---- Export size breakdown ---- */
+  .export-size-breakdown {
+    background: var(--iwe-bg-warm);
+    border: 1px solid var(--iwe-border);
+    border-radius: var(--iwe-radius-sm);
+    padding: 0.7rem 0.8rem 0.75rem;
+    margin-bottom: 1rem;
+  }
+  .breakdown-title {
+    font-family: var(--iwe-font-ui); font-size: 0.68rem;
+    color: var(--iwe-text-muted); text-transform: uppercase;
+    letter-spacing: 0.05em; font-weight: 600;
+    margin-bottom: 0.45rem;
+  }
+  .breakdown-row {
+    display: flex; align-items: center; gap: 0.5rem;
+    padding: 0.2rem 0;
+    font-family: var(--iwe-font-ui); font-size: 0.78rem;
+  }
+  .breakdown-dot {
+    width: 9px; height: 9px; border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .breakdown-label {
+    flex: 1;
+    color: var(--iwe-text);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .breakdown-value {
+    color: var(--iwe-text-muted);
+    font-variant-numeric: tabular-nums;
+    font-size: 0.76rem;
+  }
+  .breakdown-total {
+    margin-top: 0.35rem;
+    padding-top: 0.45rem;
+    border-top: 1px solid var(--iwe-border);
+  }
+  .breakdown-total .breakdown-label {
+    font-weight: 600;
+    color: var(--iwe-text);
+    text-transform: uppercase;
+    font-size: 0.72rem;
+    letter-spacing: 0.05em;
+  }
+  .breakdown-total .breakdown-value {
+    color: var(--iwe-text);
+    font-weight: 600;
+    font-size: 0.85rem;
+  }
+  .breakdown-dot-total {
+    background: transparent;
+    border: 1.5px solid var(--iwe-accent);
+  }
+  .breakdown-hint {
+    margin: 0.55rem 0 0 0;
+    font-family: var(--iwe-font-ui); font-size: 0.7rem;
+    color: var(--iwe-text-muted); line-height: 1.45;
+    font-style: italic;
+  }
+  .breakdown-hint strong {
+    color: var(--iwe-text);
+    font-weight: 600;
+  }
+  .breakdown-savings {
+    display: flex; align-items: center; gap: 0.35rem;
+    margin-top: 0.55rem;
+    padding-top: 0.5rem;
+    border-top: 1px dashed var(--iwe-border);
+    font-family: var(--iwe-font-ui); font-size: 0.73rem;
+    color: var(--iwe-accent);
+    font-weight: 500;
+  }
+  .breakdown-title-badge {
+    display: inline-block;
+    margin-left: 0.4rem;
+    padding: 0.05rem 0.35rem;
+    background: var(--iwe-bg);
+    border: 1px solid var(--iwe-border);
+    border-radius: 6px;
+    font-size: 0.6rem;
+    font-weight: 500;
+    color: var(--iwe-text-muted);
+    text-transform: none;
+    letter-spacing: 0;
+  }
+  .estimate-badge {
+    display: inline-block;
+    margin-left: 0.3rem;
+    padding: 0.05rem 0.35rem;
+    background: var(--iwe-bg-warm);
+    border: 1px solid var(--iwe-border);
+    border-radius: 6px;
+    font-size: 0.6rem;
+    color: var(--iwe-text-muted);
+    cursor: help;
+  }
+
+  /* ---- Compression selector ---- */
+  .export-compression {
+    background: var(--iwe-bg-warm);
+    border: 1px solid var(--iwe-border);
+    border-radius: var(--iwe-radius-sm);
+    padding: 0.7rem 0.8rem 0.75rem;
+    margin-bottom: 1rem;
+  }
+  .compression-title {
+    font-family: var(--iwe-font-ui); font-size: 0.68rem;
+    color: var(--iwe-text-muted); text-transform: uppercase;
+    letter-spacing: 0.05em; font-weight: 600;
+    margin-bottom: 0.5rem;
+  }
+  .compression-options {
+    display: flex; flex-direction: column; gap: 0.35rem;
+  }
+  .compression-option {
+    display: flex; align-items: flex-start; gap: 0.55rem;
+    padding: 0.5rem 0.55rem;
+    background: var(--iwe-bg);
+    border: 1px solid var(--iwe-border);
+    border-radius: var(--iwe-radius-sm);
+    cursor: pointer;
+    transition: border-color 120ms, background 120ms;
+  }
+  .compression-option:hover {
+    border-color: var(--iwe-border-strong, var(--iwe-accent));
+  }
+  .compression-option.active {
+    border-color: var(--iwe-accent);
+    background: var(--iwe-bg);
+    box-shadow: inset 0 0 0 1px var(--iwe-accent);
+  }
+  .compression-option input[type="radio"] {
+    margin-top: 3px;
+    accent-color: var(--iwe-accent);
+    flex-shrink: 0;
+  }
+  .compression-option-body {
+    display: flex; flex-direction: column; gap: 0.15rem;
+    min-width: 0;
+  }
+  .compression-option-name {
+    font-family: var(--iwe-font-ui); font-size: 0.85rem;
+    font-weight: 500;
+    color: var(--iwe-text);
+  }
+  .compression-option-desc {
+    font-family: var(--iwe-font-ui); font-size: 0.72rem;
+    color: var(--iwe-text-muted);
+    line-height: 1.35;
+  }
+  .compression-hint {
+    margin: 0.6rem 0 0 0;
+    font-family: var(--iwe-font-ui); font-size: 0.7rem;
+    color: var(--iwe-text-muted);
+    line-height: 1.45;
+    font-style: italic;
+  }
+
   .export-btn-main {
     width: 100%;
     display: flex; align-items: center; justify-content: center; gap: 0.5rem;
@@ -1551,7 +2946,23 @@
   }
   .export-btn-main:hover:not(:disabled) { background: #245a4f; }
   .export-btn-main:disabled { opacity: 0.5; cursor: not-allowed; }
+  .export-buttons {
+    display: flex; flex-direction: column; gap: 0.5rem;
+  }
   .export-btn-main i { font-size: 1.1rem; }
+  .export-btn-secondary {
+    width: 100%;
+    display: flex; align-items: center; justify-content: center; gap: 0.5rem;
+    padding: 0.65rem 1rem;
+    font-family: var(--iwe-font-ui); font-size: 0.9rem; font-weight: 500;
+    background: var(--iwe-bg); border: 1px solid var(--iwe-accent);
+    color: var(--iwe-accent); border-radius: var(--iwe-radius-sm);
+    cursor: pointer; transition: all 120ms;
+  }
+  .export-btn-secondary:hover:not(:disabled) { background: rgba(45, 106, 94, 0.06); }
+  .export-btn-secondary:disabled { opacity: 0.5; cursor: not-allowed; }
+  .export-btn-secondary i { font-size: 1rem; }
+  .export-hints { margin-top: 1rem; }
   .export-spinner {
     width: 16px; height: 16px;
     border: 2px solid rgba(255,255,255,0.3); border-top-color: #fff;

@@ -41,6 +41,8 @@ typst-svg = { version = "0.14", optional = true }
 typst-kit = { version = "0.14", default-features = false, features = ["fonts", "packages"], optional = true }
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
 quick-xml = "0.31"
+epub-builder = "0.8"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
 
 [features]
 default = []
