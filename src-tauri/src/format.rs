@@ -1129,6 +1129,14 @@ fn build_typst_markup(
         .get("suppress_on_chapter_start")
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
+    let hf_suppress_header_on_pages = hf
+        .get("suppress_header_on_pages")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let hf_suppress_footer_on_pages = hf
+        .get("suppress_footer_on_pages")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
     let hf_header_sep = hf
         .get("header_separator")
         .and_then(|v| v.as_bool())
@@ -1164,6 +1172,12 @@ fn build_typst_markup(
     let has_any_footer = ["verso_footer_left","verso_footer_center","verso_footer_right",
         "recto_footer_left","recto_footer_center","recto_footer_right"]
         .iter().any(|k| slot_has_content(&hf_slots, k));
+    let uses_page_numbers = SLOTS.iter().any(|k| {
+        hf_slots.get(*k)
+            .and_then(|v| v.get("content"))
+            .and_then(|v| v.as_str())
+            == Some("page_number")
+    });
 
     // Page setup — margins may be reduced when extend_no_header/footer is on
     let effective_margin_top = if extend_no_header && !has_any_header {
@@ -1187,23 +1201,38 @@ fn build_typst_markup(
         margin_inside,
     ));
 
+    // Suppress-on-chapter-start: query all H1 heading pages and skip the
+    // header/footer when the current page contains a chapter opening.
+    let suppress_open = "  let ch-pages = query(heading.where(level: 1)).map(h => h.location().page())\n  if not ch-pages.contains(here().page()) {\n";
+    let suppress_close = "  }\n";
+
     if has_any_header {
         doc.push_str("#set page(header: context {\n");
         if hf_suppress {
-            doc.push_str("  let pg = counter(page).at(here()).first()\n");
-            doc.push_str("  if pg > 1 {\n");
+            doc.push_str(suppress_open);
         }
         emit_hf_bar(&mut doc, &hf_slots, "header", hf_header_sep, hf_sep_pt, hf_margin_left, hf_margin_right);
         if hf_suppress {
-            doc.push_str("  }\n");
+            doc.push_str(suppress_close);
         }
         doc.push_str("})\n\n");
     }
 
     if has_any_footer {
         doc.push_str("#set page(footer: context {\n");
+        if hf_suppress {
+            doc.push_str(suppress_open);
+        }
         emit_hf_bar(&mut doc, &hf_slots, "footer", hf_footer_sep, hf_sep_pt, hf_margin_left, hf_margin_right);
+        if hf_suppress {
+            doc.push_str(suppress_close);
+        }
         doc.push_str("})\n\n");
+    } else if uses_page_numbers {
+        // No custom footer slots, but numbering is active (for header slots).
+        // Typst's built-in behavior adds a default centered page number when
+        // numbering is set — suppress it explicitly.
+        doc.push_str("#set page(footer: none)\n\n");
     }
 
     // Typography: read from typography_json with fallback to legacy scalar columns.
@@ -1271,15 +1300,6 @@ fn build_typst_markup(
         out.push_str(&format!("#[#metadata(none) <{}>]\n", id));
     };
 
-    // Check whether any header/footer slot uses page_number. If so, we set Typst's
-    // built-in numbering (needed by counter(page).display()). If not, we suppress
-    // it entirely so Typst doesn't add default page numbers.
-    let uses_page_numbers = SLOTS.iter().any(|k| {
-        hf_slots.get(*k)
-            .and_then(|v| v.get("content"))
-            .and_then(|v| v.as_str())
-            == Some("page_number")
-    });
     let front_numbering = if uses_page_numbers { "\"i\"" } else { "none" };
     let body_numbering = if uses_page_numbers { "\"1\"" } else { "none" };
 
@@ -1288,6 +1308,13 @@ fn build_typst_markup(
         doc.push_str(&format!("#set page(numbering: {})\n", front_numbering));
         if uses_page_numbers {
             doc.push_str("#counter(page).update(1)\n");
+        }
+        // Suppress header/footer on custom pages if configured
+        if hf_suppress_header_on_pages && has_any_header {
+            doc.push_str("#set page(header: none)\n");
+        }
+        if hf_suppress_footer_on_pages && (has_any_footer || uses_page_numbers) {
+            doc.push_str("#set page(footer: none)\n");
         }
         doc.push('\n');
 
@@ -1300,10 +1327,38 @@ fn build_typst_markup(
         }
     }
 
-    // ---- Body (chapters) ----
+    // ---- Body (chapters) — restore header/footer if suppressed on front matter ----
     doc.push_str(&format!("#set page(numbering: {})\n", body_numbering));
     if uses_page_numbers {
         doc.push_str("#counter(page).update(1)\n");
+    }
+    // Restore header if it was suppressed on front matter pages
+    if hf_suppress_header_on_pages && has_any_header {
+        doc.push_str("#set page(header: context {\n");
+        if hf_suppress {
+            doc.push_str(suppress_open);
+        }
+        emit_hf_bar(&mut doc, &hf_slots, "header", hf_header_sep, hf_sep_pt, hf_margin_left, hf_margin_right);
+        if hf_suppress {
+            doc.push_str(suppress_close);
+        }
+        doc.push_str("})\n");
+    }
+    // Restore footer if it was suppressed on front matter pages
+    if hf_suppress_footer_on_pages {
+        if has_any_footer {
+            doc.push_str("#set page(footer: context {\n");
+            if hf_suppress {
+                doc.push_str(suppress_open);
+            }
+            emit_hf_bar(&mut doc, &hf_slots, "footer", hf_footer_sep, hf_sep_pt, hf_margin_left, hf_margin_right);
+            if hf_suppress {
+                doc.push_str(suppress_close);
+            }
+            doc.push_str("})\n");
+        } else if uses_page_numbers {
+            doc.push_str("#set page(footer: none)\n");
+        }
     }
     doc.push('\n');
 
@@ -1334,9 +1389,7 @@ fn build_typst_markup(
         emit_anchor(&mut doc, &sid);
         section_ids.push(sid);
 
-        // Hidden heading for TOC/outline (suppressed visually by the show rule)
         let escaped_title = escape_typst(title);
-        doc.push_str(&format!("#heading(level: 1, outlined: true)[{}]\n", escaped_title));
 
         // Resolve which image to use for this chapter
         let ch_img_data = if img_enabled {
@@ -1376,16 +1429,20 @@ fn build_typst_markup(
         if let Some(ref path) = cover_img_path {
             if img_position == "dedicated_page" {
                 // Dedicated image page: a full-bleed page with JUST the image, no text.
-                // Width = page width, height = page height, fit: cover clips if aspect ratio differs.
-                // Heading and body text go on the NEXT page as normal.
+                // The hidden H1 heading is emitted AFTER this so it lands on the
+                // content page — this makes the TOC page number correct and lets
+                // the header/footer suppress logic detect this page as a chapter start.
                 let page_w_in = profile.trim_width_in;
                 let page_h_in = profile.trim_height_in;
                 doc.push_str(&format!(
                     "#page(margin: 0pt)[#image(\"{}\", width: {}in, height: {}in, fit: \"cover\")]\n\n",
                     path, page_w_in, page_h_in,
                 ));
+                // Hidden heading for TOC/outline — now on the content page
+                doc.push_str(&format!("#heading(level: 1, outlined: true)[{}]\n", escaped_title));
             } else {
                 // Cover heading area — image takes real space, text overlaid on top
+                doc.push_str(&format!("#heading(level: 1, outlined: true)[{}]\n", escaped_title));
                 doc.push_str(&format!(
                     "#block(width: 100%, clip: false)[\n  #align({})[#image(\"{}\", width: {}%)]\n",
                     img_align, path, img_width_pct.clamp(1.0, 200.0),
@@ -1395,6 +1452,9 @@ fn build_typst_markup(
                     doc.push_str("    #set text(fill: white)\n");
                 }
             }
+        } else {
+            // No cover image — heading on the same page as content
+            doc.push_str(&format!("#heading(level: 1, outlined: true)[{}]\n", escaped_title));
         }
 
         // Chapter sink
@@ -1536,6 +1596,19 @@ fn build_typst_markup(
     // ---- Back matter ----
     if !back_pages.is_empty() {
         doc.push_str("#pagebreak()\n\n");
+        // Switch to roman numerals for back matter page numbers
+        if uses_page_numbers {
+            doc.push_str("#set page(numbering: \"i\")\n");
+            doc.push_str("#counter(page).update(1)\n");
+        }
+        // Suppress header/footer on custom pages if configured
+        if hf_suppress_header_on_pages && has_any_header {
+            doc.push_str("#set page(header: none)\n");
+        }
+        if hf_suppress_footer_on_pages && (has_any_footer || uses_page_numbers) {
+            doc.push_str("#set page(footer: none)\n");
+        }
+        doc.push('\n');
         for page in back_pages {
             let sid = format!("iwe-fp-{}", page.id);
             emit_anchor(&mut doc, &sid);

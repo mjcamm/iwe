@@ -870,6 +870,23 @@
         ${buildHeadingsCss(headings)}
         /* Breaks category (scene break hr) */
         ${buildBreaksCss(breaks)}
+        /* Auto-generated TOC */
+        .ebook-body .ebook-toc h2 {
+          text-align: center; font-size: 1.3em; font-weight: 400;
+          margin: 1em 0 0.8em; font-family: "${bodyFont}", serif;
+        }
+        .ebook-body .ebook-toc ol {
+          list-style: none; padding: 0; margin: 0;
+        }
+        .ebook-body .ebook-toc li {
+          padding: 0.35em 0;
+          border-bottom: 1px solid rgba(0,0,0,0.06);
+          font-size: 1em;
+        }
+        .ebook-body .ebook-toc li:last-child { border-bottom: none; }
+        .ebook-body .ebook-toc a {
+          color: inherit; text-decoration: none;
+        }
         /* Custom pages — reset chapter paragraph formatting (indent, drop caps, etc.) */
         .ebook-body .ebook-page p { text-indent: 0; margin: 0 0 0.6em; hyphens: none; -webkit-hyphens: none; }
         .ebook-body .ebook-page p:empty::before { content: '\\00a0'; }
@@ -912,7 +929,11 @@
     for (const page of frontPages) {
       html += `<div id="ebook-fp-${page.id}" class="ebook-chapter-break"></div>`;
       html += `<div class="ebook-page">`;
-      html += pageToHtml(page);
+      if (page.page_role === 'toc') {
+        html += generateTocHtml();
+      } else {
+        html += pageToHtml(page);
+      }
       html += '</div>';
     }
 
@@ -932,7 +953,11 @@
     for (const page of backPages) {
       html += `<div id="ebook-fp-${page.id}" class="ebook-chapter-break"></div>`;
       html += `<div class="ebook-page">`;
-      html += pageToHtml(page);
+      if (page.page_role === 'toc') {
+        html += generateTocHtml();
+      } else {
+        html += pageToHtml(page);
+      }
       html += '</div>';
     }
 
@@ -1381,6 +1406,18 @@
     return html.replace(pattern, '<$1$2/>');
   }
 
+  // Generate an HTML table of contents from the chapter list.
+  // Used for ebook preview and EPUB export when a page has role='toc'.
+  function generateTocHtml() {
+    if (!chapters || chapters.length === 0) return '<p>No chapters</p>';
+    let html = '<nav class="ebook-toc"><h2>Contents</h2><ol>';
+    for (const ch of chapters) {
+      html += `<li><a href="#ebook-ch-${ch.id}">${escapeHtml(ch.title)}</a></li>`;
+    }
+    html += '</ol></nav>';
+    return html;
+  }
+
   // Convert a format_pages row's stored content to HTML. Content is one of:
   //   - empty string
   //   - ProseMirror JSON (stringified) from PageContentEditor — the normal case
@@ -1676,12 +1713,16 @@
       });
 
       const allPages = formatPages;
+      const epubPageContent = (p) => {
+        if (p.page_role === 'toc') return generateTocHtml();
+        return pageToHtml(p);
+      };
       const frontPages = allPages
         .filter(p => p.position === 'front')
         .map(p => ({
           title: p.title,
           role: p.page_role,
-          html: htmlToXhtml(substituteImageBreaks(`<div class="ebook-page">${pageToHtml(p)}</div>`, settings.breaks)),
+          html: htmlToXhtml(substituteImageBreaks(`<div class="ebook-page">${epubPageContent(p)}</div>`, settings.breaks)),
           position: p.position,
         }));
       const backPages = allPages
@@ -1689,7 +1730,7 @@
         .map(p => ({
           title: p.title,
           role: p.page_role,
-          html: htmlToXhtml(substituteImageBreaks(`<div class="ebook-page">${pageToHtml(p)}</div>`, settings.breaks)),
+          html: htmlToXhtml(substituteImageBreaks(`<div class="ebook-page">${epubPageContent(p)}</div>`, settings.breaks)),
           position: p.position,
         }));
 
@@ -2411,9 +2452,18 @@
     display: flex; justify-content: center;
   }
   .preview-scroll {
-    display: flex; flex-direction: column; align-items: center; gap: 1.5rem;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.5rem 4px;
     padding-bottom: 2rem;
+    justify-items: center;
   }
+  /* First page is always recto (right) — push to column 2 */
+  .preview-page-wrap:first-child { grid-column: 2; }
+  /* Verso pages (even children = left page) align toward the spine (right edge) */
+  .preview-page-wrap:nth-child(even) { justify-self: end; }
+  /* Recto pages (odd children = right page) align toward the spine (left edge) */
+  .preview-page-wrap:nth-child(odd) { justify-self: start; }
   .preview-page-wrap {
     display: flex; flex-direction: column; align-items: center; gap: 0.4rem;
   }

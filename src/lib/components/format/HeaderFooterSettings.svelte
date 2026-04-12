@@ -48,6 +48,8 @@
     return {
       slots: Object.fromEntries(SLOTS.map(k => [k, defaultSlot()])),
       suppress_on_chapter_start: true,
+      suppress_header_on_pages: true,
+      suppress_footer_on_pages: true,
       header_separator: false,
       footer_separator: false,
       separator_thickness_pt: 0.5,
@@ -71,6 +73,8 @@
         }
       }
       base.suppress_on_chapter_start = parsed.suppress_on_chapter_start ?? true;
+      base.suppress_header_on_pages = parsed.suppress_header_on_pages ?? true;
+      base.suppress_footer_on_pages = parsed.suppress_footer_on_pages ?? true;
       base.header_separator = parsed.header_separator ?? false;
       base.footer_separator = parsed.footer_separator ?? false;
       base.separator_thickness_pt = parsed.separator_thickness_pt ?? 0.5;
@@ -87,6 +91,8 @@
   // Local working copies
   let slots = $state(structuredClone(settings.slots));
   let suppressOnChapterStart = $state(settings.suppress_on_chapter_start);
+  let suppressHeaderOnPages = $state(settings.suppress_header_on_pages);
+  let suppressFooterOnPages = $state(settings.suppress_footer_on_pages);
   let headerSeparator = $state(settings.header_separator);
   let footerSeparator = $state(settings.footer_separator);
   let separatorThickness = $state(settings.separator_thickness_pt);
@@ -98,6 +104,8 @@
   $effect(() => {
     slots = structuredClone(settings.slots);
     suppressOnChapterStart = settings.suppress_on_chapter_start;
+    suppressHeaderOnPages = settings.suppress_header_on_pages;
+    suppressFooterOnPages = settings.suppress_footer_on_pages;
     headerSeparator = settings.header_separator;
     footerSeparator = settings.footer_separator;
     separatorThickness = settings.separator_thickness_pt;
@@ -134,6 +142,8 @@
     const json = JSON.stringify({
       slots,
       suppress_on_chapter_start: suppressOnChapterStart,
+      suppress_header_on_pages: suppressHeaderOnPages,
+      suppress_footer_on_pages: suppressFooterOnPages,
       header_separator: headerSeparator,
       footer_separator: footerSeparator,
       separator_thickness_pt: separatorThickness,
@@ -183,6 +193,14 @@
 
   function toggleSuppressChapter() {
     suppressOnChapterStart = !suppressOnChapterStart;
+    scheduleSave();
+  }
+  function toggleSuppressHeaderOnPages() {
+    suppressHeaderOnPages = !suppressHeaderOnPages;
+    scheduleSave();
+  }
+  function toggleSuppressFooterOnPages() {
+    suppressFooterOnPages = !suppressFooterOnPages;
     scheduleSave();
   }
   function toggleExtendNoHeader() {
@@ -335,7 +353,27 @@
       </span>
       <div class="toggle-text">
         <span class="toggle-label">Suppress on chapter openings</span>
-        <span class="toggle-hint">Hide the header on the first page of each chapter</span>
+        <span class="toggle-hint">Hide header and footer on the first page of each chapter</span>
+      </div>
+    </button>
+
+    <button class="toggle-row" onclick={toggleSuppressHeaderOnPages}>
+      <span class="toggle-switch" class:on={suppressHeaderOnPages}>
+        <span class="toggle-knob"></span>
+      </span>
+      <div class="toggle-text">
+        <span class="toggle-label">Hide header on front/back matter</span>
+        <span class="toggle-hint">No header on custom pages (title, copyright, dedication, etc.)</span>
+      </div>
+    </button>
+
+    <button class="toggle-row" onclick={toggleSuppressFooterOnPages}>
+      <span class="toggle-switch" class:on={suppressFooterOnPages}>
+        <span class="toggle-knob"></span>
+      </span>
+      <div class="toggle-text">
+        <span class="toggle-label">Hide footer on front/back matter</span>
+        <span class="toggle-hint">No footer on custom pages — page numbers use roman numerals</span>
       </div>
     </button>
 
