@@ -151,6 +151,27 @@ impl typst::World for IweWorld {
 
 // ---- Markup builder ----
 
+/// Snap a byte offset to the nearest char boundary at or before `offset`.
+/// Prevents panics when slicing UTF-8 strings at offsets that land inside
+/// multi-byte characters (e.g. en-dash U+2013 is 3 bytes).
+fn snap_to_char_boundary(text: &str, offset: usize) -> usize {
+    let mut pos = offset.min(text.len());
+    while pos > 0 && !text.is_char_boundary(pos) {
+        pos -= 1;
+    }
+    pos
+}
+
+/// Extract the primary font name from a CSS font-family value.
+/// TipTap stores full CSS fallback chains like `"Times New Roman", serif`.
+/// Typst only wants a single name like `Times New Roman`.
+fn extract_font_name(css_family: &str) -> &str {
+    // Take the first entry before any comma (discard fallback fonts)
+    let first = css_family.split(',').next().unwrap_or(css_family).trim();
+    // Strip surrounding quotes (CSS uses either " or ')
+    first.trim_matches(|c: char| c == '"' || c == '\'')
+}
+
 /// Escape text for Typst markup — backslash-escape special chars.
 fn escape_typst(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
@@ -162,6 +183,17 @@ fn escape_typst(text: &str) -> String {
             }
             _ => out.push(ch),
         }
+    }
+    // In Typst, `- `, `+ `, `/ ` at the start of a content block (even with
+    // leading whitespace) are list/term markers. Text like " - Grandmother"
+    // must have the marker character escaped so it renders as literal text.
+    // This matters because inline text nodes end up inside `[...]` content blocks.
+    let trimmed = out.trim_start();
+    if trimmed.starts_with("- ") || trimmed.starts_with("+ ") || trimmed.starts_with("/ ")
+        || trimmed.starts_with("– ") || trimmed.starts_with("— ")
+    {
+        let marker_pos = out.len() - trimmed.len();
+        out.insert(marker_pos, '\\');
     }
     out
 }
@@ -878,8 +910,8 @@ fn apply_pm_marks(text: &str, marks: Option<&serde_json::Value>) -> String {
     for mark in marks {
         let mtype = mark.get("type").and_then(|t| t.as_str()).unwrap_or("");
         match mtype {
-            "bold" | "strong" => s = format!("*{}*", s),
-            "italic" | "em" => s = format!("_{}_", s),
+            "bold" | "strong" => s = format!("#strong[{}]", s),
+            "italic" | "em" => s = format!("#emph[{}]", s),
             "underline" => s = format!("#underline[{}]", s),
             "strike" | "s" => s = format!("#strike[{}]", s),
             "textStyle" => {
@@ -887,12 +919,14 @@ fn apply_pm_marks(text: &str, marks: Option<&serde_json::Value>) -> String {
                 if let Some(size) = attrs
                     .and_then(|a| a.get("fontSize"))
                     .and_then(|f| f.as_str())
+                    .filter(|s| !s.is_empty())
                 {
                     font_size = Some(size.to_string());
                 }
                 if let Some(family) = attrs
                     .and_then(|a| a.get("fontFamily"))
                     .and_then(|f| f.as_str())
+                    .filter(|s| !s.is_empty())
                 {
                     font_family = Some(family.to_string());
                 }
@@ -904,8 +938,11 @@ fn apply_pm_marks(text: &str, marks: Option<&serde_json::Value>) -> String {
     // Build a single #text(...) call with whichever attributes were set
     if font_size.is_some() || font_family.is_some() {
         let mut args: Vec<String> = Vec::new();
-        if let Some(family) = font_family {
-            args.push(format!("font: \"{}\"", escape_typst(&family)));
+        if let Some(ref family) = font_family {
+            let name = extract_font_name(family);
+            if !name.is_empty() {
+                args.push(format!("font: \"{}\"", escape_typst(name)));
+            }
         }
         if let Some(size) = font_size {
             args.push(format!("size: {}", size));
@@ -941,17 +978,20 @@ fn render_page_content(content: &str, images: &mut ImageMap) -> String {
 /// Build a Typst markup string for a front/back matter page.
 /// If the page has rich content (PM JSON), render it directly.
 /// Otherwise apply role-based defaults using the title.
-fn build_front_matter_page(page: &FormatPage, images: &mut ImageMap) -> String {
+fn build_front_matter_page(page: &FormatPage, images: &mut ImageMap, body_font: &str, body_size_pt: f64) -> String {
     let mut out = String::new();
-    let title_escaped = escape_typst(&page.title);
     let content_typst = render_page_content(&page.content, images);
     let has_content = !content_typst.trim().is_empty();
 
     // If user has authored content, render it directly without role-based wrapping.
-    // Wrap in a content block that resets par settings — format pages should never
-    // inherit the chapter body's first-line indent.
+    // Wrap in a content block that sets the body font and resets par settings —
+    // format pages should never inherit the chapter body's first-line indent.
     if has_content {
         out.push_str("#[\n");
+        out.push_str(&format!(
+            "#set text(font: \"{}\", size: {}pt, hyphenate: false)\n",
+            escape_typst(body_font), body_size_pt,
+        ));
         out.push_str("#set par(first-line-indent: 0em, justify: false)\n");
         // Apply vertical alignment using #v(1fr) gutters
         match page.vertical_align.as_str() {
@@ -973,38 +1013,14 @@ fn build_front_matter_page(page: &FormatPage, images: &mut ImageMap) -> String {
         return out;
     }
 
-    // Empty content — apply role-based default placeholders
+    // Empty content — the page title is an internal label, not rendered.
+    // Only TOC gets auto-generated content (Typst outline).
     match page.page_role.as_str() {
-        "title" => {
-            out.push_str("#align(center + horizon)[\n");
-            out.push_str(&format!("  #text(size: 24pt, weight: \"bold\")[{}]\n", title_escaped));
-            out.push_str("]\n");
-        }
-        "copyright" => {
-            out.push_str("#set text(size: 8pt)\n");
-            out.push_str("#align(bottom)[\n");
-            out.push_str(&format!("  {}\n", title_escaped));
-            out.push_str("]\n");
-        }
-        "dedication" => {
-            out.push_str("#align(center + horizon)[\n");
-            out.push_str("#set text(style: \"italic\")\n");
-            out.push_str(&format!("  {}\n", title_escaped));
-            out.push_str("]\n");
-        }
         "toc" => {
-            // TOC is auto-generated by Typst outline
             out.push_str("#outline(title: \"Contents\", depth: 1)\n");
         }
-        "half-title" => {
-            out.push_str("#align(center + horizon)[\n");
-            out.push_str(&format!("  #text(size: 18pt)[{}]\n", title_escaped));
-            out.push_str("]\n");
-        }
         _ => {
-            out.push_str("#align(center)[\n");
-            out.push_str(&format!("  #text(size: 16pt, weight: \"bold\")[{}]\n", title_escaped));
-            out.push_str("]\n");
+            // Blank page — user designs it in PageContentEditor.
         }
     }
 
@@ -1279,7 +1295,7 @@ fn build_typst_markup(
             let sid = format!("iwe-fp-{}", page.id);
             emit_anchor(&mut doc, &sid);
             section_ids.push(sid);
-            doc.push_str(&build_front_matter_page(page, &mut images));
+            doc.push_str(&build_front_matter_page(page, &mut images, &body_font, body_size_pt));
             doc.push_str("#pagebreak()\n\n");
         }
     }
@@ -1524,7 +1540,7 @@ fn build_typst_markup(
             let sid = format!("iwe-fp-{}", page.id);
             emit_anchor(&mut doc, &sid);
             section_ids.push(sid);
-            doc.push_str(&build_front_matter_page(page, &mut images));
+            doc.push_str(&build_front_matter_page(page, &mut images, &body_font, body_size_pt));
             doc.push_str("#pagebreak()\n\n");
         }
     }
@@ -1604,6 +1620,11 @@ use std::time::Instant;
 use serde::Serialize;
 
 fn compile_document(markup: &str, images: ImageMap, cache: &FontCache, packages: Arc<PackageStorage>) -> Result<PagedDocument, String> {
+    // Always dump markup for debugging — helps diagnose rendering issues
+    // even when compilation succeeds.
+    let dump_path = std::env::temp_dir().join("iwe_typst_debug.typ");
+    let _ = std::fs::write(&dump_path, markup);
+
     let world = IweWorld::new(markup.to_string(), images, cache, packages);
     let warned = typst::compile::<PagedDocument>(&world);
     match warned.output {
@@ -1616,14 +1637,17 @@ fn compile_document(markup: &str, images: ImageMap, cache: &FontCache, packages:
                     use typst::World;
                     let source = world.source(id);
                     if let Ok(src) = source {
-                        let byte_offset: usize = src.range(diag.span).map(|r| r.start).unwrap_or(0);
+                        let raw_offset: usize = src.range(diag.span).map(|r| r.start).unwrap_or(0);
                         let text = src.text();
-                        let before = &text[..byte_offset.min(text.len())];
+                        // Snap byte offsets to char boundaries so slicing
+                        // never panics on multi-byte characters (e.g. en-dash).
+                        let byte_offset = snap_to_char_boundary(text, raw_offset);
+                        let before = &text[..byte_offset];
                         let line = before.matches('\n').count() + 1;
                         let col = before.rfind('\n').map(|p| byte_offset - p).unwrap_or(byte_offset + 1);
                         // Grab surrounding context
-                        let ctx_start = byte_offset.saturating_sub(100);
-                        let ctx_end = (byte_offset + 100).min(text.len());
+                        let ctx_start = snap_to_char_boundary(text, raw_offset.saturating_sub(100));
+                        let ctx_end = snap_to_char_boundary(text, (raw_offset + 100).min(text.len()));
                         let context = &text[ctx_start..ctx_end];
                         format!(" at line {}:{} | context: ...{}...", line, col, context.replace('\n', "\\n"))
                     } else {

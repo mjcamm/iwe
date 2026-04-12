@@ -181,7 +181,7 @@
     text-align: center;
     gap: 0.3rem;
   }
-  .notes-empty p { margin: 0; font-size: 0.85rem; }
+  .notes-empty p { margin: 0; font-size: 0.9rem; }
   .notes-empty-hint { font-size: 0.75rem; opacity: 0.7; }
 
   .notes-list {
@@ -225,15 +225,17 @@
     gap: 1px;
   }
   .note-item-text {
-    font-size: 0.9rem;
-    line-height: 1.4;
+    font-family: var(--iwe-font-prose);
+    font-size: 0.95rem;
+    line-height: 1.5;
     color: var(--iwe-text);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
   .note-item-empty {
-    font-size: 0.9rem;
+    font-family: var(--iwe-font-prose);
+    font-size: 0.95rem;
     color: var(--iwe-text-faint);
     font-style: italic;
   }
@@ -265,7 +267,7 @@
     border: none;
     cursor: pointer;
     color: var(--iwe-text-secondary);
-    font-size: 0.85rem;
+    font-size: 0.9rem;
     padding: 2px 6px;
     border-radius: 3px;
     display: flex;
@@ -277,7 +279,7 @@
     color: var(--iwe-accent);
   }
   .note-detail-title {
-    font-size: 0.8rem;
+    font-size: 0.85rem;
     font-weight: 600;
     color: var(--iwe-text);
     flex: 1;
@@ -293,13 +295,13 @@
   }
   .note-detail-textarea {
     width: 100%;
-    min-height: 90px;
-    font-size: 1rem;
+    min-height: 120px;
+    font-family: var(--iwe-font-prose);
+    font-size: 1.05rem;
     line-height: 1.6;
-    font-family: var(--iwe-font-ui);
     border: 1px solid var(--iwe-border, #e5e1da);
     border-radius: var(--iwe-radius-sm, 4px);
-    padding: 0.4rem;
+    padding: 0.55rem 0.6rem;
     resize: vertical;
     outline: none;
     background: var(--iwe-bg);
@@ -319,7 +321,7 @@
   .note-action-btn {
     background: var(--iwe-bg-hover, #f5f3f0);
     border: 1px solid var(--iwe-border, #e5e1da);
-    font-size: 0.8rem;
+    font-size: 0.85rem;
     color: var(--iwe-text-secondary);
     cursor: pointer;
     padding: 6px 12px;

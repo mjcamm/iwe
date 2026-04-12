@@ -20,6 +20,7 @@
   let typewriterMode = $state(false);
   let backupInterval = $state(60);
   let formatUnit = $state('in');
+  let uiScale = $state('1');
 
   // Navigation
   let activeView = $state('projects');
@@ -88,6 +89,10 @@
     if (settings.formatLengthUnit) {
       formatUnit = settings.formatLengthUnit;
     }
+    if (settings.uiScale != null) {
+      // Stored as a number but the <select> needs a string for option matching.
+      uiScale = String(settings.uiScale);
+    }
     loading = false;
 
     // Refresh project list when an import completes
@@ -147,6 +152,18 @@
     const settings = await getSettings();
     settings.semanticIndexDelay = semanticIndexDelay;
     await saveSettings(settings);
+  }
+
+  async function handleUiScaleChange(e) {
+    uiScale = e.target.value;
+    const numeric = parseFloat(uiScale) || 1;
+    const settings = await getSettings();
+    settings.uiScale = numeric;
+    await saveSettings(settings);
+    // Apply immediately to this window — everything downstream uses rem so
+    // setting the root font-size reflows the interface instantly. Other open
+    // windows pick it up the next time their +layout.svelte mounts.
+    document.documentElement.style.fontSize = (14 * numeric) + 'px';
   }
 
   async function pickFolder() {
@@ -315,6 +332,22 @@
                 <option value="en_GB">English (UK)</option>
               </select>
             </div>
+          </div>
+
+          <div class="settings-section">
+            <h3 class="settings-heading">Interface</h3>
+            <div class="settings-row">
+              <label class="settings-label">Text size</label>
+              <select class="settings-select" value={uiScale} onchange={handleUiScaleChange}>
+                <option value="0.85">Smaller</option>
+                <option value="0.95">Small</option>
+                <option value="1">Normal</option>
+                <option value="1.1">Large</option>
+                <option value="1.25">Larger</option>
+                <option value="1.4">Extra Large</option>
+              </select>
+            </div>
+            <p class="settings-hint">Scales the entire interface — sidebars, menus, panels, and the editor — relative to the default. Applies instantly to this window; other open windows update next time they load.</p>
           </div>
 
           <div class="settings-section">

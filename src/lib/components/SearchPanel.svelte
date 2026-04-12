@@ -731,7 +731,7 @@
   .tool-selector-btn {
     display: flex; align-items: center; gap: 0.4rem;
     width: 100%; padding: 0.5rem 0.75rem;
-    font-family: var(--iwe-font-ui); font-size: 0.8rem; font-weight: 500;
+    font-family: var(--iwe-font-ui); font-size: 0.85rem; font-weight: 500;
     background: none; border: none; color: var(--iwe-text);
     cursor: pointer; transition: background 100ms;
   }
@@ -760,7 +760,7 @@
   .tool-option {
     display: flex; align-items: center; gap: 0.4rem;
     width: 100%; padding: 0.4rem 0.75rem 0.4rem 1.1rem;
-    font-family: var(--iwe-font-ui); font-size: 0.8rem;
+    font-family: var(--iwe-font-ui); font-size: 0.85rem;
     background: none; border: none; color: var(--iwe-text-secondary);
     cursor: pointer; text-align: left; transition: all 100ms;
   }
@@ -779,7 +779,7 @@
     display: flex; gap: 0.3rem;
   }
   .search-input {
-    flex: 1; font-family: var(--iwe-font-ui); font-size: 0.85rem;
+    flex: 1; font-family: var(--iwe-font-ui); font-size: 0.9rem;
     padding: 0.4rem 0.6rem; border: 1px solid var(--iwe-border);
     border-radius: var(--iwe-radius-sm); background: var(--iwe-bg);
     color: var(--iwe-text); outline: none;
@@ -815,7 +815,7 @@
     text-transform: uppercase; letter-spacing: 0.04em;
   }
   .search-select {
-    font-family: var(--iwe-font-ui); font-size: 0.85rem;
+    font-family: var(--iwe-font-ui); font-size: 0.9rem;
     padding: 0.35rem 0.5rem; border: 1px solid var(--iwe-border);
     border-radius: var(--iwe-radius-sm); background: var(--iwe-bg);
     color: var(--iwe-text); outline: none;
@@ -843,7 +843,7 @@
   }
 
   .search-run-btn {
-    font-family: var(--iwe-font-ui); font-size: 0.85rem; font-weight: 500;
+    font-family: var(--iwe-font-ui); font-size: 0.9rem; font-weight: 500;
     padding: 0.45rem 0.75rem; border: none;
     border-radius: var(--iwe-radius-sm); cursor: pointer;
     background: var(--iwe-accent); color: white;
@@ -857,7 +857,7 @@
   .search-results { flex: 1; overflow-y: auto; }
   .search-empty {
     padding: 2rem 1rem; text-align: center;
-    font-size: 0.85rem; color: var(--iwe-text-faint); font-style: italic;
+    font-size: 0.9rem; color: var(--iwe-text-faint); font-style: italic;
   }
   .search-result-count {
     padding: 0.4rem 0.75rem; font-size: 0.7rem; color: var(--iwe-text-faint);
@@ -905,7 +905,7 @@
     margin-bottom: 0.25rem;
   }
   .slab-text {
-    font-family: var(--iwe-font-prose); font-size: 0.85rem;
+    font-family: var(--iwe-font-prose); font-size: 0.9rem;
     color: var(--iwe-text-secondary); line-height: 1.7;
   }
 
@@ -931,55 +931,55 @@
   /* Helper boxes */
   .search-helper {
     background: var(--iwe-accent-light); border: 1px solid var(--iwe-border-light);
-    border-radius: var(--iwe-radius-sm); padding: 0.5rem 0.65rem;
-    font-size: 0.75rem; color: var(--iwe-text-secondary); line-height: 1.5;
+    border-radius: var(--iwe-radius-sm); padding: 0.6rem 0.75rem;
+    font-size: 0.85rem; color: var(--iwe-text-secondary); line-height: 1.55;
   }
   .helper-title {
     font-weight: 600; color: var(--iwe-accent); margin-bottom: 0.3rem;
-    display: flex; align-items: center; gap: 0.3rem; font-size: 0.7rem;
+    display: flex; align-items: center; gap: 0.35rem; font-size: 0.85rem;
   }
   .search-helper p { margin: 0 0 0.3rem; }
   .helper-examples {
-    display: grid; grid-template-columns: auto 1fr; gap: 0.15rem 0.5rem;
-    margin-top: 0.2rem;
+    display: grid; grid-template-columns: auto 1fr; gap: 0.2rem 0.55rem;
+    margin-top: 0.25rem;
   }
   .helper-examples code {
-    font-family: monospace; font-size: 0.7rem; font-weight: 600;
+    font-family: monospace; font-size: 0.85rem; font-weight: 600;
     color: var(--iwe-accent); background: var(--iwe-bg);
     padding: 0.1rem 0.3rem; border-radius: 2px;
   }
-  .helper-examples span { font-size: 0.7rem; color: var(--iwe-text-faint); }
+  .helper-examples span { font-size: 0.85rem; color: var(--iwe-text-faint); }
   .helper-list {
-    margin: 0.2rem 0 0.3rem; padding-left: 1.2rem;
-    font-size: 0.75rem;
+    margin: 0.25rem 0 0.35rem; padding-left: 1.2rem;
+    font-size: 0.85rem;
   }
-  .helper-list li { margin-bottom: 0.15rem; }
+  .helper-list li { margin-bottom: 0.2rem; }
   .helper-note {
-    font-size: 0.65rem; color: var(--iwe-text-faint); font-style: italic;
+    font-size: 0.8rem; color: var(--iwe-text-faint); font-style: italic;
     margin: 0;
   }
 
   /* POS tag hint */
   .pos-hint {
     background: var(--iwe-bg-hover); border: 1px solid var(--iwe-border-light);
-    border-radius: var(--iwe-radius-sm); padding: 0.45rem 0.6rem;
-    font-size: 0.7rem; color: var(--iwe-text-secondary); line-height: 1.5;
+    border-radius: var(--iwe-radius-sm); padding: 0.6rem 0.75rem;
+    font-size: 0.85rem; color: var(--iwe-text-secondary); line-height: 1.55;
   }
-  .pos-hint p { margin: 0 0 0.25rem; }
+  .pos-hint p { margin: 0 0 0.3rem; }
   .pos-hint-title {
-    font-weight: 600; color: var(--iwe-text-muted); margin-bottom: 0.2rem;
-    display: flex; align-items: center; gap: 0.3rem; font-size: 0.65rem;
+    font-weight: 600; color: var(--iwe-text-muted); margin-bottom: 0.3rem;
+    display: flex; align-items: center; gap: 0.35rem; font-size: 0.85rem;
   }
   .pos-examples {
-    display: flex; flex-wrap: wrap; gap: 0.3rem; margin-top: 0.2rem;
+    display: flex; flex-wrap: wrap; gap: 0.35rem; margin-top: 0.3rem;
   }
   .pos-examples code {
-    font-family: monospace; font-size: 0.7rem;
-    background: var(--iwe-bg); padding: 0.15rem 0.35rem;
+    font-family: monospace; font-size: 0.85rem;
+    background: var(--iwe-bg); padding: 0.15rem 0.4rem;
     border-radius: 3px; border: 1px solid var(--iwe-border-light);
     color: var(--iwe-text-secondary);
   }
-  .pos-eg-label { font-size: 0.65rem; color: var(--iwe-text-faint); align-self: center; }
+  .pos-eg-label { font-size: 0.8rem; color: var(--iwe-text-faint); align-self: center; }
 
   .dialogue-info {
     font-size: 0.7rem; color: var(--iwe-text-faint);

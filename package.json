@@ -9,7 +9,8 @@
 		"preview": "vite preview",
 		"prepare": "svelte-kit sync || echo ''",
 		"tauri": "tauri",
-		"tauri:full": "tauri dev --features semantic,format"
+		"tauri:full": "tauri dev --features semantic,format",
+		"tauri:build": "tauri build --features semantic,format"
 	},
 	"devDependencies": {
 		"@sveltejs/adapter-auto": "^7.0.0",
@@ -22,8 +23,8 @@
 	},
 	"dependencies": {
 		"@tauri-apps/api": "^2.10.1",
-		"@tauri-apps/plugin-dialog": "^2.6.0",
-		"@tauri-apps/plugin-fs": "^2.4.5",
+		"@tauri-apps/plugin-dialog": "^2.7.0",
+		"@tauri-apps/plugin-fs": "^2.5.0",
 		"@tauri-apps/plugin-opener": "^2.5.3",
 		"@tiptap/core": "^3.21.0",
 		"@tiptap/extension-font-family": "^3.21.0",

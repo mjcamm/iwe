@@ -1354,8 +1354,18 @@ pub fn run() {
                 let index_str = rest.trim_end_matches(".svg");
                 if let Ok(page_index) = index_str.parse::<usize>() {
                     let format_state = ctx.app_handle().state::<format::FormatState>();
-                    match format::render_page_svg(format_state.inner(), page_index) {
-                        Ok(svg) => {
+
+                    // Wrap in catch_unwind: typst_svg::svg() can panic on
+                    // certain content (font issues, edge-case glyphs, etc.).
+                    // Since this callback runs inside a webview2 COM handler
+                    // that is extern "C", an unwinding panic would abort the
+                    // entire process. Catching it lets us return a 500 instead.
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        format::render_page_svg(format_state.inner(), page_index)
+                    }));
+
+                    match result {
+                        Ok(Ok(svg)) => {
                             return tauri::http::Response::builder()
                                 .status(200)
                                 .header("Content-Type", "image/svg+xml")
@@ -1363,12 +1373,22 @@ pub fn run() {
                                 .body(svg.into_bytes())
                                 .unwrap();
                         }
-                        Err(e) => {
+                        Ok(Err(e)) => {
+                            eprintln!("[iwe://] render error for page {}: {}", page_index, e);
                             return tauri::http::Response::builder()
-                                .status(404)
+                                .status(500)
                                 .header("Content-Type", "text/plain")
                                 .header("Access-Control-Allow-Origin", "*")
                                 .body(e.into_bytes())
+                                .unwrap();
+                        }
+                        Err(_panic) => {
+                            eprintln!("[iwe://] PANIC in render_page_svg for page {}", page_index);
+                            return tauri::http::Response::builder()
+                                .status(500)
+                                .header("Content-Type", "text/plain")
+                                .header("Access-Control-Allow-Origin", "*")
+                                .body(b"Internal error: page render panicked".to_vec())
                                 .unwrap();
                         }
                     }

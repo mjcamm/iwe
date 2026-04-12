@@ -144,6 +144,20 @@
       onTransaction: () => {
         editorState = { editor };
       },
+      // Strip all formatting on paste — users bring raw text in and style it
+      // here using the toolbar. This prevents CSS font-family stacks, inline
+      // styles, and other source-app formatting from leaking into the Typst
+      // markup builder.
+      editorProps: {
+        handlePaste(view, event) {
+          const plain = event.clipboardData?.getData('text/plain');
+          if (plain) {
+            editor.commands.insertContent(plain);
+            return true;
+          }
+          return false;
+        },
+      },
     });
     editorState = { editor };
   });

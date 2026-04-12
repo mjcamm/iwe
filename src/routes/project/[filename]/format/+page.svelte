@@ -668,6 +668,9 @@
 
     const rules = [
       `.ebook-body p { margin: 0 0 ${spacing}; text-indent: ${indent}; }`,
+      // Empty paragraphs (blank lines from pressing Enter) collapse to zero
+      // height in HTML. Inject a non-breaking space so they occupy one line.
+      `.ebook-body p:empty::before { content: '\\00a0'; }`,
       // First paragraph after a chapter heading or scene break loses its indent.
       `.ebook-body .ebook-chapter-heading + p { text-indent: 0; }`,
       `.ebook-body hr + p { text-indent: 0; }`,
@@ -866,7 +869,11 @@
         /* Headings category (h2/h3/h4) */
         ${buildHeadingsCss(headings)}
         /* Breaks category (scene break hr) */
-        ${buildBreaksCss(breaks)}${previewOnly}
+        ${buildBreaksCss(breaks)}
+        /* Custom pages — reset chapter paragraph formatting (indent, drop caps, etc.) */
+        .ebook-body .ebook-page p { text-indent: 0; margin: 0 0 0.6em; hyphens: none; -webkit-hyphens: none; }
+        .ebook-body .ebook-page p:empty::before { content: '\\00a0'; }
+        .ebook-body .ebook-page p::first-letter { float: none; font-size: inherit; line-height: inherit; margin: 0; padding: 0; }${previewOnly}
     `;
 
     return inline ? `<style>${css}</style>` : css;
@@ -904,8 +911,9 @@
       .sort((a, b) => a.sort_order - b.sort_order);
     for (const page of frontPages) {
       html += `<div id="ebook-fp-${page.id}" class="ebook-chapter-break"></div>`;
-      html += `<h1>${escapeHtml(page.title)}</h1>`;
+      html += `<div class="ebook-page">`;
       html += pageToHtml(page);
+      html += '</div>';
     }
 
     // Chapters
@@ -923,8 +931,9 @@
       .sort((a, b) => a.sort_order - b.sort_order);
     for (const page of backPages) {
       html += `<div id="ebook-fp-${page.id}" class="ebook-chapter-break"></div>`;
-      html += `<h1>${escapeHtml(page.title)}</h1>`;
+      html += `<div class="ebook-page">`;
       html += pageToHtml(page);
+      html += '</div>';
     }
 
     html += '</div>';
@@ -1672,7 +1681,7 @@
         .map(p => ({
           title: p.title,
           role: p.page_role,
-          html: htmlToXhtml(substituteImageBreaks(pageToHtml(p), settings.breaks)),
+          html: htmlToXhtml(substituteImageBreaks(`<div class="ebook-page">${pageToHtml(p)}</div>`, settings.breaks)),
           position: p.position,
         }));
       const backPages = allPages
@@ -1680,7 +1689,7 @@
         .map(p => ({
           title: p.title,
           role: p.page_role,
-          html: htmlToXhtml(substituteImageBreaks(pageToHtml(p), settings.breaks)),
+          html: htmlToXhtml(substituteImageBreaks(`<div class="ebook-page">${pageToHtml(p)}</div>`, settings.breaks)),
           position: p.position,
         }));
 

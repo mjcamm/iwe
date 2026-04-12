@@ -148,25 +148,25 @@
   .footer-left { display: flex; align-items: center; gap: 0.4rem; }
   .footer-right { display: flex; align-items: center; gap: 0.5rem; }
   .delete-confirm-text {
-    font-family: var(--iwe-font-ui); font-size: 0.8rem;
+    font-family: var(--iwe-font-ui); font-size: 0.9rem;
     color: #c0392b; margin-right: 0.3rem;
   }
 
-  .field { display: flex; flex-direction: column; gap: 0.3rem; }
+  .field { display: flex; flex-direction: column; gap: 0.35rem; }
   .field-label {
-    font-family: var(--iwe-font-ui); font-size: 0.72rem;
+    font-family: var(--iwe-font-ui); font-size: 0.8rem;
     color: var(--iwe-text-muted); text-transform: uppercase;
     letter-spacing: 0.04em; font-weight: 600;
   }
   .field-input {
-    padding: 0.5rem 0.7rem;
-    font-family: var(--iwe-font-ui); font-size: 0.9rem;
+    padding: 0.55rem 0.75rem;
+    font-family: var(--iwe-font-ui); font-size: 1rem;
     border: 1px solid var(--iwe-border); border-radius: var(--iwe-radius-sm);
     background: var(--iwe-bg); color: var(--iwe-text);
   }
   .field-input:focus { outline: none; border-color: var(--iwe-accent); }
   .field-hint {
-    font-family: var(--iwe-font-ui); font-size: 0.68rem;
+    font-family: var(--iwe-font-ui); font-size: 0.8rem;
     color: var(--iwe-text-muted); font-style: italic;
     font-weight: 400; text-transform: none;
   }
@@ -174,8 +174,8 @@
 
   .upload-btn {
     display: flex; align-items: center; justify-content: center; gap: 0.4rem;
-    padding: 0.7rem;
-    font-family: var(--iwe-font-ui); font-size: 0.82rem;
+    padding: 0.75rem;
+    font-family: var(--iwe-font-ui); font-size: 0.9rem;
     color: var(--iwe-text-muted);
     background: var(--iwe-bg-warm);
     border: 1px dashed var(--iwe-border); border-radius: var(--iwe-radius-sm);
@@ -197,8 +197,8 @@
   }
   .ornament-actions { display: flex; gap: 0.4rem; }
   .orn-btn {
-    flex: 1; padding: 0.3rem 0.5rem;
-    font-family: var(--iwe-font-ui); font-size: 0.72rem;
+    flex: 1; padding: 0.4rem 0.6rem;
+    font-family: var(--iwe-font-ui); font-size: 0.82rem;
     background: var(--iwe-bg); border: 1px solid var(--iwe-border);
     border-radius: var(--iwe-radius-sm);
     color: var(--iwe-text); cursor: pointer; transition: all 100ms;
@@ -207,8 +207,8 @@
   .orn-btn.danger:hover { border-color: #c0392b; color: #c0392b; }
 
   .btn {
-    padding: 0.45rem 1rem;
-    font-family: var(--iwe-font-ui); font-size: 0.82rem;
+    padding: 0.5rem 1.1rem;
+    font-family: var(--iwe-font-ui); font-size: 0.9rem;
     border: 1px solid var(--iwe-border); border-radius: var(--iwe-radius-sm);
     background: var(--iwe-bg); color: var(--iwe-text);
     cursor: pointer; transition: all 100ms;

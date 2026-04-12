@@ -43,13 +43,19 @@
   box-sizing: border-box;
 }
 
+/* Base font-size lives on <html> only. `rem` units throughout the app scale
+   from this root, and <body> inherits so `em`-sized descendants also track it.
+   The user's UI scale setting (settings.json → uiScale) is applied by
+   +layout.svelte as an inline style on <html>, which wins over this default. */
+html {
+  font-size: 14px;
+}
 html, body {
   margin: 0;
   padding: 0;
   background: var(--iwe-bg);
   color: var(--iwe-text);
   font-family: var(--iwe-font-ui);
-  font-size: 14px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
   overflow: hidden;
