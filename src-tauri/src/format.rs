@@ -1378,10 +1378,10 @@ fn build_typst_markup(
         // Page break / start behavior
         if i > 0 {
             let start_on = ch_head.get("start_on").and_then(|v| v.as_str()).unwrap_or("any");
-            if start_on == "recto" {
-                doc.push_str("#pagebreak(to: \"odd\")\n\n");
-            } else {
-                doc.push_str("#pagebreak()\n\n");
+            match start_on {
+                "recto" => doc.push_str("#pagebreak(to: \"odd\")\n\n"),
+                "verso" => doc.push_str("#pagebreak(to: \"even\")\n\n"),
+                _ => doc.push_str("#pagebreak()\n\n"),
             }
         }
 

@@ -32,6 +32,7 @@
   const START_OPTIONS = [
     { id: 'any', label: 'Any page' },
     { id: 'recto', label: 'Right page (recto) only' },
+    { id: 'verso', label: 'Left page (verso) only' },
   ];
 
   function defaults() {
