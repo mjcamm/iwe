@@ -8,7 +8,7 @@ use crate::db::{self, AppState, FormatPage, FormatProfile};
 use crate::ydoc;
 
 use std::sync::Arc;
-use typst::diag::{FileError, FileResult, SourceResult};
+use typst::diag::{FileError, FileResult};
 use typst::foundations::{Bytes, Datetime};
 use typst::layout::PagedDocument;
 use typst::syntax::{FileId, Source};
@@ -523,7 +523,6 @@ fn apply_small_caps_lead(text: &str, word_count: i32) -> String {
         return escape_typst(text);
     }
 
-    let mut words: Vec<&str> = Vec::new();
     let mut rest_start = 0;
     let mut in_word = false;
     let mut count = 0;
@@ -1337,7 +1336,6 @@ fn build_typst_markup(
         };
 
         // Helper: emit the chapter image at a given position
-        let mut img_emitted = false;
         let emit_img = |doc: &mut String, images: &mut ImageMap, pos: &str| -> bool {
             if ch_img_data.is_empty() || img_position != pos {
                 return false;

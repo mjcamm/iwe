@@ -1,5 +1,5 @@
 <script>
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { beforeNavigate } from '$app/navigation';
   import { getSettings, saveSettings, getChapters, getChapter, addChapter, updateChapterContent, renameChapter, deleteChapter, getEntities, createEntity, updateEntity, deleteEntity, setEntityVisible, addAlias, removeAlias, scanAllChapters, getNavHistory, pushNavEntry, truncateNavAfter, addEntityNote, logWritingActivity, setSpellLanguage, getAllChapterWordCounts, getChapterComments, addComment, updateComment, deleteComment, addStateMarker, deleteStateMarker, getStateMarker, getChapterDialogue, extractDialogueInText, getChapterPlanningNotes as fetchChapterPlanningNotes, markChapterDirty, runSemanticIndexing, setBackupInterval } from '$lib/db.js';
   import ChapterNav from '$lib/components/ChapterNav.svelte';
@@ -247,6 +247,16 @@
       handleGoToChapter(p.chapterId, p.searchText, p.charPosition || 0);
     });
 
+    // Ctrl/Cmd+F → open Search panel and focus the Text Search input.
+    window.addEventListener('keydown', async (event) => {
+      if ((event.ctrlKey || event.metaKey) && (event.key === 'f' || event.key === 'F')) {
+        event.preventDefault();
+        rightPanelTab = 'search';
+        await tick();
+        searchPanelRef?.focusTextSearch();
+      }
+    });
+
     // Listen for semantic indexing events
     listen('semantic-index-started', () => { semanticIndexing = true; semanticIndexChapter = ''; semanticCountdown = 0; clearInterval(semanticCountdownTimer); clearTimeout(semanticTimer); });
     listen('semantic-index-progress', (e) => { semanticIndexing = true; semanticIndexChapter = e.payload?.chapter || ''; });
@@ -317,6 +327,7 @@
   let cursorPos = $state(0);
   let cursorMoveTimer = null;
   let rightPanelTab = $state('entities'); // 'entities' | 'search' | 'analysis' | 'notes'
+  let searchPanelRef = $state(null);
   let chapterComments = $state([]); // comments from DB for current chapter
   let resolvedComments = $state([]); // comments with positions from editor
   let chapterPlanningNotes = $state([]); // planning notes for current chapter
@@ -1003,6 +1014,7 @@
         />
       {:else if rightPanelTab === 'search'}
         <SearchPanel
+          bind:this={searchPanelRef}
           {entities}
           ongotochapter={handleGoToChapter}
         />

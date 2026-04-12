@@ -141,42 +141,6 @@ fn find_any_closing_quote(chars: &[char], start: usize, closers: &[char]) -> Opt
     None
 }
 
-/// Find the closing quote, handling the special case where open == close (straight quotes).
-fn find_closing_quote(chars: &[char], start: usize, close: char, open: char) -> Option<usize> {
-    let len = chars.len();
-    let mut j = start;
-
-    // For straight double quotes where open == close, we need heuristics
-    if open == close {
-        // Look for the next occurrence of the same character
-        while j < len {
-            if chars[j] == close {
-                return Some(j);
-            }
-            // Don't span across more than ~2000 chars (safety limit for runaway quotes)
-            if j - start > 2000 {
-                return None;
-            }
-            j += 1;
-        }
-        return None;
-    }
-
-    // For distinct open/close pairs, simple scan
-    while j < len {
-        if chars[j] == close {
-            return Some(j);
-        }
-        // Don't span across more than ~2000 chars
-        if j - start > 2000 {
-            return None;
-        }
-        j += 1;
-    }
-
-    None
-}
-
 /// Check if a single curly opening quote is likely an apostrophe rather than dialogue.
 /// Apostrophes appear mid-word (e.g. don't, it's, 'twas) or after a letter.
 fn is_likely_apostrophe(chars: &[char], pos: usize) -> bool {

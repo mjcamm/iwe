@@ -500,7 +500,6 @@ pub fn generate_heatmap(
 
     for (ch_idx, chapter) in chapters.iter().enumerate() {
         let plain = chapter_plain_text(chapter)?;
-        let chars: Vec<char> = plain.chars().collect();
 
         // Split into sentences using shared extractor
         let extracted = text_utils::extract_sentences(&plain);

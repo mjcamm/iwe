@@ -624,7 +624,6 @@ pub fn relationship_search(
     let terms_b = build_terms_all(&[entity_b.clone()]);
 
     let mut results = Vec::new();
-    let context_padding: usize = 80;
 
     for chapter in &chapters {
         let plain = chapter_plain_text(chapter)?;

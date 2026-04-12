@@ -37,12 +37,6 @@ static EN_GB_AFF: &str = include_str!("../resources/dictionaries/en_GB-large.aff
 static EN_GB_DIC: &str = include_str!("../resources/dictionaries/en_GB-large.dic");
 
 #[derive(Serialize)]
-pub struct SpellResult {
-    pub word: String,
-    pub suggestions: Vec<String>,
-}
-
-#[derive(Serialize)]
 pub struct CustomWord {
     pub id: i64,
     pub word: String,

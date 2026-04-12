@@ -55,12 +55,6 @@ pub struct WordGroupDetail {
     pub entries: Vec<WordEntry>,
 }
 
-#[derive(Serialize)]
-pub struct PaletteDetail {
-    pub palette: Palette,
-    pub groups: Vec<WordGroup>,
-}
-
 // ---- Init & Schema ----
 
 pub fn init_palette_db(path: &str) -> rusqlite::Result<Connection> {

@@ -582,11 +582,6 @@ pub fn get_chapter(conn: &Connection, id: i64) -> rusqlite::Result<Option<Chapte
     }
 }
 
-pub fn soft_delete_chapter(conn: &Connection, id: i64) -> rusqlite::Result<()> {
-    conn.execute("UPDATE chapters SET deleted = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?1", params![id])?;
-    Ok(())
-}
-
 pub fn restore_chapter(conn: &Connection, id: i64) -> rusqlite::Result<()> {
     conn.execute("UPDATE chapters SET deleted = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?1", params![id])?;
     Ok(())
@@ -1250,11 +1245,6 @@ pub fn truncate_nav_after(conn: &Connection, id: i64) -> rusqlite::Result<()> {
     Ok(())
 }
 
-pub fn clear_nav_history(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute("DELETE FROM nav_history", [])?;
-    Ok(())
-}
-
 // ---- Comments / notes ----
 
 #[derive(Serialize, Clone)]
@@ -1764,23 +1754,6 @@ pub fn reorder_kanban_columns(conn: &Connection, ids: &[i64]) -> rusqlite::Resul
         )?;
     }
     Ok(())
-}
-
-pub fn get_kanban_cards(conn: &Connection, column_id: i64) -> rusqlite::Result<Vec<KanbanCard>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, column_id, title, description, sort_order, created_at FROM kanban_cards WHERE column_id = ?1 ORDER BY sort_order ASC"
-    )?;
-    let rows = stmt.query_map(params![column_id], |row| {
-        Ok(KanbanCard {
-            id: row.get(0)?,
-            column_id: row.get(1)?,
-            title: row.get(2)?,
-            description: row.get(3)?,
-            sort_order: row.get(4)?,
-            created_at: row.get(5)?,
-        })
-    })?;
-    rows.collect()
 }
 
 pub fn get_all_kanban_cards(conn: &Connection) -> rusqlite::Result<Vec<KanbanCard>> {

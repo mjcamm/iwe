@@ -1,4 +1,4 @@
-use yrs::{Doc, GetString, ReadTxn, Transact, Update, StateVector, XmlFragment};
+use yrs::{Doc, GetString, ReadTxn, Transact, Update, XmlFragment};
 use yrs::types::xml::{XmlFragmentRef, XmlOut, Xml};
 use yrs::updates::decoder::Decode;
 
@@ -13,12 +13,6 @@ pub fn load_doc(state_bytes: &[u8]) -> Result<Doc, String> {
             .map_err(|e| format!("Failed to apply Y.Doc update: {:?}", e))?;
     }
     Ok(doc)
-}
-
-/// Encode full Y.Doc state to bytes for storage.
-pub fn encode_doc(doc: &Doc) -> Vec<u8> {
-    let txn = doc.transact();
-    txn.encode_state_as_update_v1(&StateVector::default())
 }
 
 /// Extract plain text from Y.Doc's prosemirror XmlFragment.
@@ -54,14 +48,6 @@ pub fn extract_text_with_breaks(doc: &Doc) -> String {
             text
         }
         None => String::new(),
-    }
-}
-
-/// Extract text with paragraph breaks from raw Y.Doc state bytes.
-pub fn extract_text_with_breaks_from_bytes(state_bytes: &[u8]) -> String {
-    match load_doc(state_bytes) {
-        Ok(doc) => extract_text_with_breaks(&doc),
-        Err(_) => String::new(),
     }
 }
 

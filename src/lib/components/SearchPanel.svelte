@@ -1,5 +1,5 @@
 <script>
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { relationshipSearch, textSearch, dialogueSearch, semanticSearch, rebuildSemanticIndex, getSemanticIndexStatus } from '$lib/db.js';
   import { listen } from '@tauri-apps/api/event';
 
@@ -7,6 +7,17 @@
 
   let subTab = $state('text'); // 'text' | 'dialogue' | 'relationship' | 'semantic'
   let selectorOpen = $state(false);
+  let textSearchInput = $state(null);
+
+  // Called by the parent when the user presses Ctrl/Cmd+F. Switches to the Text
+  // Search sub-tab, focuses the query input, and selects any existing text so
+  // the user can immediately type over it.
+  export async function focusTextSearch() {
+    subTab = 'text';
+    await tick();
+    textSearchInput?.focus();
+    textSearchInput?.select();
+  }
 
   const searchTools = [
     { group: 'Search', items: [
@@ -321,6 +332,7 @@
       <div class="search-input-row">
         <input
           class="search-input"
+          bind:this={textSearchInput}
           bind:value={textQuery}
           onkeydown={handleTextKeydown}
           placeholder="Search manuscript..."
