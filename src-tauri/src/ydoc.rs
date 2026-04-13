@@ -1,6 +1,41 @@
-use yrs::{Doc, GetString, ReadTxn, Transact, Update, XmlFragment};
+use yrs::{Any, Doc, GetString, Out, ReadTxn, Text, Transact, Update, XmlFragment, XmlTextRef};
+use yrs::types::text::{Diff, YChange};
 use yrs::types::xml::{XmlFragmentRef, XmlOut, Xml};
 use yrs::updates::decoder::Decode;
+use std::sync::Arc;
+
+// ---- Formatted chapter block extraction ----
+
+/// A formatted text span: text content + inline marks.
+#[derive(Debug, Clone)]
+pub struct FmtSpan {
+    pub text: String,
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub strike: bool,
+    pub superscript: bool,
+    pub subscript: bool,
+    pub font_size: Option<String>,
+    pub font_family: Option<String>,
+}
+
+impl FmtSpan {
+    fn plain(text: String) -> Self {
+        FmtSpan {
+            text, bold: false, italic: false, underline: false,
+            strike: false, superscript: false, subscript: false,
+            font_size: None, font_family: None,
+        }
+    }
+}
+
+/// A block-level element extracted from a chapter Y.Doc.
+#[derive(Debug, Clone)]
+pub enum ChapterBlock {
+    Paragraph(Vec<FmtSpan>),
+    SceneBreak,
+}
 
 /// Load a Y.Doc from encoded state bytes (from SQLite BLOB).
 pub fn load_doc(state_bytes: &[u8]) -> Result<Doc, String> {
@@ -107,6 +142,153 @@ fn walk_xml_out<T: ReadTxn>(txn: &T, node: &XmlOut, out: &mut String) {
         XmlOut::Fragment(frag) => {
             walk_fragment(txn, frag, out);
         }
+    }
+}
+
+// ---- Formatted chapter block extraction ----
+
+/// Extract chapter content as structured blocks with inline formatting preserved.
+/// Uses yrs `diff()` API to read formatting attributes from XmlText nodes.
+pub fn extract_chapter_blocks_from_bytes(state_bytes: &[u8]) -> Vec<ChapterBlock> {
+    match load_doc(state_bytes) {
+        Ok(doc) => extract_chapter_blocks(&doc),
+        Err(_) => vec![],
+    }
+}
+
+fn extract_chapter_blocks(doc: &Doc) -> Vec<ChapterBlock> {
+    let txn = doc.transact();
+    let fragment = match txn.get_xml_fragment("prosemirror") {
+        Some(f) => f,
+        None => return vec![],
+    };
+    let mut blocks = Vec::new();
+    for child in fragment.children(&txn) {
+        collect_blocks_from_node(&txn, &child, &mut blocks);
+    }
+    blocks
+}
+
+/// Recursively collect ChapterBlocks from an XmlOut node.
+fn collect_blocks_from_node<T: ReadTxn>(txn: &T, node: &XmlOut, blocks: &mut Vec<ChapterBlock>) {
+    match node {
+        XmlOut::Element(el) => {
+            let tag = el.tag();
+            match tag.as_ref() {
+                "horizontalRule" => {
+                    blocks.push(ChapterBlock::SceneBreak);
+                }
+                "paragraph" => {
+                    let spans = extract_spans_from_element(txn, el);
+                    blocks.push(ChapterBlock::Paragraph(spans));
+                }
+                // timeBreak is a wrapping node — recurse into its children
+                "timeBreak" => {
+                    for inner in el.children(txn) {
+                        collect_blocks_from_node(txn, &inner, blocks);
+                    }
+                }
+                // Skip editor-only atom nodes
+                "noteMarker" | "stateMarker" => {}
+                // Unknown block elements — recurse looking for paragraphs
+                _ => {
+                    for inner in el.children(txn) {
+                        collect_blocks_from_node(txn, &inner, blocks);
+                    }
+                }
+            }
+        }
+        XmlOut::Text(txt) => {
+            // Direct XmlText child of fragment (unusual but defensive)
+            let spans = extract_spans_from_xmltext(txn, txt);
+            if !spans.is_empty() {
+                blocks.push(ChapterBlock::Paragraph(spans));
+            }
+        }
+        XmlOut::Fragment(frag) => {
+            for inner in frag.children(txn) {
+                collect_blocks_from_node(txn, &inner, blocks);
+            }
+        }
+    }
+}
+
+/// Extract formatted spans from all XmlText children of an element (typically a paragraph).
+fn extract_spans_from_element<T: ReadTxn>(txn: &T, el: &yrs::types::xml::XmlElementRef) -> Vec<FmtSpan> {
+    let mut spans = Vec::new();
+    for child in el.children(txn) {
+        match child {
+            XmlOut::Text(txt) => {
+                spans.extend(extract_spans_from_xmltext(txn, &txt));
+            }
+            XmlOut::Element(inner) => {
+                let tag = inner.tag();
+                match tag.as_ref() {
+                    // hardBreak → Typst line break
+                    "hardBreak" => {
+                        spans.push(FmtSpan::plain(" \\\n".to_string()));
+                    }
+                    // Skip atom nodes inside paragraphs
+                    "noteMarker" | "stateMarker" => {}
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+    spans
+}
+
+/// Extract formatted text spans from an XmlTextRef using the diff() API.
+/// Each Diff chunk has text content + optional formatting attributes.
+fn extract_spans_from_xmltext<T: ReadTxn>(txn: &T, txt: &XmlTextRef) -> Vec<FmtSpan> {
+    let diffs: Vec<Diff<YChange>> = txt.diff(txn, YChange::identity);
+    let mut spans = Vec::new();
+    for d in diffs {
+        // Only process string content — skip embedded objects
+        let text = match &d.insert {
+            Out::Any(Any::String(s)) => s.to_string(),
+            _ => continue,
+        };
+        if text.is_empty() { continue; }
+
+        let mut span = FmtSpan::plain(text);
+
+        if let Some(ref attrs) = d.attributes {
+            for (key, val) in attrs.iter() {
+                match key.as_ref() {
+                    "bold" | "strong" => span.bold = any_is_truthy(val),
+                    "italic" | "em" => span.italic = any_is_truthy(val),
+                    "underline" => span.underline = any_is_truthy(val),
+                    "strike" | "s" => span.strike = any_is_truthy(val),
+                    "superscript" => span.superscript = any_is_truthy(val),
+                    "subscript" => span.subscript = any_is_truthy(val),
+                    "textStyle" => {
+                        // textStyle is stored as Any::Map with fontSize/fontFamily keys
+                        if let Any::Map(ref map) = val {
+                            if let Some(Any::String(s)) = map.get("fontSize") {
+                                span.font_size = Some(s.to_string());
+                            }
+                            if let Some(Any::String(s)) = map.get("fontFamily") {
+                                span.font_family = Some(s.to_string());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        spans.push(span);
+    }
+    spans
+}
+
+/// Check if an Any value is truthy (used for boolean mark attributes).
+fn any_is_truthy(val: &Any) -> bool {
+    match val {
+        Any::Bool(b) => *b,
+        Any::Null | Any::Undefined => false,
+        _ => true, // ProseMirror stores marks as `true` or as a non-null value
     }
 }
 

@@ -132,20 +132,14 @@
   <h4 class="section-title">Paragraph</h4>
 
   <!-- ============ DROP CAPS ============ -->
-  <div class="setting-group">
-    <div class="group-label">Drop Caps</div>
-
-    <button class="toggle-row" onclick={() => { dropCapEnabled = !dropCapEnabled; scheduleSave(); }}>
+  <div class="element-group">
+    <button class="element-header" onclick={() => { dropCapEnabled = !dropCapEnabled; scheduleSave(); }}>
       <span class="toggle-switch" class:on={dropCapEnabled}><span class="toggle-knob"></span></span>
-      <div class="toggle-text">
-        <span class="toggle-label">Enable drop caps</span>
-        <span class="toggle-hint">Enlarge the first letter of an opening paragraph</span>
-      </div>
+      <span class="element-name">Drop Caps</span>
     </button>
 
     {#if dropCapEnabled}
-      <div class="sub-settings">
-        <!-- Size -->
+      <div class="element-settings">
         <label class="field">
           <span class="field-label">Drop cap height (lines)</span>
           <select class="field-select" bind:value={dropLines} onchange={scheduleSave}>
@@ -153,14 +147,12 @@
           </select>
         </label>
 
-        <!-- Font -->
         <div class="field">
           <span class="field-label">Drop cap font</span>
           <FontPicker bind:value={dropCapFont} onchange={(f) => { dropCapFont = f; scheduleSave(); }}
             placeholder="Same as body font" />
         </div>
 
-        <!-- Color -->
         <div class="field">
           <span class="field-label">Drop cap color</span>
           <div class="color-row">
@@ -170,8 +162,6 @@
           </div>
         </div>
 
-
-        <!-- Quote handling -->
         <div class="field">
           <span class="field-label">When text starts with a quote mark</span>
           <div class="radio-group">
@@ -210,19 +200,14 @@
   </div>
 
   <!-- ============ SMALL CAPS LEAD-IN ============ -->
-  <div class="setting-group">
-    <div class="group-label">Small Caps Lead-in</div>
-
-    <button class="toggle-row" onclick={() => { smallCapsEnabled = !smallCapsEnabled; scheduleSave(); }}>
+  <div class="element-group">
+    <button class="element-header" onclick={() => { smallCapsEnabled = !smallCapsEnabled; scheduleSave(); }}>
       <span class="toggle-switch" class:on={smallCapsEnabled}><span class="toggle-knob"></span></span>
-      <div class="toggle-text">
-        <span class="toggle-label">Enable small caps lead-in</span>
-        <span class="toggle-hint">First few words of an opening paragraph in small caps</span>
-      </div>
+      <span class="element-name">Small Caps Lead-in</span>
     </button>
 
     {#if smallCapsEnabled}
-      <div class="sub-settings">
+      <div class="element-settings">
         <label class="field">
           <span class="field-label">Number of words</span>
           <select class="field-select" bind:value={smallCapsWords} onchange={scheduleSave}>
@@ -234,25 +219,6 @@
         </label>
       </div>
     {/if}
-  </div>
-
-  <!-- ============ WHEN TO APPLY ============ -->
-  <div class="setting-group">
-    <div class="group-label">When to Apply First-Sentence Styling</div>
-    <div class="radio-group compact">
-      <label class="radio-option" class:selected={applyWhen === 'chapter'}>
-        <input type="radio" bind:group={applyWhen} value="chapter" onchange={scheduleSave} />
-        <span class="radio-label">Beginning of each chapter</span>
-      </label>
-      <label class="radio-option" class:selected={applyWhen === 'breaks'}>
-        <input type="radio" bind:group={applyWhen} value="breaks" onchange={scheduleSave} />
-        <span class="radio-label">After every scene break</span>
-      </label>
-      <label class="radio-option" class:selected={applyWhen === 'both'}>
-        <input type="radio" bind:group={applyWhen} value="both" onchange={scheduleSave} />
-        <span class="radio-label">Both — chapters and scene breaks</span>
-      </label>
-    </div>
   </div>
 
   <!-- ============ SUBSEQUENT PARAGRAPHS ============ -->
@@ -370,11 +336,36 @@
     margin: 0 0 0.8rem 0; color: var(--iwe-text);
   }
 
+  .element-group {
+    border: 1px solid var(--iwe-border);
+    border-radius: var(--iwe-radius-sm);
+    margin-bottom: 1.2rem;
+  }
+  .element-header {
+    width: 100%;
+    display: flex; align-items: center; gap: 0.6rem;
+    padding: 0.5rem 0.7rem;
+    border: none; background: var(--iwe-bg-warm);
+    border-radius: var(--iwe-radius-sm);
+    cursor: pointer; transition: background 100ms;
+    text-align: left;
+  }
+  .element-header:hover { background: var(--iwe-bg-hover); }
+  .element-name {
+    font-family: var(--iwe-font-ui); font-size: 0.85rem;
+    color: var(--iwe-text); font-weight: 500;
+  }
+  .element-settings {
+    padding: 0.6rem 0.7rem 0.7rem;
+    display: flex; flex-direction: column; gap: 0.7rem;
+    border-top: 1px solid var(--iwe-border);
+  }
   .setting-group { margin-bottom: 1rem; }
   .group-label {
-    font-family: var(--iwe-font-ui); font-size: 0.7rem;
-    color: var(--iwe-text-muted); text-transform: uppercase;
-    letter-spacing: 0.04em; font-weight: 600;
+    font-family: var(--iwe-font-ui); font-size: 0.85rem;
+    color: var(--iwe-text); text-transform: uppercase;
+    letter-spacing: 0.04em; font-weight: 500;
+    margin-top: 1.4rem;
     margin-bottom: 0.4rem;
   }
   .sub-settings {

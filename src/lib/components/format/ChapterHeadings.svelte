@@ -345,90 +345,15 @@
     {/if}
   </div>
 
-  <!-- ============ SPACING ============ -->
-  <div class="setting-group">
-    <div class="group-label">Spacing</div>
-    <div class="row-2col">
-      {#if isPrint}
-      <label class="field">
-        <span class="field-label">Chapter sink</span>
-        <span class="field-hint">How far down the page before the heading starts</span>
-        <DecimalInput value={sinkEm} suffix="em" step={0.5} min={0} max={20} decimals={1}
-          onchange={(v) => { sinkEm = v; scheduleSave(); }} />
-      </label>
-      {/if}
-      <label class="field">
-        <span class="field-label">After heading</span>
-        <span class="field-hint">Gap between the heading block and the first paragraph</span>
-        <DecimalInput value={spaceAfter} suffix="em" step={0.5} min={0} max={10} decimals={1}
-          onchange={(v) => { spaceAfter = v; scheduleSave(); }} />
-      </label>
-    </div>
-    {#if (numEnabled && titleEnabled) || (titleEnabled && subEnabled)}
-      <div class="row-2col">
-        {#if numEnabled && titleEnabled}
-          <label class="field">
-            <span class="field-label">Number → Title</span>
-            <span class="field-hint">Space between the chapter number and the title</span>
-            <DecimalInput value={spaceNumTitle} suffix="em" step={0.25} min={0} max={5} decimals={2}
-              onchange={(v) => { spaceNumTitle = v; scheduleSave(); }} />
-          </label>
-        {/if}
-        {#if titleEnabled && subEnabled}
-          <label class="field">
-            <span class="field-label">Title → Subtitle</span>
-            <span class="field-hint">Space between the title and the subtitle</span>
-            <DecimalInput value={spaceTitleSub} suffix="em" step={0.25} min={0} max={5} decimals={2}
-              onchange={(v) => { spaceTitleSub = v; scheduleSave(); }} />
-          </label>
-        {/if}
-      </div>
-    {/if}
-  </div>
-
-  {#if isPrint}
-  <!-- ============ PAGE BEHAVIOR ============ -->
-  <div class="setting-group">
-    <div class="group-label">Page Behavior</div>
-    <div class="field">
-      <span class="field-label">Start chapters on</span>
-      <select class="field-select" bind:value={startOn} onchange={scheduleSave}>
-        {#each START_OPTIONS as opt}<option value={opt.id}>{opt.label}</option>{/each}
-      </select>
-    </div>
-  </div>
-  {/if}
-
-  <!-- ============ RULES ============ -->
-  <div class="setting-group">
-    <div class="group-label">Rules</div>
-    <button class="toggle-row" onclick={() => { ruleAbove = !ruleAbove; scheduleSave(); }}>
-      <span class="toggle-switch" class:on={ruleAbove}><span class="toggle-knob"></span></span>
-      <span class="toggle-label">Rule above heading</span>
-    </button>
-    <button class="toggle-row" onclick={() => { ruleBelow = !ruleBelow; scheduleSave(); }}>
-      <span class="toggle-switch" class:on={ruleBelow}><span class="toggle-knob"></span></span>
-      <span class="toggle-label">Rule below heading</span>
-    </button>
-    {#if ruleAbove || ruleBelow}
-      <label class="field" style="margin-top: 0.4rem;">
-        <span class="field-label">Thickness</span>
-        <DecimalInput value={ruleThickness} suffix="pt" step={0.25} min={0.25} max={3} decimals={2}
-          onchange={(v) => { ruleThickness = v; scheduleSave(); }} />
-      </label>
-    {/if}
-  </div>
   <!-- ============ CHAPTER IMAGE ============ -->
-  <div class="setting-group">
-    <div class="group-label">Chapter Image</div>
-
-    <button class="toggle-row" onclick={() => { imgEnabled = !imgEnabled; scheduleSave(); }}>
+  <div class="element-group">
+    <button class="element-header" onclick={() => { imgEnabled = !imgEnabled; scheduleSave(); }}>
       <span class="toggle-switch" class:on={imgEnabled}><span class="toggle-knob"></span></span>
-      <span class="toggle-label">Enable chapter images</span>
+      <span class="element-name">Chapter Image</span>
     </button>
 
     {#if imgEnabled}
-      <div class="sub-settings">
+      <div class="element-settings">
         <div class="field">
           <span class="field-label">Image source</span>
           <select class="field-select" bind:value={imgIndividual} onchange={scheduleSave}>
@@ -512,6 +437,80 @@
       </div>
     {/if}
   </div>
+
+  <!-- ============ SPACING ============ -->
+  <div class="setting-group">
+    <div class="group-label">Spacing</div>
+    <div class="row-2col">
+      {#if isPrint}
+      <label class="field">
+        <span class="field-label">Chapter sink</span>
+        <span class="field-hint">How far down the page before the heading starts</span>
+        <DecimalInput value={sinkEm} suffix="em" step={0.5} min={0} max={20} decimals={1}
+          onchange={(v) => { sinkEm = v; scheduleSave(); }} />
+      </label>
+      {/if}
+      <label class="field">
+        <span class="field-label">After heading</span>
+        <span class="field-hint">Gap between the heading block and the first paragraph</span>
+        <DecimalInput value={spaceAfter} suffix="em" step={0.5} min={0} max={10} decimals={1}
+          onchange={(v) => { spaceAfter = v; scheduleSave(); }} />
+      </label>
+    </div>
+    {#if (numEnabled && titleEnabled) || (titleEnabled && subEnabled)}
+      <div class="row-2col">
+        {#if numEnabled && titleEnabled}
+          <label class="field">
+            <span class="field-label">Number → Title</span>
+            <span class="field-hint">Space between the chapter number and the title</span>
+            <DecimalInput value={spaceNumTitle} suffix="em" step={0.25} min={0} max={5} decimals={2}
+              onchange={(v) => { spaceNumTitle = v; scheduleSave(); }} />
+          </label>
+        {/if}
+        {#if titleEnabled && subEnabled}
+          <label class="field">
+            <span class="field-label">Title → Subtitle</span>
+            <span class="field-hint">Space between the title and the subtitle</span>
+            <DecimalInput value={spaceTitleSub} suffix="em" step={0.25} min={0} max={5} decimals={2}
+              onchange={(v) => { spaceTitleSub = v; scheduleSave(); }} />
+          </label>
+        {/if}
+      </div>
+    {/if}
+  </div>
+
+  {#if isPrint}
+  <!-- ============ PAGE BEHAVIOR ============ -->
+  <div class="setting-group" style="margin-top: 0.6rem;">
+    <div class="group-label">Page Behavior</div>
+    <div class="field">
+      <span class="field-label">Start chapters on</span>
+      <select class="field-select" bind:value={startOn} onchange={scheduleSave}>
+        {#each START_OPTIONS as opt}<option value={opt.id}>{opt.label}</option>{/each}
+      </select>
+    </div>
+  </div>
+  {/if}
+
+  <!-- ============ RULES ============ -->
+  <div class="setting-group">
+    <div class="group-label">Rules</div>
+    <button class="toggle-row" onclick={() => { ruleAbove = !ruleAbove; scheduleSave(); }}>
+      <span class="toggle-switch" class:on={ruleAbove}><span class="toggle-knob"></span></span>
+      <span class="toggle-label">Rule above heading</span>
+    </button>
+    <button class="toggle-row" onclick={() => { ruleBelow = !ruleBelow; scheduleSave(); }}>
+      <span class="toggle-switch" class:on={ruleBelow}><span class="toggle-knob"></span></span>
+      <span class="toggle-label">Rule below heading</span>
+    </button>
+    {#if ruleAbove || ruleBelow}
+      <label class="field" style="margin-top: 0.4rem;">
+        <span class="field-label">Thickness</span>
+        <DecimalInput value={ruleThickness} suffix="pt" step={0.25} min={0.25} max={3} decimals={2}
+          onchange={(v) => { ruleThickness = v; scheduleSave(); }} />
+      </label>
+    {/if}
+  </div>
 </div>
 
 <style>
@@ -526,7 +525,7 @@
   .element-group {
     border: 1px solid var(--iwe-border);
     border-radius: var(--iwe-radius-sm);
-    margin-bottom: 0.6rem;
+    margin-bottom: 1.2rem;
   }
   .element-header {
     width: 100%;
@@ -551,9 +550,10 @@
   /* Setting groups */
   .setting-group { margin-bottom: 0.8rem; }
   .group-label {
-    font-family: var(--iwe-font-ui); font-size: 0.7rem;
-    color: var(--iwe-text-muted); text-transform: uppercase;
-    letter-spacing: 0.04em; font-weight: 600;
+    font-family: var(--iwe-font-ui); font-size: 0.85rem;
+    color: var(--iwe-text); text-transform: uppercase;
+    letter-spacing: 0.04em; font-weight: 500;
+    margin-top: 0.8rem;
     margin-bottom: 0.4rem;
   }
 

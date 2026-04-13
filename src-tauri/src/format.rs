@@ -591,6 +591,130 @@ fn apply_small_caps_lead(text: &str, word_count: i32) -> String {
     result
 }
 
+/// Formatted-span-aware opener paragraph. Same logic as `emit_opener_paragraph`
+/// but preserves inline formatting marks from FmtSpan data.
+fn emit_opener_paragraph_fmt(
+    out: &mut String,
+    spans: &[FmtSpan],
+    drop_enabled: bool,
+    drop_lines: usize,
+    drop_font: &str,
+    drop_color: &str,
+    quote_mode: &str,
+    _drop_fill_pct: f64,
+    sc_enabled: bool,
+    sc_words: i32,
+) {
+    let plain = spans_plain_text(spans);
+    let chars: Vec<char> = plain.chars().collect();
+    if chars.is_empty() {
+        return;
+    }
+
+    let quote_chars = ['"', '\u{201C}', '\u{201D}', '\'', '\u{2018}', '\u{2019}', '\u{00AB}', '\u{00BB}'];
+    let starts_with_quote = quote_chars.contains(&chars[0]);
+
+    // Determine the drop cap character(s) and the char index where the body starts.
+    let (drop_cap_text, body_start_idx): (String, usize) = if drop_enabled && drop_lines > 0 {
+        if starts_with_quote {
+            match quote_mode {
+                "disable_on_dialogue" => {
+                    out.push_str(&format!("#par(first-line-indent: 0em)[{}]\n\n", spans_to_typst(spans)));
+                    return;
+                }
+                "first_char" => (chars[0].to_string(), 1),
+                "both_together" => {
+                    let end = if chars.len() > 1 { 2 } else { 1 };
+                    (chars[..end].iter().collect(), end)
+                }
+                _ => {
+                    // "letter_only" — skip to first alphabetic
+                    let mut idx = 0;
+                    while idx < chars.len() && !chars[idx].is_alphabetic() { idx += 1; }
+                    if idx < chars.len() {
+                        (chars[idx].to_string(), idx + 1)
+                    } else {
+                        out.push_str(&format!("#par(first-line-indent: 0em)[{}]\n\n", spans_to_typst(spans)));
+                        return;
+                    }
+                }
+            }
+        } else {
+            (chars[0].to_string(), 1)
+        }
+    } else {
+        (String::new(), 0)
+    };
+
+    // Split spans at the body start index to get the body with formatting preserved
+    let (_pre_spans, body_spans) = split_spans_at(spans, body_start_idx);
+
+    let body_text = if sc_enabled && !body_spans.is_empty() {
+        apply_small_caps_lead_fmt(&body_spans, sc_words)
+    } else {
+        spans_to_typst(&body_spans)
+    };
+
+    if drop_enabled && drop_lines > 0 && !drop_cap_text.is_empty() {
+        let mut args = vec![format!("height: {}", drop_lines)];
+        args.push("gap: 4pt".to_string());
+        if !drop_font.is_empty() {
+            args.push(format!("font: \"{}\"", escape_typst(drop_font)));
+        }
+        if drop_color != "#000000" && !drop_color.is_empty() {
+            args.push(format!("fill: rgb(\"{}\")", drop_color));
+        }
+        out.push_str(&format!(
+            "#dropcap({})[{}][{}]\n\n",
+            args.join(", "),
+            escape_typst(&drop_cap_text),
+            body_text,
+        ));
+    } else {
+        out.push_str(&format!("#par(first-line-indent: 0em)[{}]\n\n", body_text));
+    }
+}
+
+/// Apply small caps to the first N words, preserving formatting on the rest.
+fn apply_small_caps_lead_fmt(spans: &[FmtSpan], word_count: i32) -> String {
+    if word_count == 0 {
+        return spans_to_typst(spans);
+    }
+
+    // Find the character index where the first N words end
+    let plain = spans_plain_text(spans);
+    let mut rest_start = 0usize;
+    let mut in_word = false;
+    let mut count = 0i32;
+
+    for (i, ch) in plain.char_indices() {
+        if ch.is_whitespace() {
+            if in_word {
+                in_word = false;
+                if word_count > 0 && count >= word_count {
+                    rest_start = i;
+                    break;
+                }
+            }
+        } else if !in_word {
+            in_word = true;
+            count += 1;
+        }
+        rest_start = i + ch.len_utf8();
+    }
+
+    if rest_start == 0 {
+        return spans_to_typst(spans);
+    }
+
+    let (lead_spans, rest_spans) = split_spans_at(spans, rest_start);
+    let mut result = format!("#smallcaps[{}]", spans_to_typst(&lead_spans));
+    if !rest_spans.is_empty() {
+        result.push_str(&spans_to_typst(&rest_spans));
+    }
+    result
+}
+
 /// Format a chapter number in the chosen style.
 fn format_chapter_number(num: usize, format: &str) -> String {
     let word = match num {
@@ -977,6 +1101,104 @@ fn render_page_content(content: &str, images: &mut ImageMap) -> String {
     out
 }
 
+// ---- Formatted span → Typst utilities (for chapter content with inline marks) ----
+
+use crate::ydoc::FmtSpan;
+
+/// Render a single FmtSpan to Typst markup with inline formatting.
+fn apply_fmt_span(span: &FmtSpan) -> String {
+    // hardBreak spans contain raw Typst markup — pass through without escaping
+    if span.text == " \\\n" {
+        return span.text.clone();
+    }
+
+    let mut s = escape_typst(&span.text);
+    if span.bold { s = format!("#strong[{}]", s); }
+    if span.italic { s = format!("#emph[{}]", s); }
+    if span.underline { s = format!("#underline[{}]", s); }
+    if span.strike { s = format!("#strike[{}]", s); }
+    if span.superscript { s = format!("#super[{}]", s); }
+    if span.subscript { s = format!("#sub[{}]", s); }
+
+    if span.font_size.is_some() || span.font_family.is_some() {
+        let mut args: Vec<String> = Vec::new();
+        if let Some(ref family) = span.font_family {
+            let name = extract_font_name(family);
+            if !name.is_empty() {
+                args.push(format!("font: \"{}\"", escape_typst(&name)));
+            }
+        }
+        if let Some(ref size) = span.font_size {
+            if !size.is_empty() {
+                args.push(format!("size: {}", size));
+            }
+        }
+        if !args.is_empty() {
+            s = format!("#text({})[{}]", args.join(", "), s);
+        }
+    }
+    s
+}
+
+/// Render a slice of FmtSpans to a Typst inline string.
+fn spans_to_typst(spans: &[FmtSpan]) -> String {
+    let mut out = String::new();
+    for span in spans {
+        out.push_str(&apply_fmt_span(span));
+    }
+    out
+}
+
+/// Extract plain text from spans (for logic that needs raw text: drop cap detection, etc.)
+fn spans_plain_text(spans: &[FmtSpan]) -> String {
+    spans.iter().map(|s| s.text.as_str()).collect()
+}
+
+/// Split a span list at a character offset. If the offset falls mid-span, that span is
+/// split into two. Returns (before, after) where before contains exactly `char_idx` chars.
+fn split_spans_at(spans: &[FmtSpan], char_idx: usize) -> (Vec<FmtSpan>, Vec<FmtSpan>) {
+    let mut before = Vec::new();
+    let mut after = Vec::new();
+    let mut consumed = 0usize;
+    let mut split_done = false;
+
+    for span in spans {
+        if split_done {
+            after.push(span.clone());
+            continue;
+        }
+        let len = span.text.chars().count();
+        if consumed + len <= char_idx {
+            before.push(span.clone());
+            consumed += len;
+        } else {
+            // This span straddles the split point
+            let split_at = char_idx - consumed;
+            let (left, right) = split_span_text(span, split_at);
+            if !left.text.is_empty() {
+                before.push(left);
+            }
+            if !right.text.is_empty() {
+                after.push(right);
+            }
+            split_done = true;
+        }
+    }
+    (before, after)
+}
+
+/// Split a single span at a character offset, preserving marks on both halves.
+fn split_span_text(span: &FmtSpan, at_char: usize) -> (FmtSpan, FmtSpan) {
+    let text: Vec<char> = span.text.chars().collect();
+    let left_text: String = text[..at_char].iter().collect();
+    let right_text: String = text[at_char..].iter().collect();
+    let mut left = span.clone();
+    let mut right = span.clone();
+    left.text = left_text;
+    right.text = right_text;
+    (left, right)
+}
+
 /// Parsed TOC page settings.
 struct TocSettings {
     title: String,
@@ -1206,7 +1428,7 @@ fn build_front_matter_page(page: &FormatPage, images: &mut ImageMap, body_font: 
 fn build_typst_markup(
     profile: &FormatProfile,
     front_pages: &[FormatPage],
-    chapters: &[(i64, String, String, String, String)], // (chapter_id, title, subtitle, chapter_image, text)
+    chapters: &[(i64, String, String, String, Vec<crate::ydoc::ChapterBlock>)], // (chapter_id, title, subtitle, chapter_image, blocks)
     back_pages: &[FormatPage],
     book_title: &str,
     author_name: &str,
@@ -1461,7 +1683,7 @@ fn build_typst_markup(
     let p_drop_fill_pct = para.get("drop_cap_fill_pct").and_then(|v| v.as_f64()).unwrap_or(100.0);
     let p_sc_enabled = para.get("small_caps_enabled").and_then(|v| v.as_bool()).unwrap_or(false);
     let p_sc_words = para.get("small_caps_words").and_then(|v| v.as_i64()).unwrap_or(5) as i32;
-    let p_apply_when = para.get("apply_when").and_then(|v| v.as_str()).unwrap_or("chapter").to_string();
+    let p_apply_when = "chapter".to_string(); // always chapter-start only
     let p_style = para.get("paragraph_style").and_then(|v| v.as_str()).unwrap_or("indented").to_string();
     let p_indent_em = para.get("indent_em").and_then(|v| v.as_f64()).unwrap_or(1.5);
     let p_spacing_em = para.get("spacing_em").and_then(|v| v.as_f64()).unwrap_or(0.5);
@@ -1570,7 +1792,7 @@ fn build_typst_markup(
     let img_align = ch_head.get("image_align").and_then(|v| v.as_str()).unwrap_or("center").to_string();
     let img_light_text = ch_head.get("image_light_text").and_then(|v| v.as_bool()).unwrap_or(false);
 
-    for (i, (chapter_id, title, subtitle, chapter_image, text)) in chapters.iter().enumerate() {
+    for (i, (chapter_id, title, subtitle, chapter_image, blocks)) in chapters.iter().enumerate() {
         // Page break / start behavior
         if i > 0 {
             let start_on = ch_head.get("start_on").and_then(|v| v.as_str()).unwrap_or("any");
@@ -1733,56 +1955,53 @@ fn build_typst_markup(
             body_spacing_em,
         ));
 
-        // Paragraphs from extracted text (\n\n separated)
-        let paragraphs: Vec<&str> = text.split("\n\n").collect();
-        // Track whether the *next* paragraph should get first-sentence styling (drop cap / small caps)
+        // Structured blocks with inline formatting preserved
         let mut next_is_opener = true; // first paragraph after chapter heading
         let mut next_no_indent = true;
         let apply_after_breaks = p_apply_when == "breaks" || p_apply_when == "both";
 
-        for para in &paragraphs {
-            let trimmed = para.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-
-            if is_scene_break_sentinel(trimmed) {
-                emit_scene_break(
-                    &mut doc,
-                    &break_style,
-                    &break_custom_text,
-                    break_space_above_em,
-                    break_space_below_em,
-                    break_keep_with_content,
-                    &break_image_data,
-                    break_image_width_pct,
-                    &mut images,
-                );
-                next_no_indent = true;
-                if apply_after_breaks {
-                    next_is_opener = true;
+        for block in blocks {
+            match block {
+                crate::ydoc::ChapterBlock::SceneBreak => {
+                    emit_scene_break(
+                        &mut doc,
+                        &break_style,
+                        &break_custom_text,
+                        break_space_above_em,
+                        break_space_below_em,
+                        break_keep_with_content,
+                        &break_image_data,
+                        break_image_width_pct,
+                        &mut images,
+                    );
+                    next_no_indent = true;
+                    if apply_after_breaks {
+                        next_is_opener = true;
+                    }
                 }
-                continue;
-            }
+                crate::ydoc::ChapterBlock::Paragraph(spans) => {
+                    let plain = spans_plain_text(spans);
+                    if plain.trim().is_empty() {
+                        continue;
+                    }
 
-            let escaped = escape_typst(trimmed);
-
-            // Apply first-sentence styling (drop cap / small caps) to opener paragraphs
-            if next_is_opener && (p_drop_enabled || p_sc_enabled) {
-                emit_opener_paragraph(
-                    &mut doc, trimmed,
-                    p_drop_enabled, p_drop_lines,
-                    &p_drop_font, &p_drop_color, &p_drop_quote, p_drop_fill_pct,
-                    p_sc_enabled, p_sc_words,
-                );
-                next_is_opener = false;
-                next_no_indent = false;
-            } else if next_no_indent {
-                doc.push_str(&format!("#par(first-line-indent: 0em)[{}]\n\n", escaped));
-                next_no_indent = false;
-                next_is_opener = false;
-            } else {
-                doc.push_str(&format!("{}\n\n", escaped));
+                    if next_is_opener && (p_drop_enabled || p_sc_enabled) {
+                        emit_opener_paragraph_fmt(
+                            &mut doc, spans,
+                            p_drop_enabled, p_drop_lines,
+                            &p_drop_font, &p_drop_color, &p_drop_quote, p_drop_fill_pct,
+                            p_sc_enabled, p_sc_words,
+                        );
+                        next_is_opener = false;
+                        next_no_indent = false;
+                    } else if next_no_indent {
+                        doc.push_str(&format!("#par(first-line-indent: 0em)[{}]\n\n", spans_to_typst(spans)));
+                        next_no_indent = false;
+                        next_is_opener = false;
+                    } else {
+                        doc.push_str(&format!("{}\n\n", spans_to_typst(spans)));
+                    }
+                }
             }
         }
         doc.push_str("]\n"); // close body #[
@@ -2043,12 +2262,12 @@ pub fn compile_preview(
     let chapters_raw = db::list_chapters(conn).map_err(|e| e.to_string())?;
     let db_load_ms = t.elapsed().as_secs_f64() * 1000.0;
 
-    // 2. Y.Doc text extraction (format-aware: emits * * * for horizontal rules)
+    // 2. Y.Doc extraction — structured blocks with inline formatting preserved
     let t = Instant::now();
-    let mut chapters: Vec<(i64, String, String, String, String)> = Vec::new();
+    let mut chapters: Vec<(i64, String, String, String, Vec<crate::ydoc::ChapterBlock>)> = Vec::new();
     for ch in &chapters_raw {
-        let text = ydoc::extract_text_for_format_from_bytes(&ch.content);
-        chapters.push((ch.id, ch.title.clone(), ch.subtitle.clone(), ch.chapter_image.clone(), text));
+        let blocks = ydoc::extract_chapter_blocks_from_bytes(&ch.content);
+        chapters.push((ch.id, ch.title.clone(), ch.subtitle.clone(), ch.chapter_image.clone(), blocks));
     }
     let ydoc_extract_ms = t.elapsed().as_secs_f64() * 1000.0;
     let chapter_count = chapters.len();

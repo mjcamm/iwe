@@ -235,9 +235,9 @@
 
   .setting-group { margin-bottom: 1rem; }
   .group-label {
-    font-family: var(--iwe-font-ui); font-size: 0.7rem;
-    color: var(--iwe-text-muted); text-transform: uppercase;
-    letter-spacing: 0.04em; font-weight: 600;
+    font-family: var(--iwe-font-ui); font-size: 0.85rem;
+    color: var(--iwe-text); text-transform: uppercase;
+    letter-spacing: 0.04em; font-weight: 500;
     margin-bottom: 0.5rem;
   }
 

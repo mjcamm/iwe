@@ -155,33 +155,6 @@
       The preview simulates how your book appears on each device.
     </p>
   {:else}
-  <!-- Print: Current trim -->
-  <div class="current-trim">
-    <div class="current-trim-preview"
-      style="aspect-ratio: {currentW} / {currentH};"></div>
-    <div class="current-trim-info">
-      <span class="current-dim">{dimLabel(currentW, currentH)}</span>
-      {#if currentMatch}
-        <span class="current-name">{currentMatch.label}</span>
-        <div class="current-platforms">
-          {#each supportedPlatforms(currentMatch) as pid}
-            {@const p = PLATFORMS.find(x => x.id === pid)}
-            <span class="platform-badge" title={p.label}>{p.short}</span>
-          {/each}
-        </div>
-      {:else}
-        <span class="current-name custom-label">Custom size</span>
-      {/if}
-    </div>
-  </div>
-
-  <!-- Search -->
-  <div class="trim-search">
-    <i class="bi bi-search"></i>
-    <input type="text" bind:value={search}
-      placeholder="Search sizes, categories, platforms..." />
-  </div>
-
   <!-- Size catalog -->
   <div class="trim-catalog">
     {#each filteredCategories as cat}
@@ -344,8 +317,8 @@
     display: flex; gap: 3px; margin-top: 2px;
   }
   .platform-badge {
-    font-family: var(--iwe-font-ui); font-size: 0.58rem;
-    padding: 1px 5px; border-radius: 6px;
+    font-family: var(--iwe-font-ui); font-size: 0.75rem;
+    padding: 2px 7px; border-radius: 6px;
     background: var(--iwe-accent); color: #fff;
     font-weight: 600; letter-spacing: 0.02em;
   }
@@ -422,8 +395,8 @@
     flex-shrink: 0;
   }
   .platform-dot {
-    font-size: 0.5rem;
-    padding: 1px 4px; border-radius: 4px;
+    font-size: 0.7rem;
+    padding: 2px 6px; border-radius: 4px;
     background: var(--iwe-bg-hover); color: var(--iwe-text-muted);
     font-weight: 600; letter-spacing: 0.02em;
   }

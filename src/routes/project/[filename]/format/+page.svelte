@@ -2898,7 +2898,7 @@
     padding: 0 0.9rem;
   }
   .mode-panel { padding: 0.2rem 0; }
-  .page-list-panel { padding: 0; }
+  .page-list-panel { padding: 0 0 150px 0; }
   .shell-placeholder {
     font-family: var(--iwe-font-ui); font-size: 0.78rem;
     color: var(--iwe-text-muted); font-style: italic;
@@ -3264,12 +3264,12 @@
     display: flex; align-items: center; justify-content: space-between;
   }
   .add-page-btn {
-    border: none; background: none; color: var(--iwe-accent);
-    cursor: pointer; padding: 0.1rem 0.35rem; font-size: 1.1rem;
+    border: 1px solid var(--iwe-border); background: none; color: var(--iwe-accent);
+    cursor: pointer; padding: 0.15rem 0.5rem; font-size: 1.1rem;
     line-height: 1; border-radius: var(--iwe-radius-sm);
-    transition: background 100ms;
+    transition: all 100ms;
   }
-  .add-page-btn:hover { background: var(--iwe-bg-hover); }
+  .add-page-btn:hover { background: var(--iwe-accent); color: #fff; }
 
   .dnd-zone { min-height: 4px; }
 
