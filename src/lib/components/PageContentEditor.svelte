@@ -222,6 +222,9 @@
   let marginInside = $derived(profile?.margin_inside_in ?? 0.875);
   let fontSize = $derived(profile?.font_size_pt ?? 11);
   let lineSpacing = $derived(profile?.line_spacing ?? 1.4);
+
+  // Full page height in CSS inches — used for repeating page-break guides
+  let pageHeightIn = $derived(heightIn);
 </script>
 
 <svelte:window onkeydown={handleKeydown} />
@@ -340,17 +343,18 @@
           data-valign={verticalAlign}
           style="
             width: {widthIn}in;
-            height: {heightIn}in;
+            min-height: {heightIn}in;
             padding-top: {marginTop}in;
             padding-bottom: {marginBottom}in;
             padding-left: {marginInside}in;
             padding-right: {marginOutside}in;
             font-size: {fontSize}pt;
             line-height: {lineSpacing};
+            --page-height: {pageHeightIn}in;
           "
           bind:this={element}>
         </div>
-        <div class="page-bottom-marker" style="width: {widthIn}in;">Page boundary — content past this point won't fit</div>
+        <div class="page-guides" style="width: {widthIn}in; --page-height: {pageHeightIn}in;" aria-hidden="true"></div>
       </div>
     </div>
   </div>
@@ -455,38 +459,46 @@
     display: flex;
     flex-direction: column;
     align-items: center;
+    position: relative;
   }
   .page-surface {
     background: #fff;
     box-shadow: 0 4px 24px rgba(0, 0, 0, 0.18), 0 0 0 1px rgba(0, 0, 0, 0.08);
     font-family: 'Liberation Serif', 'Georgia', serif;
     color: #222;
-    /* Fixed dimensions — overflow extends visibly past the boundary so the user
-       sees that content won't fit. box-sizing: border-box keeps padding inside. */
     box-sizing: border-box;
     overflow: visible;
-    /* Flex column lets us position the editor block at top/center/bottom */
     display: flex;
     flex-direction: column;
+    position: relative;
   }
   .page-surface[data-valign="top"]    { justify-content: flex-start; }
   .page-surface[data-valign="center"] { justify-content: center; }
   .page-surface[data-valign="bottom"] { justify-content: flex-end; }
   .page-surface :global(.ProseMirror) {
     outline: none;
-    flex: 0 0 auto; /* don't stretch — let alignment work */
+    flex: 0 0 auto;
     width: 100%;
   }
-  /* Bottom-of-page indicator: dashed line + caption sitting just under the page. */
-  .page-bottom-marker {
-    margin-top: 2px;
-    border-top: 1px dashed #c0392b;
-    text-align: center;
-    font-family: var(--iwe-font-ui);
-    font-size: 0.65rem;
-    color: #c0392b;
-    padding-top: 4px;
+  /* Repeating page-break guide lines overlaid on the surface.
+     Positioned absolutely over the page surface so they don't affect layout.
+     Uses a repeating linear gradient to draw a thin red dashed line at
+     every page-height interval. */
+  .page-guides {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%;
+    height: 100%;
     pointer-events: none;
+    background: repeating-linear-gradient(
+      to bottom,
+      transparent 0,
+      transparent calc(var(--page-height) - 1px),
+      #c0392b calc(var(--page-height) - 1px),
+      #c0392b var(--page-height)
+    );
+    /* Fade the lines so they're visible but not distracting */
+    opacity: 0.35;
   }
   .page-surface :global(.ProseMirror p) {
     margin: 0 0 0.4em 0;

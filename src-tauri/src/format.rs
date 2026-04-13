@@ -1031,46 +1031,61 @@ fn build_map_page(content: &str, images: &mut ImageMap) -> Option<String> {
     }
     let spread = val.get("spread").and_then(|v| v.as_bool()).unwrap_or(false);
     let sizing = val.get("sizing").and_then(|v| v.as_str()).unwrap_or("fit-width");
+    let gutter_overlap_in = val.get("gutter_overlap_in").and_then(|v| v.as_f64()).unwrap_or(0.0);
 
     let (img_path, _ext) = ingest_image(image_data, images)?;
 
     let mut out = String::new();
 
-    // Image sizing: fit-width fills the page width (clips top/bottom),
-    // fit-height fills the page height (clips left/right).
+    // Image sizing: fit-width fills the page width (clips top/bottom centered),
+    // fit-height fills the page height (clips left/right centered).
+    // We use align(center + horizon) so the clipped axis is always centered.
     let (img_width, img_height) = match sizing {
-        "fit-height" => ("auto", "100%"),
-        _ => ("100%", "auto"), // fit-width default
+        "fit-height" => ("auto".to_string(), "100%".to_string()),
+        _ => ("100%".to_string(), "auto".to_string()), // fit-width default
     };
 
     if spread {
-        // Two full-bleed pages. The image is rendered at 200% page width,
-        // then clipped to show only the left or right half on each page.
+        // Two full-bleed pages with gutter overlap compensation.
+        // Each half extends past center by `gutter_overlap_in` so the overlapping
+        // strip is duplicated on both pages — the binding fold hides it and the
+        // image appears seamless when the book is opened.
+        //
+        // Without overlap: left shows 0%–50%, right shows 50%–100%.
+        // With overlap O: left shows 0%–(50%+O), right shows (50%-O)–100%.
+        //
+        // In Typst terms: the image is sized to (200% + 2*overlap) of page width
+        // so it's slightly wider than two pages. The left page is left-aligned
+        // (no shift needed — the extra width extends rightward past the clip).
+        // The right page shifts left by (100% - overlap) to start from (50%-O).
+        let overlap = gutter_overlap_in.max(0.0);
+
         let spread_img_w = match sizing {
-            "fit-height" => "auto",
-            _ => "200%", // fit-width: span both pages
+            "fit-height" => "auto".to_string(),
+            _ => format!("200% + {}in", overlap * 2.0),
         };
 
-        // Left page (verso): show left half of image
+        // Left page: image left-aligned, extends overlap past the right edge (clipped)
         out.push_str("#page(margin: 0pt)[\n");
         out.push_str(&format!(
-            "  #box(clip: true, width: 100%, height: 100%)[#image(\"{}\", width: {}, height: {})]\n",
+            "  #box(clip: true, width: 100%, height: 100%)[#align(left + horizon)[#image(\"{}\", width: {}, height: {})]]\n",
             img_path, spread_img_w, img_height
         ));
         out.push_str("]\n");
 
-        // Right page (recto): show right half by shifting image left by 100% page width
+        // Right page: shift image left by (page width - overlap) so the overlap
+        // region from center is duplicated on this page.
         out.push_str("#page(margin: 0pt)[\n");
         out.push_str(&format!(
-            "  #box(clip: true, width: 100%, height: 100%)[#move(dx: -100%, dy: 0pt)[#image(\"{}\", width: {}, height: {})]]\n",
-            img_path, spread_img_w, img_height
+            "  #box(clip: true, width: 100%, height: 100%)[#align(left + horizon)[#move(dx: -100% + {}in)[#image(\"{}\", width: {}, height: {})]]]\n",
+            overlap, img_path, spread_img_w, img_height
         ));
         out.push_str("]\n");
     } else {
-        // Single full-bleed page
+        // Single full-bleed page — center on both axes, clip the overflow
         out.push_str("#page(margin: 0pt)[\n");
         out.push_str(&format!(
-            "  #box(clip: true, width: 100%, height: 100%)[#image(\"{}\", width: {}, height: {})]\n",
+            "  #box(clip: true, width: 100%, height: 100%)[#align(center + horizon)[#image(\"{}\", width: {}, height: {})]]\n",
             img_path, img_width, img_height
         ));
         out.push_str("]\n");
@@ -1151,10 +1166,9 @@ fn build_front_matter_page(page: &FormatPage, images: &mut ImageMap, body_font: 
     let has_content = !content_typst.trim().is_empty();
 
     // If user has authored content, render it directly without role-based wrapping.
-    // Wrap in a content block that sets the body font and resets par settings —
-    // format pages should never inherit the chapter body's first-line indent.
+    // Wrap in a block that fills the page so #v(1fr) gutters can expand for alignment.
     if has_content {
-        out.push_str("#[\n");
+        out.push_str("#block(width: 100%, height: 100%)[\n");
         out.push_str(&format!(
             "#set text(font: \"{}\", size: {}pt, hyphenate: false)\n",
             escape_typst(body_font), body_size_pt,
@@ -1239,6 +1253,22 @@ fn build_typst_markup(
         .get("hyphens")
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
+
+    // Bleed: extra area beyond the trim for edge-to-edge printing.
+    // When enabled, page dimensions grow by 2*bleed and all margins increase by bleed
+    // so content stays at the same position relative to the trim line.
+    let bleed_enabled = print_layout
+        .get("bleed_enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let bleed_in = if bleed_enabled {
+        print_layout
+            .get("bleed_in")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.125)
+    } else {
+        0.0
+    };
 
     // Scene break (in-chapter) settings from breaks_json
     let breaks = parse_category_json(&profile.breaks_json);
@@ -1349,14 +1379,20 @@ fn build_typst_markup(
         margin_bottom
     };
 
+    // Apply bleed: the inside edge (spine) is never trimmed — only the outside,
+    // top, and bottom edges are cut. So bleed adds to those three sides only.
+    // Width grows by one bleed (outside only), height grows by two (top + bottom).
+    let page_width = profile.trim_width_in + bleed_in;
+    let page_height = profile.trim_height_in + 2.0 * bleed_in;
+
     doc.push_str(&format!(
         "#set page(\n  width: {}in,\n  height: {}in,\n  margin: (top: {}in, bottom: {}in, outside: {}in, inside: {}in),\n)\n\n",
-        profile.trim_width_in,
-        profile.trim_height_in,
-        effective_margin_top,
-        effective_margin_bottom,
-        margin_outside,
-        margin_inside,
+        page_width,
+        page_height,
+        effective_margin_top + bleed_in,
+        effective_margin_bottom + bleed_in,
+        margin_outside + bleed_in,
+        margin_inside, // no bleed on the spine side
     ));
 
     // Suppress-on-chapter-start: query all H1 heading pages and skip the
@@ -1590,11 +1626,10 @@ fn build_typst_markup(
                 // The hidden H1 heading is emitted AFTER this so it lands on the
                 // content page — this makes the TOC page number correct and lets
                 // the header/footer suppress logic detect this page as a chapter start.
-                let page_w_in = profile.trim_width_in;
-                let page_h_in = profile.trim_height_in;
+                // Use the full page dimensions (trim + bleed) so the image fills edge to edge.
                 doc.push_str(&format!(
                     "#page(margin: 0pt)[#image(\"{}\", width: {}in, height: {}in, fit: \"cover\")]\n\n",
-                    path, page_w_in, page_h_in,
+                    path, page_width, page_height,
                 ));
                 // Hidden heading for TOC/outline — now on the content page
                 doc.push_str(&format!("#heading(level: 1, outlined: true)[{}]\n", escaped_title));

@@ -264,6 +264,22 @@
   let activeProfile = $derived(profiles.find(p => p.id === activeProfileId) || null);
   let isEbook = $derived(activeProfile?.target_type === 'ebook');
 
+  // Effective page dimensions for the preview — includes bleed when enabled.
+  // Must match the Typst builder's page size calculation exactly.
+  let previewBleedIn = $derived.by(() => {
+    try {
+      const pl = JSON.parse(activeProfile?.print_layout_json || '{}');
+      if (pl.bleed_enabled) return pl.bleed_in ?? 0.125;
+    } catch { /* ignore */ }
+    return 0;
+  });
+  let previewPageDims = $derived.by(() => {
+    const trimW = activeProfile?.trim_width_in ?? 6;
+    const trimH = activeProfile?.trim_height_in ?? 9;
+    // Bleed only on outside (one side for width) + top and bottom
+    return { w: trimW + previewBleedIn, h: trimH + 2 * previewBleedIn };
+  });
+
   // Recompute the export size estimate when the user switches to the Export
   // sidebar tab on an ebook profile, changes compression level, or content
   // changes. Skipped for print profiles and non-export modes since it's
@@ -1912,7 +1928,7 @@
 
   function scrollToPage(index) {
     const el = document.getElementById(`preview-page-${index}`);
-    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
   }
 
   function scrollToSection(sectionId) {
@@ -1991,17 +2007,26 @@
         <div class="preview-scroll">
           {#each Array(pageCount) as _, i}
             <div class="preview-page-wrap" id="preview-page-{i}" data-page-index={i}>
-              {#if loadedPages.has(i)}
-                <img
-                  class="preview-page-img"
-                  src="http://iwe.localhost/preview/page/{i}.svg?v={compileGeneration}"
-                  alt="Page {i + 1}"
-                  draggable="false"
-                />
-              {:else}
-                <div class="preview-page-placeholder"
-                  style="width: {(activeProfile?.trim_width_in ?? 6) * 72}px; aspect-ratio: {activeProfile?.trim_width_in ?? 6} / {activeProfile?.trim_height_in ?? 9};"></div>
-              {/if}
+              <div class="preview-page-frame"
+                style="width: {previewPageDims.w * 72}px; aspect-ratio: {previewPageDims.w} / {previewPageDims.h};">
+                {#if loadedPages.has(i)}
+                  <img
+                    class="preview-page-img"
+                    src="http://iwe.localhost/preview/page/{i}.svg?v={compileGeneration}"
+                    alt="Page {i + 1}"
+                    draggable="false"
+                  />
+                {/if}
+                {#if previewBleedIn > 0}
+                  {@const bleedPx = previewBleedIn * 72}
+                  {@const isRecto = i % 2 === 0}
+                  <div class="trim-guides" style="
+                    top: {bleedPx}px;
+                    bottom: {bleedPx}px;
+                    {isRecto ? `left: 0; right: ${bleedPx}px;` : `left: ${bleedPx}px; right: 0;`}
+                  "></div>
+                {/if}
+              </div>
               <div class="page-number">{i + 1}</div>
             </div>
           {/each}
@@ -2592,17 +2617,21 @@
   .preview-page-wrap {
     display: flex; flex-direction: column; align-items: center; gap: 0.4rem;
   }
+  .preview-page-frame {
+    background: #f5f3f0;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.12), 0 0 0 1px rgba(0,0,0,0.06);
+    overflow: hidden;
+    position: relative;
+  }
   .preview-page-img {
     display: block;
-    max-width: 100%;
-    height: auto;
-    box-shadow: 0 2px 12px rgba(0,0,0,0.12), 0 0 0 1px rgba(0,0,0,0.06);
-    background: #fff;
+    width: 100%;
+    height: 100%;
   }
-  .preview-page-placeholder {
-    background: #f5f3f0;
-    border: 1px dashed rgba(0,0,0,0.12);
-    box-shadow: 0 2px 12px rgba(0,0,0,0.06);
+  .trim-guides {
+    position: absolute;
+    border: 1px dashed rgba(192, 57, 43, 0.5);
+    pointer-events: none;
   }
   .page-number {
     font-family: var(--iwe-font-ui); font-size: 0.7rem;

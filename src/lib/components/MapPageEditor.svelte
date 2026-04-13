@@ -1,5 +1,17 @@
 <script>
+  import { onMount } from 'svelte';
+  import { ensureUnitLoaded, toDisplay, fromDisplay, unitLabel, unitStep, subscribe } from '$lib/unitPreference.js';
+
   let { page, profile, onsave, oncancel } = $props();
+
+  let unit = $state('in');
+  let unitLoaded = $state(false);
+
+  onMount(async () => {
+    unit = await ensureUnitLoaded();
+    unitLoaded = true;
+    return subscribe(u => { unit = u; });
+  });
 
   // Resolution check: 300 DPI is the print standard.
   const PRINT_DPI = 300;
@@ -43,16 +55,18 @@
           spread: parsed.spread ?? false,
           image_data: parsed.image_data ?? '',
           sizing: parsed.sizing ?? 'fit-width',
+          gutter_overlap_in: parsed.gutter_overlap_in ?? 0.25,
         };
       } catch { /* fall through */ }
     }
-    return { spread: false, image_data: '', sizing: 'fit-width' };
+    return { spread: false, image_data: '', sizing: 'fit-width', gutter_overlap_in: 0.25 };
   }
 
   const initial = parseSettings(page.content);
   let spread = $state(initial.spread);
   let imageData = $state(initial.image_data);
   let sizing = $state(initial.sizing);
+  let gutterOverlap = $state(initial.gutter_overlap_in);
 
   let fileInput;
 
@@ -74,6 +88,7 @@
       spread,
       image_data: imageData,
       sizing,
+      gutter_overlap_in: spread ? gutterOverlap : 0,
     });
     onsave({ content });
   }
@@ -129,6 +144,23 @@
         </div>
         {#if spread}
           <span class="setting-hint">Image will be split across a left–right page pair</span>
+
+          {#if unitLoaded}
+            <div class="gutter-overlap-group">
+              <label class="setting-label" for="gutter-overlap">Gutter overlap</label>
+              {#key unit}
+                <div class="gutter-input-row">
+                  <div class="input-wrap">
+                    <input id="gutter-overlap" type="number" step={unitStep()} min="0"
+                      value={toDisplay(gutterOverlap)}
+                      oninput={(e) => { const v = fromDisplay(e.target.value); if (v != null) gutterOverlap = v; }} />
+                    <span class="unit-suffix">{unitLabel()}</span>
+                  </div>
+                </div>
+              {/key}
+              <span class="setting-hint">Each half extends past center by this amount to compensate for binding loss. Typical: {unit === 'mm' ? '6mm (paperback), 10mm (hardcover)' : '0.25" (paperback), 0.375" (hardcover)'}.</span>
+            </div>
+          {/if}
         {/if}
       </div>
 
@@ -373,6 +405,48 @@
   }
 
   /* Resolution warnings */
+  /* Gutter overlap */
+  .gutter-overlap-group {
+    margin-top: 0.6rem;
+    display: flex; flex-direction: column; gap: 0.35rem;
+  }
+  .gutter-input-row {
+    display: flex; align-items: center; gap: 0.5rem;
+  }
+  .input-wrap {
+    display: flex; align-items: center;
+    border: 1px solid var(--iwe-border); border-radius: var(--iwe-radius-sm);
+    background: var(--iwe-bg);
+    overflow: hidden;
+    width: 120px;
+  }
+  .input-wrap:focus-within { border-color: var(--iwe-accent); }
+  .input-wrap input {
+    flex: 1; min-width: 0;
+    border: none; background: none;
+    padding: 0.4rem 0.5rem;
+    font-family: var(--iwe-font-ui); font-size: 0.85rem;
+    color: var(--iwe-text);
+    outline: none;
+  }
+  .input-wrap input::-webkit-outer-spin-button,
+  .input-wrap input::-webkit-inner-spin-button {
+    -webkit-appearance: none; margin: 0;
+  }
+  .unit-suffix {
+    padding: 0 0.55rem;
+    font-family: var(--iwe-font-ui); font-size: 0.72rem;
+    color: var(--iwe-text-muted);
+    background: var(--iwe-bg-warm);
+    border-left: 1px solid var(--iwe-border);
+    height: 100%;
+    display: flex; align-items: center;
+  }
+  .gutter-mm {
+    font-family: var(--iwe-font-ui); font-size: 0.75rem;
+    color: var(--iwe-text-muted);
+  }
+
   .resolution-warning {
     display: flex; align-items: flex-start; gap: 0.5rem;
     background: rgba(217, 119, 6, 0.08);

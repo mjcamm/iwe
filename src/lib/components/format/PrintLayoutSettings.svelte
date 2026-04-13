@@ -26,9 +26,11 @@
         margin_inside_in:  parsed.margin_inside_in  ?? profile?.margin_inside_in  ?? 0.875,
         justify: parsed.justify ?? true,
         hyphens: parsed.hyphens ?? true,
+        bleed_enabled: parsed.bleed_enabled ?? false,
+        bleed_in: parsed.bleed_in ?? 0.125,
       };
     } catch {
-      return { margin_top_in: 0.875, margin_bottom_in: 0.875, margin_outside_in: 0.625, margin_inside_in: 0.875, justify: true, hyphens: true };
+      return { margin_top_in: 0.875, margin_bottom_in: 0.875, margin_outside_in: 0.625, margin_inside_in: 0.875, justify: true, hyphens: true, bleed_enabled: false, bleed_in: 0.125 };
     }
   });
 
@@ -39,6 +41,8 @@
   let insideIn = $state(settings.margin_inside_in);
   let justify  = $state(settings.justify);
   let hyphens  = $state(settings.hyphens);
+  let bleedEnabled = $state(settings.bleed_enabled);
+  let bleedIn = $state(settings.bleed_in);
 
   // Re-sync when profile prop changes
   $effect(() => {
@@ -48,6 +52,8 @@
     insideIn  = settings.margin_inside_in;
     justify   = settings.justify;
     hyphens   = settings.hyphens;
+    bleedEnabled = settings.bleed_enabled;
+    bleedIn  = settings.bleed_in;
   });
 
   let uLabel = $derived(unitLabel());
@@ -69,6 +75,8 @@
       margin_inside_in:  insideIn,
       justify,
       hyphens,
+      bleed_enabled: bleedEnabled,
+      bleed_in: bleedIn,
     });
     await updateProfileCategory(profile.id, 'print_layout_json', json);
     onchange?.();
@@ -81,6 +89,18 @@
 
   function toggleHyphens() {
     hyphens = !hyphens;
+    scheduleSave();
+  }
+
+  function toggleBleed() {
+    bleedEnabled = !bleedEnabled;
+    scheduleSave();
+  }
+
+  function handleBleedInput(e) {
+    const inches = fromDisplay(e.target.value);
+    if (inches == null) return;
+    bleedIn = inches;
     scheduleSave();
   }
 
@@ -199,6 +219,37 @@
         <span class="toggle-hint">Break words at line ends to avoid large gaps</span>
       </div>
     </button>
+  </div>
+
+  <div class="setting-group">
+    <div class="group-label">Bleed</div>
+
+    <button class="toggle-row" onclick={toggleBleed}>
+      <span class="toggle-switch" class:on={bleedEnabled}>
+        <span class="toggle-knob"></span>
+      </span>
+      <div class="toggle-text">
+        <span class="toggle-label">Enable bleed</span>
+        <span class="toggle-hint">Extend page area beyond trim for edge-to-edge printing</span>
+      </div>
+    </button>
+
+    {#if bleedEnabled && unitLoaded}
+      {#key unit}
+        <div class="bleed-amount">
+          <label class="margin-field">
+            <span>Bleed amount</span>
+            <div class="input-wrap">
+              <input type="number" step={step} min="0"
+                value={toDisplay(bleedIn)}
+                oninput={handleBleedInput} />
+              <span class="unit-suffix">{uLabel}</span>
+            </div>
+          </label>
+          <span class="bleed-hint">Standard: {unit === 'mm' ? '3mm' : '0.125"'} per side. Check your printer's requirements.</span>
+        </div>
+      {/key}
+    {/if}
   </div>
 </div>
 
@@ -332,6 +383,16 @@
   }
   .toggle-hint {
     font-family: var(--iwe-font-ui); font-size: 0.7rem;
+    color: var(--iwe-text-muted); line-height: 1.35;
+  }
+
+  .bleed-amount {
+    padding: 0.5rem 0 0 0;
+    display: flex; flex-direction: column; gap: 0.4rem;
+    max-width: 180px;
+  }
+  .bleed-hint {
+    font-family: var(--iwe-font-ui); font-size: 0.68rem;
     color: var(--iwe-text-muted); line-height: 1.35;
   }
 </style>
