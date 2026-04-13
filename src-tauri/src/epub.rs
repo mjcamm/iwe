@@ -99,30 +99,13 @@ struct ExtractedImage {
 /// Returns None on invalid input (bad char, wrong length) so the caller
 /// can fall back to leaving the inline data URL in place.
 fn decode_base64(input: &str) -> Option<Vec<u8>> {
-    let mut out: Vec<u8> = Vec::with_capacity(input.len() * 3 / 4);
-    let mut buf: u32 = 0;
-    let mut bits: u32 = 0;
-    for c in input.chars() {
-        if c.is_whitespace() {
-            continue;
-        }
-        let v: u32 = match c {
-            'A'..='Z' => (c as u32) - ('A' as u32),
-            'a'..='z' => (c as u32) - ('a' as u32) + 26,
-            '0'..='9' => (c as u32) - ('0' as u32) + 52,
-            '+' | '-' => 62,
-            '/' | '_' => 63,
-            '=' => break,
-            _ => return None,
-        };
-        buf = (buf << 6) | v;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push(((buf >> bits) & 0xff) as u8);
-        }
-    }
-    Some(out)
+    use base64::Engine;
+    // Strip whitespace and try standard base64 first, then URL-safe
+    let cleaned: String = input.chars().filter(|c| !c.is_whitespace()).collect();
+    base64::engine::general_purpose::STANDARD
+        .decode(&cleaned)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(&cleaned))
+        .ok()
 }
 
 /// FNV-1a 64-bit hash. Used as a short fingerprint for image deduplication.
@@ -281,9 +264,10 @@ fn extract_inline_images(
         let b64 = &caps[3];
         let suffix = &caps[4]; // `"`
 
-        // Hash the original data URL so identical images dedupe regardless
-        // of where they appear.
-        let hash_input = format!("{};{}", mime, b64);
+        // Hash mime + length + prefix of base64 for dedup. Hashing the full
+        // multi-MB base64 string is wasteful; a 4KB prefix + length is unique enough.
+        let prefix_len = b64.len().min(4096);
+        let hash_input = format!("{};{};{}", mime, b64.len(), &b64[..prefix_len]);
         let hash = fnv1a_64(hash_input.as_bytes());
 
         // Ensure the image is in the accumulator. Decode (and maybe compress)
@@ -389,14 +373,15 @@ pub fn export_epub(
     state: tauri::State<'_, AppState>,
     request: EpubExportRequest,
 ) -> Result<Vec<u8>, String> {
-    // Read the book cover BLOB from the current project's DB. The cover lives
-    // in a dedicated table (not in the frontend-sent payload) so the front end
-    // doesn't have to round-trip binary through JSON for every export.
+    use std::time::Instant;
+    let t_start = Instant::now();
+
     let cover: Option<(Vec<u8>, String)> = {
         let guard = state.db.lock().map_err(|e| e.to_string())?;
         let conn = guard.as_ref().ok_or("No project open")?;
         db::get_book_cover(conn).map_err(|e| e.to_string())?
     };
+    let t_cover_load = t_start.elapsed();
 
     let mut builder = EpubBuilder::new(ZipLibrary::new().map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
@@ -444,36 +429,39 @@ pub fn export_epub(
             .map_err(|e| e.to_string())?;
     }
 
-    // Extract inline `data:` images from every chapter/page body in a single
-    // accumulator pass so identical images dedupe across the whole book. The
-    // rewritten HTML strings (with data URLs replaced by relative paths) get
-    // stored parallel to the original request content so we can iterate them
-    // in the same order below.
+    let t_setup = t_start.elapsed();
+
     let mut image_accumulator: HashMap<u64, ExtractedImage> = HashMap::new();
     let front_rewritten: Vec<String> = request
         .front_pages
         .iter()
         .map(|p| extract_inline_images(&p.html, &mut image_accumulator, compress_params.as_ref()))
         .collect();
+    let t_front_images = t_start.elapsed();
+
     let chapter_rewritten: Vec<String> = request
         .chapters
         .iter()
         .map(|c| extract_inline_images(&c.html, &mut image_accumulator, compress_params.as_ref()))
         .collect();
+    let t_chapter_images = t_start.elapsed();
+
     let back_rewritten: Vec<String> = request
         .back_pages
         .iter()
         .map(|p| extract_inline_images(&p.html, &mut image_accumulator, compress_params.as_ref()))
         .collect();
+    let t_back_images = t_start.elapsed();
 
-    // Add every extracted image to the EPUB as a resource. Must happen
-    // before any `add_content` calls so the images appear in the manifest
-    // ahead of the chapters that reference them.
+    let total_image_bytes: usize = image_accumulator.values().map(|img| img.bytes.len()).sum();
+    let image_count = image_accumulator.len();
+
     for img in image_accumulator.values() {
         builder
             .add_resource(img.path.as_str(), img.bytes.as_slice(), img.mime.as_str())
             .map_err(|e| e.to_string())?;
     }
+    let t_add_resources = t_start.elapsed();
 
     // Front matter pages
     for (i, page) in request.front_pages.iter().enumerate() {
@@ -526,14 +514,33 @@ pub fn export_epub(
             .map_err(|e| e.to_string())?;
     }
 
+    let t_add_content = t_start.elapsed();
+
     // Generate EPUB
     let mut output: Vec<u8> = Vec::new();
     builder.generate(&mut output).map_err(|e| e.to_string())?;
+    let t_generate = t_start.elapsed();
 
-    // Post-process to patch the epub-builder 0.8 bug where `<dc:language>`
-    // is emitted with the hardcoded `id="epub-creator-0"`, duplicating the
-    // `<dc:creator>` id and triggering epubcheck RSC-005. See fix_opf_ids.
-    fix_opf_ids(output)
+    let result = fix_opf_ids(output);
+    let t_total = t_start.elapsed();
+
+    log::info!(
+        "[epub] timing: cover_load={:.0}ms setup={:.0}ms front_images={:.0}ms chapter_images={:.0}ms back_images={:.0}ms add_resources={:.0}ms add_content={:.0}ms generate={:.0}ms fix_opf={:.0}ms total={:.0}ms | {} images ({:.1}MB)",
+        t_cover_load.as_secs_f64() * 1000.0,
+        (t_setup - t_cover_load).as_secs_f64() * 1000.0,
+        (t_front_images - t_setup).as_secs_f64() * 1000.0,
+        (t_chapter_images - t_front_images).as_secs_f64() * 1000.0,
+        (t_back_images - t_chapter_images).as_secs_f64() * 1000.0,
+        (t_add_resources - t_back_images).as_secs_f64() * 1000.0,
+        (t_add_content - t_add_resources).as_secs_f64() * 1000.0,
+        (t_generate - t_add_content).as_secs_f64() * 1000.0,
+        (t_total - t_generate).as_secs_f64() * 1000.0,
+        t_total.as_secs_f64() * 1000.0,
+        image_count,
+        total_image_bytes as f64 / 1024.0 / 1024.0,
+    );
+
+    result
 }
 
 /// Unzip the generated EPUB in memory, patch `OEBPS/content.opf` to remove

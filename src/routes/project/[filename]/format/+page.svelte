@@ -1030,19 +1030,16 @@
   let ebookGenerating = $state(false);
 
   function ebookNextPage() {
-    console.log('[ebook] next() called');
     if (ebookRendition) ebookRendition.next();
   }
   function ebookPrevPage() {
-    console.log('[ebook] prev() called');
     if (ebookRendition) ebookRendition.prev();
   }
 
   let _ebookBuildInFlight = false;
   async function renderEbookPreview() {
-    console.log('[ebook] renderEbookPreview called', { activeProfileId, isEbook, hasViewer: !!ebookViewerEl, inFlight: _ebookBuildInFlight });
     if (!activeProfileId || !isEbook || !ebookViewerEl) return;
-    if (_ebookBuildInFlight) { console.log('[ebook] skipping — build already in flight'); return; }
+    if (_ebookBuildInFlight) return;
     _ebookBuildInFlight = true;
     ebookGenerating = true;
 
@@ -1057,16 +1054,9 @@
       const epubBytes = await buildEpubForPreview();
       if (!epubBytes) { ebookGenerating = false; return; }
 
-      console.log('[ebook] loading into epub.js...');
-      // Pass ArrayBuffer directly — blob URLs cause epub.js to resolve paths
-      // relative to the page origin, resulting in 404s for container.xml etc.
       const arrayBuffer = new Uint8Array(epubBytes).buffer;
       ebookBook = ePub(arrayBuffer);
-
-      // Wait for the book to be fully parsed before rendering
       await ebookBook.ready;
-      console.log('[ebook] book ready, spine length:', ebookBook.spine?.length);
-      console.log('[ebook] TOC:', ebookBook.navigation?.toc?.map(t => t.label));
 
       ebookRendition = ebookBook.renderTo(ebookViewerEl, {
         width: deviceDims.w,
@@ -1076,45 +1066,19 @@
         allowScriptedContent: true,
       });
 
-      // Generate global locations first so page numbers are available when relocated fires
-      console.log('[ebook] generating locations...');
+      // Generate global locations so page numbers work across the whole book
       await ebookBook.locations.generate(1024);
-      console.log('[ebook] locations._locations.length:', ebookBook.locations._locations?.length);
-      console.log('[ebook] locations.total:', ebookBook.locations.total);
-      console.log('[ebook] locations.length():', ebookBook.locations.length());
-      ebookTotalPages = ebookBook.locations.length() || ebookBook.locations.total || 1;
-      console.log('[ebook] ebookTotalPages set to:', ebookTotalPages);
+      ebookTotalPages = ebookBook.locations.length() || 1;
 
       ebookRendition.on('relocated', (location) => {
-        console.log('[ebook] relocated full object:', JSON.stringify(location?.start, null, 2));
         if (!location?.start) return;
-
-        // Try multiple approaches to get page number
-        const cfi = location.start.cfi;
-        const locFromCfi = ebookBook.locations.locationFromCfi(cfi);
-        const pctFromCfi = ebookBook.locations.percentageFromCfi(cfi);
-        const displayed = location.start.displayed;
-
-        console.log('[ebook] locationFromCfi:', locFromCfi);
-        console.log('[ebook] percentageFromCfi:', pctFromCfi);
-        console.log('[ebook] displayed:', displayed);
-        console.log('[ebook] location.start.location:', location.start.location);
-
-        if (locFromCfi >= 0) {
-          ebookCurrentPage = locFromCfi + 1;
-        } else if (pctFromCfi !== null && pctFromCfi !== undefined) {
-          ebookCurrentPage = Math.max(1, Math.round(pctFromCfi * ebookTotalPages));
+        const loc = ebookBook.locations.locationFromCfi(location.start.cfi);
+        if (loc >= 0) {
+          ebookCurrentPage = loc + 1;
         }
-        console.log('[ebook] ebookCurrentPage set to:', ebookCurrentPage, '/', ebookTotalPages);
       });
 
-      console.log('[ebook] displaying first section...');
       await ebookRendition.display();
-      console.log('[ebook] display complete');
-
-      // Log the current location after display
-      const currLoc = ebookRendition.currentLocation();
-      console.log('[ebook] currentLocation after display:', JSON.stringify(currLoc, null, 2));
     } catch (e) {
       console.error('[format] ebook preview failed:', e);
     } finally {
@@ -1123,24 +1087,68 @@
     }
   }
 
+  // Downscale a data URL image for preview — keeps aspect ratio, reduces to maxDim pixels
+  function downscaleDataUrl(dataUrl, maxDim = 600) {
+    return new Promise((resolve) => {
+      if (!dataUrl || !dataUrl.startsWith('data:image')) { resolve(dataUrl); return; }
+      const img = new Image();
+      img.onload = () => {
+        // Skip if already small enough
+        if (img.width <= maxDim && img.height <= maxDim) { resolve(dataUrl); return; }
+        const scale = Math.min(maxDim / img.width, maxDim / img.height);
+        const w = Math.round(img.width * scale);
+        const h = Math.round(img.height * scale);
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL('image/jpeg', 0.7));
+      };
+      img.onerror = () => resolve(dataUrl);
+      img.src = dataUrl;
+    });
+  }
+
+  // Downscale all data:image URLs in an HTML string for preview
+  async function downscaleHtmlImages(html) {
+    const dataUrlRegex = /src="(data:image\/[^"]+)"/g;
+    const matches = [...html.matchAll(dataUrlRegex)];
+    if (matches.length === 0) return html;
+    let result = html;
+    for (const match of matches) {
+      const original = match[1];
+      // Only downscale large ones (> 50KB base64 ≈ 37KB image)
+      if (original.length < 50000) continue;
+      const smaller = await downscaleDataUrl(original);
+      if (smaller !== original) {
+        result = result.replace(original, smaller);
+      }
+    }
+    return result;
+  }
+
   // Build EPUB bytes for preview — reuses the same export pipeline as handleExportEpub
   async function buildEpubForPreview() {
     try {
-      console.time('[ebook] buildEpubForPreview');
-      console.log('[ebook] resolving settings...');
+      const t0 = performance.now();
+
       const settings = resolveEbookSettings(activeProfile);
       const css = buildEbookCss(settings, { inline: false });
+      const t1 = performance.now();
 
-      const epubChapters = chapters.map((ch, i) => {
+      let chapterHtmlSizes = [];
+      const epubChapters = [];
+      for (let i = 0; i < chapters.length; i++) {
+        const ch = chapters[i];
         const heading = renderChapterHeadingHtml(ch, i, settings.chHeadings);
         const body = chapterToHtml(ch);
         const combined = substituteImageBreaks(heading + body, settings.breaks);
-        return {
-          title: ch.title,
-          subtitle: ch.subtitle || '',
-          html: htmlToXhtml(combined),
-        };
-      });
+        const xhtml = await downscaleHtmlImages(htmlToXhtml(combined));
+        chapterHtmlSizes.push({ title: ch.title, bytes: xhtml.length });
+        epubChapters.push({ title: ch.title, subtitle: ch.subtitle || '', html: xhtml });
+      }
+      const t2 = performance.now();
 
       const allPages = formatPages;
       const epubPageContent = (p) => {
@@ -1148,48 +1156,53 @@
         if (p.page_role === 'map') return generateMapHtml(p);
         return pageToHtml(p);
       };
-      const frontPages = allPages
-        .filter(p => p.position === 'front' && isPageIncludedIn(p.id, activeProfileId))
-        .map(p => ({
+      const frontPages = [];
+      for (const p of allPages.filter(pp => pp.position === 'front' && isPageIncludedIn(pp.id, activeProfileId))) {
+        frontPages.push({
           title: p.title,
           role: p.ebook_metadata_tag || p.page_role,
-          html: htmlToXhtml(substituteImageBreaks(`<div class="ebook-page">${epubPageContent(p)}</div>`, settings.breaks)),
+          html: await downscaleHtmlImages(htmlToXhtml(substituteImageBreaks(`<div class="ebook-page">${epubPageContent(p)}</div>`, settings.breaks))),
           position: p.position,
-        }));
-      const backPages = allPages
-        .filter(p => p.position === 'back' && isPageIncludedIn(p.id, activeProfileId))
-        .map(p => ({
+        });
+      }
+      const backPages = [];
+      for (const p of allPages.filter(pp => pp.position === 'back' && isPageIncludedIn(pp.id, activeProfileId))) {
+        backPages.push({
           title: p.title,
           role: p.ebook_metadata_tag || p.page_role,
-          html: htmlToXhtml(substituteImageBreaks(`<div class="ebook-page">${epubPageContent(p)}</div>`, settings.breaks)),
+          html: await downscaleHtmlImages(htmlToXhtml(substituteImageBreaks(`<div class="ebook-page">${epubPageContent(p)}</div>`, settings.breaks))),
           position: p.position,
-        }));
+        });
+      }
+      const t3 = performance.now();
 
       const bookTitle = await getProjectSetting('book_title') || 'Untitled';
       const authorName = await getProjectSetting('author_name') || '';
       const bookLanguage = await getProjectSetting('book_language') || 'en';
       const bookDescription = await getProjectSetting('book_description') || '';
+      const t4 = performance.now();
 
-      const request = {
-        title: bookTitle,
-        author: authorName,
-        language: bookLanguage,
-        description: bookDescription,
-        chapters: epubChapters,
-        front_pages: frontPages,
-        back_pages: backPages,
-        css,
-        compression_level: 'none',
+      const totalHtmlBytes = chapterHtmlSizes.reduce((sum, c) => sum + c.bytes, 0);
+      const requestJson = {
+        title: bookTitle, author: authorName, language: bookLanguage,
+        description: bookDescription, chapters: epubChapters,
+        front_pages: frontPages, back_pages: backPages,
+        css, compression_level: 'none',
       };
 
-      console.log('[ebook] calling exportEpub...');
-      const epubBytes = await exportEpub(request);
-      console.log('[ebook] exportEpub returned', epubBytes?.length, 'bytes');
-      console.timeEnd('[ebook] buildEpubForPreview');
+      console.log(`[ebook] timing: settings=${(t1-t0).toFixed(0)}ms chapters=${(t2-t1).toFixed(0)}ms pages=${(t3-t2).toFixed(0)}ms metadata=${(t4-t3).toFixed(0)}ms`);
+      console.log(`[ebook] payload: ${chapters.length} chapters (${(totalHtmlBytes/1024).toFixed(0)}KB HTML), ${frontPages.length} front, ${backPages.length} back`);
+      console.log('[ebook] chapter sizes:', chapterHtmlSizes.map(c => `${c.title}: ${(c.bytes/1024).toFixed(0)}KB`).join(', '));
+
+      const t5 = performance.now();
+      const epubBytes = await exportEpub(requestJson);
+      const t6 = performance.now();
+
+      console.log(`[ebook] exportEpub: ${(t6-t5).toFixed(0)}ms, ${(epubBytes?.length/1024/1024).toFixed(1)}MB`);
+      console.log(`[ebook] total buildEpubForPreview: ${(t6-t0).toFixed(0)}ms`);
       return epubBytes;
     } catch (e) {
       console.error('[format] buildEpubForPreview failed:', e);
-      console.timeEnd('[ebook] buildEpubForPreview');
       return null;
     }
   }

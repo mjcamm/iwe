@@ -94,6 +94,7 @@ name = "app"
 version = "0.1.0"
 dependencies = [
  "aho-corasick",
+ "base64 0.22.1",
  "epub-builder",
  "genpdf",
  "image",

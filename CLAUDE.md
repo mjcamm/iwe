@@ -42,7 +42,7 @@ Chapter content is stored as **Yjs binary state** (BLOB), not HTML strings. Both
 5. **Chapter switching:** The entire TipTap `Editor` instance is destroyed and recreated — `ySyncPlugin` binds to a specific `XmlFragment` at creation time and cannot be rebound
 
 **Key files:**
-- `src-tauri/src/ydoc.rs` — `load_doc()`, `extract_plain_text()`, `extract_text_with_breaks()`, `extract_text_for_format()`, `word_count()`
+- `src-tauri/src/ydoc.rs` — `load_doc()`, `extract_plain_text()`, `extract_text_with_breaks()`, `extract_text_for_format()`, `extract_chapter_blocks_from_bytes()`, `word_count()`
 - `src/lib/ydoc.js` — `createChapterDoc()`, `encodeDoc()`, `destroyDoc()`
 
 **Undo/Redo:** StarterKit's `history` plugin is disabled (`history: false`). Undo/redo uses `yUndoPlugin` from `y-prosemirror` with `undo`/`redo` commands bound to `Mod-z`/`Mod-y`/`Mod-Shift-z`.
@@ -391,7 +391,7 @@ Typst crates used (all pinned at `0.14`): `typst` (core, `World` trait, `PagedDo
    - Takes the `AppState.db` mutex at the start and **holds it for the whole compile** (DB load → Y.Doc extract → markup build → Typst compile). This is 4 serial phases on one mutex; any other DB operation blocks during a compile. Architectural gotcha to be aware of.
    - Early returns for ebook: if `profile.target_type == "ebook"`, clears `FormatState.document = None` and returns `CompileResult { page_count: 0, ... }`. Typst is never invoked for ebook profiles. Ebook preview is rendered entirely on the frontend as HTML (see below).
    - Loads pages via `list_format_pages`, filters via `list_excluded_page_ids_for_profile`, loads `list_chapters`, then reads four `project_settings` keys inline via `query_row`: `book_title`, `author_name`, `series_name`, `series_number`.
-   - Extracts chapter text via `ydoc::extract_text_for_format_from_bytes` — **this is a distinct function** from `extract_text_with_breaks` used elsewhere. It additionally emits the literal string `"* * *"` for top-level `horizontalRule` nodes, which the Typst builder detects as scene break sentinels. **Never substitute `extract_text_with_breaks` in the format path or scene breaks will silently become blank lines.**
+   - Extracts chapter content via `ydoc::extract_chapter_blocks_from_bytes` — returns `Vec<ChapterBlock>` (structured paragraphs with inline formatting marks + scene breaks) using the yrs `XmlTextRef::diff()` API to read formatting attributes directly from the Y.Doc. Each `ChapterBlock::Paragraph` contains `Vec<FmtSpan>` with text + boolean flags for bold/italic/underline/strike/superscript/subscript + optional font size/family. `ChapterBlock::SceneBreak` replaces the old `"* * *"` sentinel pattern. The Typst builder converts spans to markup via `apply_fmt_span()` / `spans_to_typst()`.
    - Calls `build_typst_markup(...)` → returns `(String markup, Vec<String> section_ids, ImageMap images)`.
    - Lazy-inits the font cache via `FormatState::get_or_init_fonts()` on first call.
    - Calls `compile_document(...)` which builds a fresh `IweWorld` per compile and runs `typst::compile::<PagedDocument>(&world)`. Always dumps the full markup to `$TEMP/iwe_typst_debug.typ` on every compile (success or failure) for debugging. On error, returns a descriptive error with line/column context — check the dump file first when debugging markup issues.
@@ -481,17 +481,18 @@ Small centered modal opened via the gear button on TOC-type format pages. Two se
 
 Ebook output previously showed "Ebook preview coming soon". That has been replaced with a live preview + real EPUB export.
 
-**Ebook preview** (`format/+page.svelte:345-458`): when `activeProfile?.target_type === 'ebook'`, `compileAndShow()` skips `compilePreview()` and calls `generateEbookPreview()` instead. The function generates a self-contained HTML string with a `<style>` block sourced from `activeProfile.typography_json`, concatenates front-matter pages + chapter content (via `chapterToHtml()`) + back-matter pages, and sets `ebookPreviewHtml`. The template then renders a device frame:
+**Ebook preview** uses **epub.js** (`npm: epubjs`) for proper ereader-style paginated rendering. When `activeProfile?.target_type === 'ebook'`, `compileAndShow()` calls `renderEbookPreview()` which:
 
-```svelte
-<div class="ebook-device" style="width: {deviceDims.w + 24}px;">
-  <div class="ebook-screen" style="width: {deviceDims.w}px; height: {deviceDims.h}px;">
-    {@html ebookPreviewHtml}
-  </div>
-</div>
-```
+1. Builds a real EPUB via `buildEpubForPreview()` — same pipeline as the export (`exportEpub` Rust command) but with images downscaled on the JS side for speed (`downscaleHtmlImages` → canvas resize to 600px max)
+2. Passes the EPUB bytes as an `ArrayBuffer` to `ePub(arrayBuffer)` (epub.js)
+3. Renders via `ebookBook.renderTo(element, { width, height, spread: 'none', flow: 'paginated', allowScriptedContent: true })`
+4. Generates global page locations via `ebookBook.locations.generate(1024)` for whole-book page numbering
+5. Listens to `relocated` events to update `ebookCurrentPage` via `locations.locationFromCfi()`
+6. Navigation: `ebookRendition.next()` / `ebookRendition.prev()` handle both within-section pagination and cross-section navigation
 
-Device dimensions come from `DEVICE_DIMS` keyed by `ebookDevice` (default `'kindle-paperwhite'`, 300×480px). The outer device adds 24px padding for a bezel look. `pageCount` is 0 in ebook mode; the timing bar is hidden; the IntersectionObserver is torn down.
+Device dimensions come from `DEVICE_DIMS` keyed by `ebookDevice` (default `'kindle-paperwhite'`, 300×480px). The outer device frame adds 24px padding for a bezel look. Below the screen: prev/next buttons + page indicator (e.g. "42 / 165"). `pageCount` is 0 in ebook mode; the timing bar is hidden; the IntersectionObserver is torn down.
+
+**Performance note:** The preview EPUB build is slow (~15-20s) because images are embedded as base64 in HTML, sent over IPC as JSON, regex-scanned and decoded in Rust, then zipped. The `downscaleHtmlImages` helper mitigates this by shrinking large images to 600px on the JS side before sending. The proper fix is migrating to BLOB storage (see Work-in-progress section).
 
 **EPUB export** — `src-tauri/src/epub.rs` is fully implemented and registered. Single command `export_epub(request: EpubExportRequest) -> Result<Vec<u8>, String>`, **stateless** (takes no `AppState` — all content comes from the frontend payload). Uses `epub-builder = "0.8"` with `ZipLibrary::new()` at EPUB 3.0. Request shape:
 
@@ -530,7 +531,7 @@ Generated Typst document structure:
 
 **Image ingestion**: `ingest_image(src, images)` decodes data URLs, assigns virtual path `/iwe-img-{fnv1a_hash}.{ext}` (dedupes identical images by hash), stores bytes in `ImageMap`. `IweWorld.file()` serves these when Typst requests them.
 
-**Scene break detection**: `is_scene_break_sentinel(para)` returns true if the paragraph contains only `*` and whitespace with ≥3 stars. This is why `extract_text_for_format_from_bytes` must emit `"* * *"` for `horizontalRule` nodes.
+**Scene break detection**: `extract_chapter_blocks_from_bytes` detects `horizontalRule` elements in the Y.Doc and emits `ChapterBlock::SceneBreak` directly — no sentinel strings needed. The old `is_scene_break_sentinel()` function and `extract_text_for_format_from_bytes` are still in the code but unused (dead code from the pre-formatting pipeline).
 
 #### The `IweWorld` — Typst `World` trait implementation (format.rs:60-150)
 
@@ -594,7 +595,7 @@ Calls `FormatState::get_or_init_fonts()` (which lazy-inits via `typst_kit::fonts
 
 #### EPUB export pipeline (how preview and export stay in sync)
 
-The ebook preview (`generateEbookPreview`) and the EPUB export (`handleExportEpub`) share the same code path for content rendering, CSS generation, and image handling. This is deliberate — any time you change one, you should verify the other still works.
+The ebook preview (`buildEpubForPreview` → epub.js) and the EPUB export (`handleExportEpub`) share the same code path for content rendering, CSS generation, and image handling — both call the Rust `exportEpub` command to build real EPUB bytes. The old `generateEbookPreview` function that built HTML directly is still in the file but no longer called (dead code). Any time you change the export pipeline, the preview automatically picks up the changes.
 
 **Shared helpers** (all in `format/+page.svelte`):
 - `resolveEbookSettings(profile)` — parses the five Custom category JSONs (`chapter_headings_json`, `paragraph_json`, `headings_json`, `breaks_json`, `typography_json`) merged with hand-kept `*_DEFAULTS` constants. Typography falls back to legacy scalar columns (`font_body`, `font_size_pt`, `line_spacing`) when the JSON is empty.
@@ -606,14 +607,13 @@ The ebook preview (`generateEbookPreview`) and the EPUB export (`handleExportEpu
 - `chapterToHtml(chapter)` — Y.Doc → PM JSON → HTML via `generateHTML(json, chapterHtmlExtensions)`. The extension list MUST include `NoteMarker`, `StateMarker`, `TimeBreak` custom nodes or chapters that contain them silently render as empty (the catch swallowed the schema error). See import at top of file.
 - `pageToHtml(page)` — parses the format_pages row's PM JSON (from PageContentEditor) and runs `generateHTML(parsed, pageHtmlExtensions)`. A minimal inline `ImageNodeForHtml` handles the image node with width baked into the style attribute (no NodeView available in HTML generation).
 
-**Preview pipeline** (`generateEbookPreview`):
-1. Resolve settings, build inline CSS with `.ebook-chapter-break` scaffolding + `.ebook-page` resets (no indent, no drop caps, `hyphens: none`, `p:empty::before` for blank lines)
-2. Iterate front pages → wrap in `<div class="ebook-page">`, emit `generateTocHtml(page)` for TOC pages or `pageToHtml(p)` for free-form. **Page titles are NOT rendered** — the title field is internal only.
-3. Iterate chapters → emit `renderChapterHeadingHtml(ch, i, chHeadings)` + `chapterToHtml(ch)`
-4. Iterate back pages → same as front
-5. Wrap everything in `<div class="ebook-body">`
-6. Run `substituteImageBreaks` over the whole thing
-7. Set `ebookPreviewHtml` (shown via `{@html}` inside the device-frame wrapper)
+**Preview pipeline** (`buildEpubForPreview` → epub.js):
+1. Resolve settings, build raw CSS (same as export path)
+2. Convert chapters to XHTML via `chapterToHtml` + `htmlToXhtml`, downscale large images via `downscaleHtmlImages`
+3. Build front/back matter pages (filtered by profile exclusions), downscale images
+4. Call `exportEpub` Rust command with the request — produces real EPUB bytes
+5. Feed `ArrayBuffer` to `ePub()` from epub.js, render with `rendition.display()`
+6. epub.js handles all pagination via CSS columns internally (the same approach used by Readium and other production ebook readers)
 
 **Export pipeline** (`handleExportEpub`):
 1. Resolve settings, build raw CSS (no `<style>` wrapper, no preview-only scaffolding)
@@ -913,7 +913,8 @@ This list is authoritative. If you're an agent working on this codebase, do not 
 - **`trim_json` column on `format_profiles`** — declared, migrated, and in `FORMAT_CATEGORY_COLUMNS`, but completely inert. `TrimSettings.svelte` writes to scalar columns directly via `updateFormatProfile`, and `format.rs` never reads `trim_json`. Reserved space for future trim-specific metadata (bleed, safe zones, etc.).
 
 **Format editor — partially built but with known gaps (NOT fully "not built"):**
-- **Ebook preview and EPUB export are live** (no longer placeholder). The ebook preview renders a device-framed HTML view via `generateEbookPreview`, and `epub::export_epub` is fully wired through `handleExportEpub()` in the Export sidebar mode. What's still weak: `EpubChapter.subtitle` has no UI that populates it, `EpubPage.position` is carried but unused by the builder, and the CSS sent to Rust is generated ad-hoc from `typography_json` — there's no per-profile ebook stylesheet editor yet.
+- **Ebook preview uses epub.js** for real paginated rendering. The preview generates a full EPUB and feeds it to epub.js, which handles pagination identically to production ebook readers. What's still weak: `EpubChapter.subtitle` has no UI that populates it, `EpubPage.position` is carried but unused by the builder, and the CSS sent to Rust is generated ad-hoc from `typography_json` — there's no per-profile ebook stylesheet editor yet.
+- **Image storage is base64-in-HTML (slow).** All images (map pages, chapter images, custom page images) are stored as base64 data URLs embedded in HTML content strings. This causes the EPUB preview build to take ~15-20s because images must be regex-scanned from HTML, decoded from base64, and re-encoded into the zip. **The proper fix:** migrate to a `content_images` table with BLOB storage, reference images by ID in HTML (e.g. `<img src="iwe-image://123">`), and have Rust read BLOBs directly from the DB at export time — same pattern as the book cover. Expected speedup: 20s → under 2s. Affects: `format_pages.content` (PageContentEditor images), `chapter_headings_json.image_default`, `breaks_json.image_data`, map page `image_data`, and any chapter content with pasted images.
 - **`duplicate_format_profile` does not copy JSON category columns.** The INSERT SELECT at db.rs:2086-2089 copies only scalar fields. Duplicating a heavily customized profile silently resets all 8 Custom-mode categories to `'{}'`. Scoped to fix but not done.
 - **No compile debounce.** Rapid setting changes trigger overlapping Typst compiles. Harmless but wasteful.
 

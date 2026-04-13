@@ -953,28 +953,12 @@ fn ingest_image(src: &str, images: &mut ImageMap) -> Option<(String, String)> {
 
 /// Minimal base64 decoder. Avoids pulling in a dep for one use.
 fn base64_decode(input: &str) -> Option<Vec<u8>> {
+    use base64::Engine;
     let cleaned: String = input.chars().filter(|c| !c.is_whitespace()).collect();
-    let mut out = Vec::with_capacity(cleaned.len() * 3 / 4);
-    let mut buf: u32 = 0;
-    let mut bits: u32 = 0;
-    for c in cleaned.chars() {
-        let v: u32 = match c {
-            'A'..='Z' => (c as u32) - ('A' as u32),
-            'a'..='z' => (c as u32) - ('a' as u32) + 26,
-            '0'..='9' => (c as u32) - ('0' as u32) + 52,
-            '+' | '-' => 62,
-            '/' | '_' => 63,
-            '=' => break,
-            _ => return None,
-        };
-        buf = (buf << 6) | v;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push(((buf >> bits) & 0xff) as u8);
-        }
-    }
-    Some(out)
+    base64::engine::general_purpose::STANDARD
+        .decode(&cleaned)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(&cleaned))
+        .ok()
 }
 
 /// FNV-1a hash for image deduplication and stable virtual paths.
