@@ -42,7 +42,7 @@ Chapter content is stored as **Yjs binary state** (BLOB), not HTML strings. Both
 5. **Chapter switching:** The entire TipTap `Editor` instance is destroyed and recreated — `ySyncPlugin` binds to a specific `XmlFragment` at creation time and cannot be rebound
 
 **Key files:**
-- `src-tauri/src/ydoc.rs` — `load_doc()`, `encode_doc()`, `extract_plain_text()`, `extract_text_with_breaks()`, `word_count()`
+- `src-tauri/src/ydoc.rs` — `load_doc()`, `extract_plain_text()`, `extract_text_with_breaks()`, `extract_text_for_format()`, `word_count()`
 - `src/lib/ydoc.js` — `createChapterDoc()`, `encodeDoc()`, `destroyDoc()`
 
 **Undo/Redo:** StarterKit's `history` plugin is disabled (`history: false`). Undo/redo uses `yUndoPlugin` from `y-prosemirror` with `undo`/`redo` commands bound to `Mod-z`/`Mod-y`/`Mod-Shift-z`.
@@ -238,7 +238,8 @@ src/
 │       ├── SearchPanel.svelte    # Text / Dialogue / Relationship / Descriptive (semantic) search
 │       ├── AnalysisPanel.svelte  # Analysis tool selector — 11 tools across 4 groups
 │       ├── FontPicker.svelte     # System font picker with in-face previews (calls list_system_fonts)
-│       ├── PageContentEditor.svelte # Rich HTML editor for format-editor custom pages (with image support)
+│       ├── PageContentEditor.svelte # Rich text editor for free-form format pages (with image support)
+│       ├── TocPageEditor.svelte    # TOC page settings editor (title, leader style)
 │       ├── KanbanCardModal.svelte # Create/edit card modal used by Kanban board
 │       ├── WordPalettes.svelte   # Full palette CRUD (used by the home sidebar)
 │       ├── Toasts.svelte         # Toast renderer
@@ -330,7 +331,7 @@ Three databases exist at runtime:
 
 **Format / layout (Typst editor):**
 - **format_profiles** — name, target_type ('print'|'ebook'), trim dimensions, margins, font_body, font_size_pt, line_spacing, plus 8 JSON category columns: `chapter_headings_json`, `paragraph_json`, `headings_json`, `breaks_json`, `print_layout_json`, `typography_json`, `header_footer_json`, `trim_json`
-- **format_pages** — page_role, title, content (HTML), position ('front'|'back'), sort_order, include_in, vertical_align. Shared across all profiles; the Format editor uses `format_page_exclusions` to hide specific pages per profile.
+- **format_pages** — page_role ('free-form'|'toc'|future types), title, content (PM JSON for free-form, settings JSON for toc), position ('front'|'back'), sort_order, include_in, vertical_align, ebook_metadata_tag (semantic role for EPUB export, e.g. 'copyright', 'dedication'). Shared across all profiles; the Format editor uses `format_page_exclusions` to hide specific pages per profile.
 - **format_page_exclusions** — (page_id, profile_id) composite PK
 
 **Stats / history / misc:**
@@ -347,7 +348,7 @@ Migrations are handled in `init_schema()` with `CREATE TABLE IF NOT EXISTS` for 
 These are the major subsystems not already covered above. Each one has its own route/component/Rust module and can be understood in isolation.
 
 ### Home shell — `src/routes/+page.svelte`
-Three sidebar views: **Projects**, **Word Palettes** (renders `WordPalettes.svelte`), **Settings**. First-run flow: pick a projects folder (persisted via `getProjectsDir`/`setProjectsDir` in `db.js`). Projects view lists `.iwe` files from the chosen folder, buttons: New Manuscript, Import…, Refresh, Open Folder (reveals in OS), Change Folder. Delete has a "type `delete` to confirm" modal. A dev-only ⚗ button on each project row launches the `/analyse` popup window (visible only when `import.meta.env.DEV`). Settings view covers: Dictionary language (en_US / en_GB), Typewriter mode, Descriptive Search indexing delay (seconds), Projects folder, Backup interval (minutes), plus license credits for ONNX + all-mpnet-base-v2.
+Three sidebar views: **Projects**, **Word Palettes** (renders `WordPalettes.svelte`), **Settings**. First-run flow: pick a projects folder (persisted via `getProjectsDir`/`setProjectsDir` in `db.js`). Projects view lists `.iwe` files from the chosen folder, buttons: New Manuscript, Import…, Refresh, Open Folder (reveals in OS), Change Folder. Delete has a "type `delete` to confirm" modal. A dev-only ⚗ button on each project row launches the `/analyse` popup window (visible only when `import.meta.env.DEV`). Settings view covers: Interface text size (UI scale, stored as `uiScale` in settings.json, applied via root font-size in `+layout.svelte` — scales everything since nearly all font-size declarations use `rem`), Dictionary language (en_US / en_GB), Typewriter mode, Descriptive Search indexing delay (seconds), Projects folder, Backup interval (minutes), Measurement unit (in/mm), plus license credits for ONNX + all-mpnet-base-v2.
 
 ### Semantic (Descriptive) Search — `src-tauri/src/semantic.rs`
 On-device ONNX embeddings. `SemanticState` holds a lazy-initialized `ort::Session` and `tokenizers::Tokenizer` (512-token truncation, 2 intra-threads). Model files are resolved from `resources/models/model.onnx` + `tokenizer.json` via `resolve_model_dir`, falling back to the Cargo manifest dir for dev. Commands: `mark_chapter_dirty`, `run_semantic_indexing`, `rebuild_semantic_index`, `semantic_search`, `get_semantic_index_status`. Emits Tauri events `semantic-index-started`, `semantic-index-progress`, `semantic-index-updated` which the project page and SearchPanel both listen for. Auto-indexes a chapter after configurable inactivity delay (default 30s, stored in `settings.json` as `semanticIndexDelay`, 0 disables auto). Embeddings stored in `semantic_embeddings` BLOB column, dirtiness tracked via `semantic_index_status.content_hash`. **Backups strip both semantic tables before VACUUM** to keep backup files small — see `lib.rs:94-101`.
@@ -380,7 +381,7 @@ The "publication-quality" path. Project subroute. Two-column layout: **preview c
 
 #### Feature gating: the whole Typst path is `#[cfg(feature = "format")]`
 
-The real implementation in `format.rs` is wrapped in `mod real` inside `#[cfg(feature = "format")]`. When the feature is off, lightweight stub types + stub commands compile instead (`format.rs:1901-1957`), which lets `lib.rs` build without pulling in the Typst crate family. Activated in `Cargo.toml` as `format = ["dep:typst", "dep:typst-pdf", "dep:typst-svg", "dep:typst-kit"]`. Neither `format` nor `semantic` is in `default`, so plain `cargo build` skips both. **Tauri dev/build must pass `--features format` explicitly** or you'll get "Format features not enabled" at runtime. Typst builds are slow — the stub mode keeps everyday dev fast.
+The real implementation in `format.rs` is wrapped in `mod real` inside `#[cfg(feature = "format")]`. When the feature is off, lightweight stub types + stub commands compile instead (`format.rs:1901-1957`), which lets `lib.rs` build without pulling in the Typst crate family. Activated in `Cargo.toml` as `format = ["dep:typst", "dep:typst-pdf", "dep:typst-svg", "dep:typst-kit"]`. Neither `format` nor `semantic` is in `default`, so plain `cargo build` skips both. **Tauri dev/build must pass `--features format` explicitly** or you'll get "Format features not enabled" at runtime. Use `npm run tauri:full` (dev with `--features semantic,format`) or `npm run tauri:build` (release build with both features). Typst builds are slow — the stub mode keeps everyday dev fast.
 
 Typst crates used (all pinned at `0.14`): `typst` (core, `World` trait, `PagedDocument`), `typst-pdf` (PDF export), `typst-svg` (per-page SVG), `typst-kit` (system font discovery + package storage, `default-features = false, features = ["fonts", "packages"]`). The `epub-builder = "0.8"` crate is **not** feature-gated and always compiles.
 
@@ -393,13 +394,13 @@ Typst crates used (all pinned at `0.14`): `typst` (core, `World` trait, `PagedDo
    - Extracts chapter text via `ydoc::extract_text_for_format_from_bytes` — **this is a distinct function** from `extract_text_with_breaks` used elsewhere. It additionally emits the literal string `"* * *"` for top-level `horizontalRule` nodes, which the Typst builder detects as scene break sentinels. **Never substitute `extract_text_with_breaks` in the format path or scene breaks will silently become blank lines.**
    - Calls `build_typst_markup(...)` → returns `(String markup, Vec<String> section_ids, ImageMap images)`.
    - Lazy-inits the font cache via `FormatState::get_or_init_fonts()` on first call.
-   - Calls `compile_document(...)` which builds a fresh `IweWorld` per compile and runs `typst::compile::<PagedDocument>(&world)`. On error, dumps the full markup to `$TEMP/iwe_typst_debug.typ` and returns a descriptive error with line/column context — check that file first when debugging markup issues.
+   - Calls `compile_document(...)` which builds a fresh `IweWorld` per compile and runs `typst::compile::<PagedDocument>(&world)`. Always dumps the full markup to `$TEMP/iwe_typst_debug.typ` on every compile (success or failure) for debugging. On error, returns a descriptive error with line/column context — check the dump file first when debugging markup issues.
    - After compile, `resolve_section_pages(&document, &section_ids)` walks the Typst introspector using `Label::new()` on each `"iwe-ch-{id}"` / `"iwe-fp-{id}"` label to map section → 0-indexed page number. Returned as `section_pages: HashMap<String, usize>` for the frontend's scroll-to-section feature.
    - Stores the new `PagedDocument` in `format_state.document` (behind a `Mutex<Option<PagedDocument>>`). **There is no generation counter in Rust** — the "generation" in the URL is a frontend JS variable.
 
-2. **The `iwe://` URI scheme** (lib.rs:1278-1312) is registered once before `invoke_handler`. It handles exactly one route: `/preview/page/{N}` (with optional `.svg` suffix stripped). Calls `format::render_page_svg(format_state.inner(), page_index)` which locks `FormatState.document`, indexes into `document.pages[page_index]`, calls `typst_svg::svg(page)`, returns the SVG string with `Content-Type: image/svg+xml` and `Access-Control-Allow-Origin: *`. Frontend requests `http://iwe.localhost/preview/page/{i}.svg?v={generation}` (Tauri normalizes custom schemes to `http://{scheme}.localhost/...`). `render_page_svg` is a plain public function, **not** a Tauri command. When adding new `iwe://` asset routes in the future, extend the existing handler — Tauri only allows one `register_uri_scheme_protocol` call per scheme.
+2. **The `iwe://` URI scheme** (lib.rs:1278-1312) is registered once before `invoke_handler`. It handles exactly one route: `/preview/page/{N}` (with optional `.svg` suffix stripped). The render call is wrapped in `std::panic::catch_unwind(AssertUnwindSafe(...))` because `typst_svg::svg()` can panic on certain content (font issues, edge-case glyphs) and this callback runs inside a webview2 COM handler (`extern "C"`) where unwinding panics abort the process. Panics return a 500 response instead. Frontend requests `http://iwe.localhost/preview/page/{i}.svg?v={generation}` (Tauri normalizes custom schemes to `http://{scheme}.localhost/...`). `render_page_svg` is a plain public function, **not** a Tauri command. When adding new `iwe://` asset routes in the future, extend the existing handler — Tauri only allows one `register_uri_scheme_protocol` call per scheme.
 
-3. **Lazy page loading** (`format/+page.svelte:249-310`): the frontend renders `pageCount` page wrappers with placeholders sized via `width: {trim_width_in * 72}px; aspect-ratio: {w}/{h}` so the scroll height is correct before any SVG loads.
+3. **Lazy page loading** (`format/+page.svelte:249-310`): the frontend renders `pageCount` page wrappers in a **2-column CSS grid spread layout** (verso/recto side-by-side, like an open book). Page 1 (recto) sits alone on the right via `grid-column: 2`; subsequent pages fill left-right pairs. Verso pages align toward the spine (right), recto pages toward the spine (left). Placeholders are sized via `width: {trim_width_in * 72}px; aspect-ratio: {w}/{h}` so the scroll height is correct before any SVG loads.
    - An `IntersectionObserver` with `root: previewContainer, rootMargin: '200px 0px 200px 0px', threshold: 0` tracks `visibleSet` (non-reactive Set).
    - On scroll, `scrolling = true` + 150ms debounce (`SCROLL_IDLE_MS`) to `commitVisible()`.
    - `commitVisible()` computes `[min(visible)-2, max(visible)+2]` (`VISIBLE_BUFFER = 2`) and adds any new indices to `loadedPages` ($state Set). Svelte reactivity then sets `<img src>` on those pages only — pages outside the buffer stay as placeholders forever until scrolled near.
@@ -420,10 +421,13 @@ Dropdown + pencil-rename (inline `<input>`, commits on blur/Enter via `updateFor
 `SIDEBAR_MODES = [pages, themes, custom, export]`. **There is no standalone "Target" mode anymore** — trim size / target type selection was moved into the Custom → "Target Format" subpanel (`TrimSettings.svelte`). If you see docs or comments referencing a "Target" sidebar tab, they're out of date.
 
 **Pages mode:**
-- Tag bar with the 18 `ASSIGNABLE_ROLES` (the 17 known roles + explicit ordering). Click a role to arm → click an existing page in the list to insert the new page below it (via `addFormatPage` + `reorderFormatPages`). Esc cancels. Used tags show ×; clicking × calls `deleteTaggedPage(role)`.
+- **Page types:** Pages have a `page_role` that determines their type and editor. Currently two types: `'free-form'` (rich text via PageContentEditor) and `'toc'` (auto-generated table of contents via TocPageEditor). Extensible — add new types to `PAGE_TYPES` array and their editor routing in `openPageEditor()`.
+- **Add page modal:** The `+` button on Front/Back Matter opens a modal to choose a page type. This replaces the old tag-based page creation system.
+- **Ebook metadata tags (ebook profiles only):** A tag bar with 17 `EBOOK_TAGS` (half-title, title, copyright, etc.) appears only for ebook profiles. These annotate pages with semantic roles for EPUB export (`epub:type`). Stored in `format_pages.ebook_metadata_tag` column. Click a tag to arm → click a page to assign. Used tags show ×; clicking × clears the tag. Tags are independent of page type — a free-form page can be tagged as "copyright", etc.
 - Three sections rendered with `svelte-dnd-action`: **Front Matter** (draggable, `position: 'front'`), **Chapters** (locked, iterates `chapters`), **Back Matter** (draggable, `position: 'back'`). Front/back use `handleFrontFinalize`/`handleBackFinalize` which extract ordered ids and call `reorderFormatPages`. Clicking a non-armed page calls `scrollToSection('iwe-fp-{id}')` which looks up `sectionPages` (returned by compile) and smooth-scrolls. Clicking a chapter calls `scrollToSection('iwe-ch-{chapter_id}')`.
 - **Profile-inclusion pills**: below each page, one pill per profile. `isPageIncludedIn(pageId, profileId) = !exclusions.some(e => e.page_id === pageId && e.profile_id === profileId)` — **absence of an exclusion row means inclusion** (default on). Clicking toggles via `addPageExclusion` / `removePageExclusion`; if the toggled profile is active, `compileAndShow()` runs.
-- **Full content editing**: the `bi-card-text` button opens `PageContentEditor.svelte` (see below). Inline rename via pencil icon.
+- **Page editing:** Free-form pages open `PageContentEditor.svelte` (full-screen rich text modal). TOC pages open `TocPageEditor.svelte` (settings modal with title text and leader style). Inline rename via pencil icon.
+- **TOC page settings:** Stored as JSON in the `content` column: `{ toc_title, leader_style }`. Leader styles: `'dots'` (default), `'dashes'`, `'none'`. The Typst builder reads these via `parse_toc_settings()` and generates the appropriate `#outline(fill: ...)` markup. The ebook builder reads them via `parseTocSettings()` to set the heading text.
 
 **Themes mode:** Still a placeholder. Renders `<p class="shell-placeholder">Theme presets will appear here.</p>`. No preset data, no apply logic. Unchanged.
 
@@ -452,22 +456,26 @@ All 8 subpanels follow the identical pattern: `$props() = { profile, onchange }`
 
 | Subpanel | DB column | Debounce | Notable fields (enum values in parens) |
 |---|---|---|---|
-| `ChapterHeadings.svelte` | `chapter_headings_json` | 250ms | `number_format` (none/numeric/chapter_numeric/word/chapter_word/roman/chapter_roman), `{number,title,subtitle}_{enabled,font,size_pt,align,style,tracking_em}`, `sink_em`, `space_*_em`, `start_on` (any/recto, print-only), `rule_{above,below}` + `rule_thickness_pt`, `image_enabled`, `image_individual`, `image_default` (base64), `image_position` (above_number/between_number_title/between_title_subtitle/below_heading/cover_heading/dedicated_page), `image_width_pct`, `image_align`, `image_light_text` (only when position=cover_heading) |
+| `ChapterHeadings.svelte` | `chapter_headings_json` | 250ms | `number_format` (none/numeric/chapter_numeric/word/chapter_word/roman/chapter_roman), `{number,title,subtitle}_{enabled,font,size_pt,align,style,tracking_em}`, `sink_em`, `space_*_em`, `start_on` (any/recto/verso, print-only), `rule_{above,below}` + `rule_thickness_pt`, `image_enabled`, `image_individual`, `image_default` (base64), `image_position` (above_number/between_number_title/between_title_subtitle/below_heading/cover_heading/dedicated_page), `image_width_pct`, `image_align`, `image_light_text` (only when position=cover_heading) |
 | `ParagraphSettings.svelte` | `paragraph_json` | 250ms | `drop_cap_{enabled,lines,font,color,quote_mode,fill_pct}` (quote_mode: first_char/both_together/letter_only/disable_on_dialogue), `small_caps_{enabled,words}` (words: 3/5/8/-1), `apply_when` (chapter/breaks/both), `paragraph_style` (indented/spaced/both), `indent_em`, `spacing_em`, `prevent_widows`, `prevent_orphans`, `max_consecutive_hyphens` (2/3/4/99), `last_line_min_chars` (0/3/5/8), `hyphen_aggressiveness` (low/normal/high). **Gotcha:** uses `eval()` in its `set(field, value)` helper — don't copy that pattern. |
 | `HeadingsSettings.svelte` | `headings_json` | 250ms | Flat map of `{h2,h3,h4}_{enabled,font,size_pt,align,style,tracking_em,space_above_em,space_below_em,keep_with_next,rule_above,rule_below}` for H2/H3/H4 + global `no_indent_after`. State is a flat object keyed by prefixed strings, not a nested structure. |
 | `BreaksSettings.svelte` | `breaks_json` | 250ms | `style` (none/blank/dinkus/asterism/rule/custom/image), `custom_text`, `image_data` (base64), `image_width_pct`, `space_above_em`, `space_below_em`, `keep_with_content` |
 | `PrintLayoutSettings.svelte` | `print_layout_json` | 300ms | `margin_{top,bottom,outside,inside}_in` (always inches internally, UI converts mm via `$lib/unitPreference.js`), `justify`, `hyphens`. "Reset to recommended" button calls `getRecommendedMargins(w, h)` from `$lib/marginDefaults.js` and persists immediately. **Hidden for ebook profiles.** |
 | `TypographySettings.svelte` | `typography_json` | 200ms | `font`, `size_pt` (9–18), `line_spacing` (1.15/1.25/1.4/1.5/1.75/2.0). **Fallback pattern**: when the JSON column is empty or unparseable, falls back to legacy scalar columns `font_body`, `font_size_pt`, `line_spacing` — preserving older profiles. |
-| `HeaderFooterSettings.svelte` | `header_footer_json` | 250ms | Most complex. `slots` map with 12 keys (`{verso,recto}_{header,footer}_{left,center,right}`), each `{content, custom, font, size_pt, style}`. Content enum: none/page_number/book_title/chapter_title/author_name/series_name/book_number/custom. Style: normal/italic/smallcaps/uppercase. Size: 7–12pt. Visual page diagram with clickable slot cells. Globals: `suppress_on_chapter_start`, `header_separator`, `footer_separator`, `separator_thickness_pt`, `margin_{left,right}_in`, `extend_no_header`, `extend_no_footer`. **Hidden for ebook profiles.** |
+| `HeaderFooterSettings.svelte` | `header_footer_json` | 250ms | Most complex. `slots` map with 12 keys (`{verso,recto}_{header,footer}_{left,center,right}`), each `{content, custom, font, size_pt, style}`. Content enum: none/page_number/book_title/chapter_title/author_name/series_name/book_number/custom. Style: normal/italic/smallcaps/uppercase. Size: 7–12pt. Visual page diagram with clickable slot cells. Globals: `suppress_on_chapter_start`, `suppress_header_on_pages`, `suppress_footer_on_pages`, `header_separator`, `footer_separator`, `separator_thickness_pt`, `margin_{left,right}_in`, `extend_no_header`, `extend_no_footer`. **Hidden for ebook profiles.** |
 | `TrimSettings.svelte` | **none (writes to scalar columns)** | immediate | **The exception.** Does NOT call `updateProfileCategory`; calls `updateFormatProfile(...)` directly to update scalar `trim_width_in`, `trim_height_in`, `target_type`. Uses `$lib/trimSizes.js` (`TRIM_CATEGORIES`, `PLATFORMS`, `findSize`, `supportedPlatforms`) for the size catalog. Also exposes the ebook device picker as a `$bindable()` `ebookDevice` prop. **Print mode:** proportional thumbnail + search + category-grouped catalog + custom dimensions. **Ebook mode:** device list (Kindle Paperwhite, Kindle Oasis, iPad variants, iPhone variants, Android, Kobo Libra). **The `trim_json` column exists but is completely inert — never read by `format.rs` or written by any subpanel. Reserved space.** |
 
-#### `PageContentEditor.svelte` — rich HTML page editor
+#### `PageContentEditor.svelte` — rich text editor for free-form pages
 
-Full-screen modal (`fixed inset: 0, z-index: 2000`) opened via the edit-content button on each format page. Uses TipTap with: `StarterKit.configure({ heading: false, history: true })` (headings disabled — font sizes used instead; history ON, unlike the main editor which uses Yjs undo), `TextStyle`, `FontSize` + `FontFamily` (from `@tiptap/extension-text-style`), a custom `ImageNode`, `TextAlign.configure({ types: ['paragraph'] })`, `Placeholder`.
+Full-screen modal (`fixed inset: 0, z-index: 2000`) opened via the edit-content button on free-form format pages. Uses TipTap with: `StarterKit.configure({ heading: false, history: true })` (headings disabled — font sizes used instead; history ON, unlike the main editor which uses Yjs undo), `TextStyle`, `FontSize` + `FontFamily` (from `@tiptap/extension-text-style`), a custom `ImageNode`, `TextAlign.configure({ types: ['paragraph'] })`, `Placeholder`. **Paste is plain-text only** (`editorProps.handlePaste` strips all formatting) — users bring raw text in and style it with the toolbar. This prevents CSS font-family stacks and inline styles from leaking into the Typst markup builder.
 
 **Custom image node** is `inline: false, group: 'block', draggable: true` with attributes `src, alt, width` (string like `"300px"`). Manual DOM NodeView: outer centering div + inline-block frame + `<img>` + bottom-right teal resize handle. Handle drag attaches `document` mousemove/mouseup listeners, `newWidth = max(40, startWidth + dx)`, on mouseup dispatches `tr.setNodeMarkup(pos, undefined, { ...attrs, width: finalWidth })` to persist.
 
 **Content format:** stored as ProseMirror JSON stringified (`editor.getJSON() → JSON.stringify`). `parseInitialContent(raw)` handles: empty → blank doc / starts with `{` → JSON.parse / else → split by `\n\n` and wrap paragraphs. The page canvas is sized to exact profile inches at 72dpi (`width: {w}in; height: {h}in; padding: {margins}in`) with a red dashed "Page boundary" marker below — content can overflow visibly so the author sees it. `verticalAlign` state (`'top'` | `'center'` | `'bottom'`) is read from `page.vertical_align`, sent back via `onsave({ content, verticalAlign })`, applied via `data-valign` CSS. Explicit Save button + Ctrl+S; no auto-save. **Images are embedded as base64 data URIs** — large images grow the `.iwe` file directly.
+
+#### `TocPageEditor.svelte` — TOC page settings editor
+
+Small centered modal opened via the gear button on TOC-type format pages. Two settings: **title** (text input, default "Contents") and **leader style** (dots/dashes/none, rendered as clickable option cards with preview text). Includes a mini page preview showing 5 sample entries. Settings stored as JSON in the `content` column: `{ toc_title: string, leader_style: 'dots'|'dashes'|'none' }`. Save + Ctrl+S; Escape cancels.
 
 #### Ebook output — now real, no longer a placeholder
 
@@ -491,14 +499,14 @@ Device dimensions come from `DEVICE_DIMS` keyed by `ebookDevice` (default `'kind
 struct EpubExportRequest {
     title, author, language, description: String,
     chapters: Vec<EpubChapter>,       // { title, subtitle, html }
-    front_pages: Vec<EpubPage>,       // { title, role, html, position }
+    front_pages: Vec<EpubPage>,       // { title, role (from ebook_metadata_tag), html, position }
     back_pages: Vec<EpubPage>,
     cover_image: Option<String>,      // base64 data URL, decoded via hand-rolled base64 decoder
     css: String,                      // written as epub stylesheet.css
 }
 ```
 
-Flow: set metadata → decode cover image + `add_cover_image` → `stylesheet(css)` → iterate front pages (`build_page_html` + `wrap_xhtml`, TOC pages use `ReferenceType::Toc`, title pages `TitlePage`, else `Text`) → iterate chapters (`build_chapter_html`, wrapped in `<section epub:type="chapter">`) → iterate back pages → `builder.generate(&mut output)` → return bytes. `epub_type_for_role(role)` maps IWE page roles to EPUB semantic types (e.g. `acknowledgments → acknowledgments`, unknown → `bodymatter`).
+Flow: set metadata → decode cover image + `add_cover_image` → `stylesheet(css)` → iterate front pages (`build_page_html` + `wrap_xhtml`, TOC pages use `ReferenceType::Toc`, title pages `TitlePage`, else `Text`) → iterate chapters (`build_chapter_html`, wrapped in `<section epub:type="chapter">`) → iterate back pages → `builder.generate(&mut output)` → return bytes. `epub_type_for_role(role)` maps ebook metadata tags to EPUB semantic types (e.g. `acknowledgments → acknowledgments`, unknown → `bodymatter`). The frontend passes `ebook_metadata_tag || page_role` as the `role` field.
 
 **Known EPUB gaps:**
 - `EpubChapter.subtitle` is in the struct but no UI populates it.
@@ -513,7 +521,7 @@ Generated Typst document structure:
 
 1. **Metadata variables** (top): `#let iwe-book-title = [...]`, `#let iwe-author-name = [...]`, `#let iwe-series-name = [...]`, `#let iwe-series-number = [...]`. Referenced by header/footer slot expressions.
 2. **Page setup**: `#set page(width: Xin, height: Xin, margin: (top:..., bottom:..., outside:..., inside:...))`. Margins read from `print_layout_json` with fallback to scalar columns. If `extend_no_header`/`extend_no_footer` is set and no header/footer slot has content, top/bottom margin is reduced to `(margin * 0.6).max(0.375)`.
-3. **Header/footer**: `#set page(header: context { ... })` — uses a `context {}` code block (not markup mode) with `calc.even(here().page())` for recto/verso branching, and a `grid(columns: (1fr, 1fr, 1fr), ...)` for three-column alignment. Separator lines use `line(length: 100%, stroke: Npt)`. Chapter-start suppression checks `counter(page).at(here()).first() > 1`.
+3. **Header/footer**: `#set page(header: context { ... })` — uses a `context {}` code block (not markup mode) with `calc.even(here().page())` for recto/verso branching, and a `grid(columns: (1fr, 1fr, 1fr), ...)` for three-column alignment. Separator lines use `line(length: 100%, stroke: Npt)`. Chapter-start suppression queries all H1 heading locations and hides header/footer on pages containing one. Both header and footer are independently suppressible on front/back matter pages via `suppress_header_on_pages` / `suppress_footer_on_pages` toggles. When `numbering` is active but no custom footer slots exist, `footer: none` is emitted to suppress Typst's built-in page number.
 4. **Typography**: `#set par(first-line-indent: Nem, spacing: Nem)` and `#set text(costs: (widow: X, orphan: Y))`. Body font/size/leading are scoped per-chapter in `#[...]` blocks, not at document level.
 5. **Heading show rules**: **H1 is suppressed entirely** with `#show heading.where(level: 1): it => {}` — chapter titles are rendered manually via the chapter-heading block. H2/H3/H4 get show rules built from `headings_json`. The dropcap preamble `#import "@preview/droplet:0.3.1": dropcap` is prepended only when drop caps are enabled.
 6. **Front matter**: each `FormatPage` in position=front gets an anchor `#[#metadata(none) <iwe-fp-{id}>]`, then `build_front_matter_page()`, then `#pagebreak()`. Roman numeral page numbering if any slot uses `page_number`.
@@ -579,6 +587,10 @@ Calls `FormatState::get_or_init_fonts()` (which lazy-inits via `typst_kit::fonts
 7. **`compile_preview` holds the DB mutex through the entire compile** (4 phases, potentially several seconds). Blocks all other DB operations. Architectural issue if we ever want concurrent DB reads.
 8. **No compile debounce.** Rapid setting changes trigger overlapping compiles. The `rendering` flag shows a spinner but doesn't cancel or queue.
 9. **Chapter/page label introspector lookups can silently miss.** If a chapter anchor fails to resolve (e.g. empty chapter text), `section_pages` just won't have an entry — no error. Scroll-to-section will no-op.
+10. **Custom page titles are never rendered.** The `title` field is an internal label for the Pages sidebar. Neither ebook nor print outputs it. The Typst empty-page fallbacks were removed (except TOC `#outline`). The ebook `<h1>` title injection was also removed. If a user wants a heading on a custom page, they add it in PageContentEditor.
+11. **`escape_typst` handles Typst list markers.** Leading `- `, `+ `, `/ `, `– `, `— ` (even with preceding whitespace) are escaped with `\` to prevent content blocks from being parsed as lists. Bold uses `#strong[...]` and italic uses `#emph[...]` (not `*...*` / `_..._` shorthand) to avoid collision with Typst list/emphasis syntax at line boundaries.
+12. **`apply_pm_marks` handles CSS font-family stacks.** TipTap's `fontFamily` values (e.g. `"Times New Roman", serif`) are parsed by `extract_font_name()` to extract just the primary font name. Empty `fontSize` strings are skipped to avoid generating invalid `size: ` in Typst markup.
+13. **Bundle resources are explicit, not wildcard.** `tauri.conf.json` lists `resources/models/model.onnx` and `resources/models/tokenizer.json` individually (not `resources/models/*`) to prevent `.bak` files from bloating the installer.
 
 #### EPUB export pipeline (how preview and export stay in sync)
 
@@ -595,8 +607,8 @@ The ebook preview (`generateEbookPreview`) and the EPUB export (`handleExportEpu
 - `pageToHtml(page)` — parses the format_pages row's PM JSON (from PageContentEditor) and runs `generateHTML(parsed, pageHtmlExtensions)`. A minimal inline `ImageNodeForHtml` handles the image node with width baked into the style attribute (no NodeView available in HTML generation).
 
 **Preview pipeline** (`generateEbookPreview`):
-1. Resolve settings, build inline CSS with `.ebook-chapter-break` scaffolding
-2. Iterate front pages → emit `<h1>{title}</h1>` + `pageToHtml(p)`
+1. Resolve settings, build inline CSS with `.ebook-chapter-break` scaffolding + `.ebook-page` resets (no indent, no drop caps, `hyphens: none`, `p:empty::before` for blank lines)
+2. Iterate front pages → wrap in `<div class="ebook-page">`, emit `generateTocHtml(page)` for TOC pages or `pageToHtml(p)` for free-form. **Page titles are NOT rendered** — the title field is internal only.
 3. Iterate chapters → emit `renderChapterHeadingHtml(ch, i, chHeadings)` + `chapterToHtml(ch)`
 4. Iterate back pages → same as front
 5. Wrap everything in `<div class="ebook-body">`
@@ -795,7 +807,7 @@ Popup window (`/paragraphs`) showing paragraph word counts as vertical columns p
 On every content save (500ms debounce), the project page computes word count delta and calls `logWritingActivity()`. The Rust side updates `daily_stats` atomically. Active time is computed from gaps between consecutive activities (capped at session_gap_minutes).
 
 ### Settings storage
-App-level settings (projects folder, panel widths) are stored in `settings.json` in Tauri's app data dir via `tauri-plugin-fs`. Project-level settings (writing goals, entity data) are in the `.iwe` SQLite file.
+App-level settings (projects folder, panel widths, `uiScale`, `formatSidebarWidth`, `typewriterMode`, `semanticIndexDelay`, `backupInterval`, `formatLengthUnit`) are stored in `settings.json` in Tauri's app data dir via `tauri-plugin-fs`. Project-level settings (writing goals, entity data) are in the `.iwe` SQLite file.
 
 ## Common Patterns
 

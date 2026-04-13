@@ -28,6 +28,8 @@
   import { save } from '@tauri-apps/plugin-dialog';
   import { addToast } from '$lib/toast.js';
   import PageContentEditor from '$lib/components/PageContentEditor.svelte';
+  import TocPageEditor from '$lib/components/TocPageEditor.svelte';
+  import MapPageEditor from '$lib/components/MapPageEditor.svelte';
   import ChapterHeadings from '$lib/components/format/ChapterHeadings.svelte';
   import ParagraphSettings from '$lib/components/format/ParagraphSettings.svelte';
   import HeadingsSettings from '$lib/components/format/HeadingsSettings.svelte';
@@ -40,27 +42,39 @@
   const flipDurationMs = 150;
 
 
-  const PAGE_ROLES = [
+  // Page types determine which editor/renderer a page uses.
+  // Extensible — add new types here as new page kinds are built (e.g. 'map').
+  const PAGE_TYPES = [
+    { id: 'free-form', label: 'Free Form', icon: 'bi-card-text', description: 'Rich text page with full editor' },
+    { id: 'toc',       label: 'Table of Contents', icon: 'bi-list-ol', description: 'Auto-generated from chapters' },
+    { id: 'map',       label: 'Map', icon: 'bi-map', description: 'Full-page image, single or double spread' },
+  ];
+
+  function pageTypeLabel(role) {
+    const found = PAGE_TYPES.find(t => t.id === role);
+    return found ? found.label : role;
+  }
+
+  // Ebook metadata tags — semantic roles for EPUB export (epub:type).
+  // These annotate pages with their semantic purpose in an ebook.
+  const EBOOK_TAGS = [
     'half-title', 'title', 'copyright', 'dedication', 'epigraph', 'toc',
     'foreword', 'preface', 'prologue', 'epilogue', 'afterword',
     'acknowledgments', 'about-author', 'also-by', 'glossary', 'excerpt',
-    'blurbs', 'custom',
+    'blurbs',
   ];
 
-  function roleLabel(role) {
+  function ebookTagLabel(tag) {
     const labels = {
       'half-title': 'Half Title', 'title': 'Title Page', 'copyright': 'Copyright',
       'dedication': 'Dedication', 'epigraph': 'Epigraph', 'toc': 'Table of Contents',
       'foreword': 'Foreword', 'preface': 'Preface', 'prologue': 'Prologue',
       'epilogue': 'Epilogue', 'afterword': 'Afterword', 'acknowledgments': 'Acknowledgments',
       'about-author': 'About the Author', 'also-by': 'Also By', 'glossary': 'Glossary',
-      'excerpt': 'Excerpt', 'blurbs': 'Blurbs', 'custom': 'Custom',
+      'excerpt': 'Excerpt', 'blurbs': 'Blurbs',
     };
-    return labels[role] || role;
+    return labels[tag] || tag;
   }
-
-  // Roles that can be applied via the tag bar (custom is the default for the + buttons)
-  const ASSIGNABLE_ROLES = PAGE_ROLES.filter(r => r !== 'custom');
 
   // Custom mode sub-tabs (each is a settings component)
   const ALL_CUSTOM_TABS = [
@@ -157,16 +171,24 @@
     return !exclusions.some(e => e.page_id === pageId && e.profile_id === profileId);
   }
 
-  // Tag-bar state for adding tagged pages
+  // Ebook metadata tag bar state — only visible for ebook profiles
   let armedTag = $state(null);
-  let usedTags = $derived(new Set(formatPages.map(p => p.page_role)));
+  let usedEbookTags = $derived(new Map(
+    formatPages.filter(p => p.ebook_metadata_tag).map(p => [p.ebook_metadata_tag, p.id])
+  ));
+
+  // Add-page modal state
+  let showAddPageModal = $state(false);
+  let addPagePosition = $state('front'); // 'front' or 'back'
 
   // Inline rename state for format pages
   let editingPageId = $state(null);
   let editingPageTitle = $state('');
 
   // Full content editor modal state
-  let designingPage = $state(null); // FormatPage being edited, or null
+  let designingPage = $state(null); // FormatPage being edited (free-form), or null
+  let editingTocPage = $state(null); // FormatPage being edited (toc), or null
+  let editingMapPage = $state(null); // FormatPage being edited (map), or null
 
   // Re-attach observer whenever the page count or compile generation changes
   $effect(() => {
@@ -930,7 +952,9 @@
       html += `<div id="ebook-fp-${page.id}" class="ebook-chapter-break"></div>`;
       html += `<div class="ebook-page">`;
       if (page.page_role === 'toc') {
-        html += generateTocHtml();
+        html += generateTocHtml(page);
+      } else if (page.page_role === 'map') {
+        html += generateMapHtml(page);
       } else {
         html += pageToHtml(page);
       }
@@ -954,7 +978,9 @@
       html += `<div id="ebook-fp-${page.id}" class="ebook-chapter-break"></div>`;
       html += `<div class="ebook-page">`;
       if (page.page_role === 'toc') {
-        html += generateTocHtml();
+        html += generateTocHtml(page);
+      } else if (page.page_role === 'map') {
+        html += generateMapHtml(page);
       } else {
         html += pageToHtml(page);
       }
@@ -1072,56 +1098,50 @@
     compileAndShow();
   }
 
-  async function handleAddPage(position) {
-    const role = armedTag || 'custom';
-    const title = armedTag ? roleLabel(armedTag) : 'New Page';
-    await addFormatPage(role, title, position);
+  // ---- Add page modal ----
+
+  function openAddPageModal(position) {
+    addPagePosition = position;
+    showAddPageModal = true;
+  }
+
+  async function addPageOfType(typeId) {
+    const pageType = PAGE_TYPES.find(t => t.id === typeId);
+    const title = pageType ? pageType.label : 'New Page';
+    await addFormatPage(typeId, title, addPagePosition);
     await reloadPages();
-    armedTag = null;
+    showAddPageModal = false;
     compileAndShow();
   }
 
-  // ---- Tag bar handlers ----
+  // ---- Ebook metadata tag handlers ----
 
-  function armTag(role) {
-    if (usedTags.has(role)) return; // already used; X removes it
-    armedTag = armedTag === role ? null : role;
+  function armTag(tag) {
+    if (usedEbookTags.has(tag)) return; // already assigned; X clears it
+    armedTag = armedTag === tag ? null : tag;
   }
 
-  async function deleteTaggedPage(role) {
-    const page = formatPages.find(p => p.page_role === role);
+  async function clearEbookTag(tag) {
+    const pageId = usedEbookTags.get(tag);
+    if (!pageId) return;
+    const page = formatPages.find(p => p.id === pageId);
     if (page) {
-      await deleteFormatPage(page.id);
+      await updateFormatPage(page.id, page.page_role, page.title, page.content, page.position, page.include_in, page.vertical_align, '');
       await reloadPages();
-      compileAndShow();
     }
   }
 
-  async function placeArmedTagBelow(targetItem) {
+  async function assignEbookTag(item) {
     if (!armedTag) return;
-    const role = armedTag;
-    armedTag = null; // disarm immediately so subsequent clicks don't re-fire
-    const title = roleLabel(role);
-    const newId = await addFormatPage(role, title, targetItem.position);
+    const tag = armedTag;
+    armedTag = null;
+    await updateFormatPage(item.id, item.page_role, item.title, item.content, item.position, item.include_in, item.vertical_align, tag);
     await reloadPages();
-
-    // Reorder the section so the new page lands directly below the target
-    const section = formatPages
-      .filter(p => p.position === targetItem.position)
-      .sort((a, b) => a.sort_order - b.sort_order);
-    const orderedIds = section.map(p => p.id).filter(id => id !== newId);
-    const targetIdx = orderedIds.indexOf(targetItem.id);
-    if (targetIdx >= 0) {
-      orderedIds.splice(targetIdx + 1, 0, newId);
-      await reorderFormatPages(orderedIds);
-      await reloadPages();
-    }
-    compileAndShow();
   }
 
   function handlePageItemClick(item) {
     if (armedTag) {
-      placeArmedTagBelow(item);
+      assignEbookTag(item);
     } else {
       scrollToSection(`iwe-fp-${item.id}`);
     }
@@ -1129,7 +1149,6 @@
 
   function handleChapterItemClick(ch) {
     if (armedTag) {
-      // Chapters can't be retagged — just disarm so the user knows nothing happened
       armedTag = null;
       return;
     }
@@ -1139,6 +1158,7 @@
   function handleEscape(e) {
     if (e.key === 'Escape') {
       if (armedTag) armedTag = null;
+      if (showAddPageModal) showAddPageModal = false;
       if (editingPageId !== null) editingPageId = null;
     }
   }
@@ -1156,20 +1176,26 @@
     editingPageId = null;
     if (!page) return;
     if (newTitle === (page.title || '')) return; // no change
-    await updateFormatPage(id, page.page_role, newTitle, page.content, page.position, page.include_in, page.vertical_align);
+    await updateFormatPage(id, page.page_role, newTitle, page.content, page.position, page.include_in, page.vertical_align, page.ebook_metadata_tag);
     await reloadPages();
     compileAndShow();
   }
 
-  function openDesignEditor(item) {
-    designingPage = item;
+  function openPageEditor(item) {
+    if (item.page_role === 'toc') {
+      editingTocPage = item;
+    } else if (item.page_role === 'map') {
+      editingMapPage = item;
+    } else {
+      designingPage = item;
+    }
   }
 
   async function saveDesignedPage({ content: jsonContent, verticalAlign }) {
     if (!designingPage) return;
     const p = designingPage;
     designingPage = null;
-    await updateFormatPage(p.id, p.page_role, p.title, jsonContent, p.position, p.include_in, verticalAlign);
+    await updateFormatPage(p.id, p.page_role, p.title, jsonContent, p.position, p.include_in, verticalAlign, p.ebook_metadata_tag);
     await reloadPages();
     compileAndShow();
   }
@@ -1178,15 +1204,36 @@
     designingPage = null;
   }
 
-  async function handleDeletePage(id) {
-    await deleteFormatPage(id);
+  async function saveTocPage({ content: jsonContent }) {
+    if (!editingTocPage) return;
+    const p = editingTocPage;
+    editingTocPage = null;
+    await updateFormatPage(p.id, p.page_role, p.title, jsonContent, p.position, p.include_in, p.vertical_align, p.ebook_metadata_tag);
     await reloadPages();
     compileAndShow();
   }
 
-  async function handleRoleChange(page, newRole) {
-    await updateFormatPage(page.id, newRole, page.title, page.content, page.position, page.include_in, page.vertical_align);
+  function cancelTocPage() {
+    editingTocPage = null;
+  }
+
+  async function saveMapPage({ content: jsonContent }) {
+    if (!editingMapPage) return;
+    const p = editingMapPage;
+    editingMapPage = null;
+    await updateFormatPage(p.id, p.page_role, p.title, jsonContent, p.position, p.include_in, p.vertical_align, p.ebook_metadata_tag);
     await reloadPages();
+    compileAndShow();
+  }
+
+  function cancelMapPage() {
+    editingMapPage = null;
+  }
+
+  async function handleDeletePage(id) {
+    await deleteFormatPage(id);
+    await reloadPages();
+    compileAndShow();
   }
 
   // Profile management
@@ -1408,14 +1455,47 @@
 
   // Generate an HTML table of contents from the chapter list.
   // Used for ebook preview and EPUB export when a page has role='toc'.
-  function generateTocHtml() {
+  function parseTocSettings(page) {
+    try {
+      const raw = page?.content;
+      if (raw && raw.trim().startsWith('{')) {
+        const parsed = JSON.parse(raw);
+        return {
+          toc_title: parsed.toc_title || 'Contents',
+          leader_style: parsed.leader_style || 'dots',
+          title_font: parsed.title_font || '',
+          item_spacing_em: parsed.item_spacing_em ?? 0.5,
+          vertical_align: parsed.vertical_align || 'top',
+        };
+      }
+    } catch { /* ignore */ }
+    return { toc_title: 'Contents', leader_style: 'dots', title_font: '', item_spacing_em: 0.5, vertical_align: 'top' };
+  }
+
+  function generateTocHtml(page) {
     if (!chapters || chapters.length === 0) return '<p>No chapters</p>';
-    let html = '<nav class="ebook-toc"><h2>Contents</h2><ol>';
+    const settings = parseTocSettings(page);
+    const titleFontStyle = settings.title_font ? `font-family: '${settings.title_font}';` : '';
+    const spacingPx = Math.round(settings.item_spacing_em * 16);
+    const valign = settings.vertical_align === 'center'
+      ? 'display: flex; flex-direction: column; justify-content: center; min-height: 80%;'
+      : '';
+    let html = `<nav class="ebook-toc" style="${valign}">`;
+    html += `<h2 style="text-align: center; ${titleFontStyle}">${escapeHtml(settings.toc_title)}</h2>`;
+    html += `<ol style="list-style: none; padding: 0;">`;
     for (const ch of chapters) {
-      html += `<li><a href="#ebook-ch-${ch.id}">${escapeHtml(ch.title)}</a></li>`;
+      html += `<li style="margin-bottom: ${spacingPx}px;"><a href="#ebook-ch-${ch.id}">${escapeHtml(ch.title)}</a></li>`;
     }
     html += '</ol></nav>';
     return html;
+  }
+
+  function generateMapHtml(page) {
+    try {
+      const parsed = JSON.parse(page.content);
+      if (!parsed.image_data) return '<p>No map image</p>';
+      return `<div class="ebook-map" style="text-align: center;"><img src="${parsed.image_data}" alt="Map" style="max-width: 100%; height: auto;" /></div>`;
+    } catch { return '<p>No map image</p>'; }
   }
 
   // Convert a format_pages row's stored content to HTML. Content is one of:
@@ -1714,14 +1794,15 @@
 
       const allPages = formatPages;
       const epubPageContent = (p) => {
-        if (p.page_role === 'toc') return generateTocHtml();
+        if (p.page_role === 'toc') return generateTocHtml(p);
+        if (p.page_role === 'map') return generateMapHtml(p);
         return pageToHtml(p);
       };
       const frontPages = allPages
         .filter(p => p.position === 'front')
         .map(p => ({
           title: p.title,
-          role: p.page_role,
+          role: p.ebook_metadata_tag || p.page_role,
           html: htmlToXhtml(substituteImageBreaks(`<div class="ebook-page">${epubPageContent(p)}</div>`, settings.breaks)),
           position: p.position,
         }));
@@ -1729,7 +1810,7 @@
         .filter(p => p.position === 'back')
         .map(p => ({
           title: p.title,
-          role: p.page_role,
+          role: p.ebook_metadata_tag || p.page_role,
           html: htmlToXhtml(substituteImageBreaks(`<div class="ebook-page">${epubPageContent(p)}</div>`, settings.breaks)),
           position: p.position,
         }));
@@ -2022,32 +2103,34 @@
       <div class="sidebar-mode-content">
         {#if sidebarMode === 'pages'}
           <div class="mode-panel page-list-panel">
-            <!-- Tag bar: click to arm, then click a page in the list to insert below -->
-            <div class="tag-bar">
-              {#each ASSIGNABLE_ROLES as role}
-                {@const used = usedTags.has(role)}
-                <button class="tag-pill"
-                  class:used
-                  class:armed={armedTag === role}
-                  title={used ? `Already used — click × to remove` : (armedTag === role ? 'Click a page to insert below it (Esc to cancel)' : `Add a ${roleLabel(role)} page`)}
-                  onclick={() => armTag(role)}>
-                  <span>{roleLabel(role)}</span>
-                  {#if used}
-                    <span class="tag-x" title="Remove this page"
-                      onclick={(e) => { e.stopPropagation(); deleteTaggedPage(role); }}>×</span>
-                  {/if}
-                </button>
-              {/each}
-            </div>
-            {#if armedTag}
-              <div class="armed-hint">Click a page to insert <strong>{roleLabel(armedTag)}</strong> below it · <kbd>Esc</kbd> to cancel</div>
+            <!-- Ebook metadata tags — only for ebook profiles -->
+            {#if isEbook}
+              <div class="tag-bar">
+                {#each EBOOK_TAGS as tag}
+                  {@const used = usedEbookTags.has(tag)}
+                  <button class="tag-pill"
+                    class:used
+                    class:armed={armedTag === tag}
+                    title={used ? `Assigned — click × to clear` : (armedTag === tag ? 'Click a page to assign this tag (Esc to cancel)' : `Tag a page as ${ebookTagLabel(tag)}`)}
+                    onclick={() => armTag(tag)}>
+                    <span>{ebookTagLabel(tag)}</span>
+                    {#if used}
+                      <span class="tag-x" title="Clear this tag"
+                        onclick={(e) => { e.stopPropagation(); clearEbookTag(tag); }}>×</span>
+                    {/if}
+                  </button>
+                {/each}
+              </div>
+              {#if armedTag}
+                <div class="armed-hint">Click a page to tag it as <strong>{ebookTagLabel(armedTag)}</strong> · <kbd>Esc</kbd> to cancel</div>
+              {/if}
             {/if}
 
             <!-- Front matter (draggable) -->
             <div class="page-group-label">
               Front Matter
               <button class="add-page-btn" title="Add front matter page"
-                onclick={() => handleAddPage('front')}>
+                onclick={() => openAddPageModal('front')}>
                 <i class="bi bi-plus"></i>
               </button>
             </div>
@@ -2057,7 +2140,7 @@
               onfinalize={handleFrontFinalize}>
               {#each frontItems as item (item.id)}
                 <div class="page-list-entry" animate:flip={{ duration: flipDurationMs }}>
-                  <div class="page-list-item format-page-item" class:armed-target={armedTag} onclick={() => editingPageId === item.id ? null : handlePageItemClick(item)}>
+                  <div class="page-list-item format-page-item" class:armed-target={armedTag && isEbook} onclick={() => editingPageId === item.id ? null : handlePageItemClick(item)}>
                     <i class="bi bi-grip-vertical drag-handle"></i>
                     {#if editingPageId === item.id}
                       <input class="page-item-input"
@@ -2067,12 +2150,15 @@
                         onclick={(e) => e.stopPropagation()}
                         autofocus />
                     {:else}
-                      <span class="page-item-title">{item.title || roleLabel(item.page_role)}</span>
+                      <span class="page-item-title">{item.title || pageTypeLabel(item.page_role)}</span>
                     {/if}
-                    <span class="page-item-role">{roleLabel(item.page_role)}</span>
+                    <span class="page-item-role">{pageTypeLabel(item.page_role)}</span>
+                    {#if isEbook && item.ebook_metadata_tag}
+                      <span class="page-item-ebook-tag" title="Ebook tag: {ebookTagLabel(item.ebook_metadata_tag)}">{ebookTagLabel(item.ebook_metadata_tag)}</span>
+                    {/if}
                     <button class="page-item-edit" title="Edit content"
-                      onclick={(e) => { e.stopPropagation(); openDesignEditor(item); }}>
-                      <i class="bi bi-card-text"></i>
+                      onclick={(e) => { e.stopPropagation(); openPageEditor(item); }}>
+                      <i class="bi {item.page_role === 'toc' ? 'bi-gear' : item.page_role === 'map' ? 'bi-map' : 'bi-card-text'}"></i>
                     </button>
                     <button class="page-item-edit" title="Rename"
                       onclick={(e) => { e.stopPropagation(); startEditPage(item); }}>
@@ -2110,7 +2196,7 @@
             <div class="page-group-label">
               Back Matter
               <button class="add-page-btn" title="Add back matter page"
-                onclick={() => handleAddPage('back')}>
+                onclick={() => openAddPageModal('back')}>
                 <i class="bi bi-plus"></i>
               </button>
             </div>
@@ -2120,7 +2206,7 @@
               onfinalize={handleBackFinalize}>
               {#each backItems as item (item.id)}
                 <div class="page-list-entry" animate:flip={{ duration: flipDurationMs }}>
-                  <div class="page-list-item format-page-item" class:armed-target={armedTag} onclick={() => editingPageId === item.id ? null : handlePageItemClick(item)}>
+                  <div class="page-list-item format-page-item" class:armed-target={armedTag && isEbook} onclick={() => editingPageId === item.id ? null : handlePageItemClick(item)}>
                     <i class="bi bi-grip-vertical drag-handle"></i>
                     {#if editingPageId === item.id}
                       <input class="page-item-input"
@@ -2130,12 +2216,15 @@
                         onclick={(e) => e.stopPropagation()}
                         autofocus />
                     {:else}
-                      <span class="page-item-title">{item.title || roleLabel(item.page_role)}</span>
+                      <span class="page-item-title">{item.title || pageTypeLabel(item.page_role)}</span>
                     {/if}
-                    <span class="page-item-role">{roleLabel(item.page_role)}</span>
+                    <span class="page-item-role">{pageTypeLabel(item.page_role)}</span>
+                    {#if isEbook && item.ebook_metadata_tag}
+                      <span class="page-item-ebook-tag" title="Ebook tag: {ebookTagLabel(item.ebook_metadata_tag)}">{ebookTagLabel(item.ebook_metadata_tag)}</span>
+                    {/if}
                     <button class="page-item-edit" title="Edit content"
-                      onclick={(e) => { e.stopPropagation(); openDesignEditor(item); }}>
-                      <i class="bi bi-card-text"></i>
+                      onclick={(e) => { e.stopPropagation(); openPageEditor(item); }}>
+                      <i class="bi {item.page_role === 'toc' ? 'bi-gear' : item.page_role === 'map' ? 'bi-map' : 'bi-card-text'}"></i>
                     </button>
                     <button class="page-item-edit" title="Rename"
                       onclick={(e) => { e.stopPropagation(); startEditPage(item); }}>
@@ -2384,6 +2473,42 @@
       profile={activeProfile}
       onsave={saveDesignedPage}
       oncancel={cancelDesignedPage} />
+  {/if}
+
+  {#if editingTocPage}
+    <TocPageEditor
+      page={editingTocPage}
+      profile={activeProfile}
+      onsave={saveTocPage}
+      oncancel={cancelTocPage} />
+  {/if}
+
+  {#if editingMapPage}
+    <MapPageEditor
+      page={editingMapPage}
+      profile={activeProfile}
+      onsave={saveMapPage}
+      oncancel={cancelMapPage} />
+  {/if}
+
+  {#if showAddPageModal}
+    <div class="modal-backdrop" onclick={() => showAddPageModal = false}>
+      <div class="modal-card add-page-modal" onclick={(e) => e.stopPropagation()}>
+        <h3>Add Page</h3>
+        <p class="add-page-hint">Choose a page type</p>
+        <div class="page-type-options">
+          {#each PAGE_TYPES as pt}
+            <button class="page-type-option" onclick={() => addPageOfType(pt.id)}>
+              <i class="bi {pt.icon}"></i>
+              <div class="page-type-info">
+                <span class="page-type-name">{pt.label}</span>
+                <span class="page-type-desc">{pt.description}</span>
+              </div>
+            </button>
+          {/each}
+        </div>
+      </div>
+    </div>
   {/if}
 
   {#if showCreateProfileModal}
@@ -3167,6 +3292,55 @@
   }
   .chapter-item .page-item-title {
     font-style: italic;
+  }
+
+  /* Ebook metadata tag badge on page items */
+  .page-item-ebook-tag {
+    font-size: 0.6rem; text-transform: uppercase;
+    letter-spacing: 0.03em; font-weight: 600;
+    background: rgba(45, 106, 94, 0.1); color: var(--iwe-accent);
+    padding: 1px 6px; border-radius: 6px;
+    white-space: nowrap;
+  }
+
+  /* Add page modal */
+  .add-page-modal {
+    max-width: 380px;
+  }
+  .add-page-hint {
+    font-family: var(--iwe-font-ui); font-size: 0.82rem;
+    color: var(--iwe-text-muted); margin: 0 0 0.8rem;
+  }
+  .page-type-options {
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .page-type-option {
+    display: flex; align-items: center; gap: 0.75rem;
+    border: 1px solid var(--iwe-border); border-radius: var(--iwe-radius-sm);
+    background: var(--iwe-bg); color: var(--iwe-text);
+    padding: 0.65rem 0.85rem;
+    cursor: pointer; transition: all 100ms;
+    text-align: left;
+    font-family: var(--iwe-font-ui);
+  }
+  .page-type-option:hover {
+    border-color: var(--iwe-accent);
+    background: rgba(45, 106, 94, 0.04);
+  }
+  .page-type-option i {
+    font-size: 1.2rem; color: var(--iwe-accent);
+    flex-shrink: 0;
+  }
+  .page-type-info {
+    display: flex; flex-direction: column; gap: 1px;
+  }
+  .page-type-name {
+    font-size: 0.88rem; font-weight: 600;
+    color: var(--iwe-text);
+  }
+  .page-type-desc {
+    font-size: 0.72rem;
+    color: var(--iwe-text-muted);
   }
 
 </style>

@@ -975,11 +975,178 @@ fn render_page_content(content: &str, images: &mut ImageMap) -> String {
     out
 }
 
+/// Parsed TOC page settings.
+struct TocSettings {
+    title: String,
+    leader_style: String,
+    title_font: String,       // empty = use body font
+    item_spacing_em: f64,
+    vertical_align: String,   // "top" or "center"
+}
+
+/// Parse TOC page settings from the content column JSON.
+fn parse_toc_settings(content: &str) -> TocSettings {
+    let trimmed = content.trim();
+    if trimmed.is_empty() || !trimmed.starts_with('{') {
+        return TocSettings::default();
+    }
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        TocSettings {
+            title: val.get("toc_title").and_then(|v| v.as_str()).unwrap_or("Contents").to_string(),
+            leader_style: val.get("leader_style").and_then(|v| v.as_str()).unwrap_or("dots").to_string(),
+            title_font: val.get("title_font").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            item_spacing_em: val.get("item_spacing_em").and_then(|v| v.as_f64()).unwrap_or(0.5),
+            vertical_align: val.get("vertical_align").and_then(|v| v.as_str()).unwrap_or("top").to_string(),
+        }
+    } else {
+        TocSettings::default()
+    }
+}
+
+impl Default for TocSettings {
+    fn default() -> Self {
+        TocSettings {
+            title: "Contents".to_string(),
+            leader_style: "dots".to_string(),
+            title_font: String::new(),
+            item_spacing_em: 0.5,
+            vertical_align: "top".to_string(),
+        }
+    }
+}
+
+/// Build Typst markup for a map page. Returns None if no image is set.
+/// For single pages, renders a full-bleed image with zero margins.
+/// For spreads, emits two full-bleed pages — left half then right half —
+/// using Typst clipping (no Rust-side image manipulation needed).
+fn build_map_page(content: &str, images: &mut ImageMap) -> Option<String> {
+    let trimmed = content.trim();
+    if trimmed.is_empty() || !trimmed.starts_with('{') {
+        return None;
+    }
+    let val: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+    let image_data = val.get("image_data").and_then(|v| v.as_str()).unwrap_or("");
+    if image_data.is_empty() {
+        return None;
+    }
+    let spread = val.get("spread").and_then(|v| v.as_bool()).unwrap_or(false);
+    let sizing = val.get("sizing").and_then(|v| v.as_str()).unwrap_or("fit-width");
+
+    let (img_path, _ext) = ingest_image(image_data, images)?;
+
+    let mut out = String::new();
+
+    // Image sizing: fit-width fills the page width (clips top/bottom),
+    // fit-height fills the page height (clips left/right).
+    let (img_width, img_height) = match sizing {
+        "fit-height" => ("auto", "100%"),
+        _ => ("100%", "auto"), // fit-width default
+    };
+
+    if spread {
+        // Two full-bleed pages. The image is rendered at 200% page width,
+        // then clipped to show only the left or right half on each page.
+        let spread_img_w = match sizing {
+            "fit-height" => "auto",
+            _ => "200%", // fit-width: span both pages
+        };
+
+        // Left page (verso): show left half of image
+        out.push_str("#page(margin: 0pt)[\n");
+        out.push_str(&format!(
+            "  #box(clip: true, width: 100%, height: 100%)[#image(\"{}\", width: {}, height: {})]\n",
+            img_path, spread_img_w, img_height
+        ));
+        out.push_str("]\n");
+
+        // Right page (recto): show right half by shifting image left by 100% page width
+        out.push_str("#page(margin: 0pt)[\n");
+        out.push_str(&format!(
+            "  #box(clip: true, width: 100%, height: 100%)[#move(dx: -100%, dy: 0pt)[#image(\"{}\", width: {}, height: {})]]\n",
+            img_path, spread_img_w, img_height
+        ));
+        out.push_str("]\n");
+    } else {
+        // Single full-bleed page
+        out.push_str("#page(margin: 0pt)[\n");
+        out.push_str(&format!(
+            "  #box(clip: true, width: 100%, height: 100%)[#image(\"{}\", width: {}, height: {})]\n",
+            img_path, img_width, img_height
+        ));
+        out.push_str("]\n");
+    }
+
+    Some(out)
+}
+
 /// Build a Typst markup string for a front/back matter page.
 /// If the page has rich content (PM JSON), render it directly.
 /// Otherwise apply role-based defaults using the title.
 fn build_front_matter_page(page: &FormatPage, images: &mut ImageMap, body_font: &str, body_size_pt: f64) -> String {
     let mut out = String::new();
+
+    // TOC pages store settings JSON in content, not ProseMirror — handle separately.
+    // In Typst 0.14, `fill` is on `outline.entry`, not `outline` itself.
+    if page.page_role == "toc" {
+        let toc = parse_toc_settings(&page.content);
+
+        // Vertical centering: #v(1fr) gutters above and below the content block
+        if toc.vertical_align == "center" {
+            out.push_str("#v(1fr)\n");
+        }
+
+        // Title — rendered manually because the global show rule
+        // `heading.where(level: 1): it => {}` suppresses all H1 headings,
+        // including the one Typst generates for `outline(title: ...)`.
+        let title_markup = escape_typst(&toc.title);
+        let title_font = if toc.title_font.is_empty() { body_font } else { &toc.title_font };
+        out.push_str(&format!(
+            "#align(center)[#text(font: \"{}\", size: 1.4em, weight: \"bold\")[{}]]\n#v(1em)\n",
+            escape_typst(title_font), title_markup
+        ));
+
+        // Items use the body font at body size
+        out.push_str(&format!(
+            "#set text(font: \"{}\", size: {}pt)\n",
+            escape_typst(body_font), body_size_pt
+        ));
+
+        // Entry spacing via a show rule — #set par(spacing) doesn't propagate
+        // into outline entries, so we pad each entry with vertical space.
+        out.push_str(&format!(
+            "#show outline.entry: it => {{ v({}em); it }}\n",
+            toc.item_spacing_em
+        ));
+
+        // Leader style
+        match toc.leader_style.as_str() {
+            "dashes" => {
+                out.push_str("#set outline.entry(fill: repeat[–])\n");
+            }
+            "none" => {
+                out.push_str("#set outline.entry(fill: none)\n");
+            }
+            _ => {} // dots is the Typst default
+        }
+
+        out.push_str("#outline(title: none, depth: 1)\n");
+
+        if toc.vertical_align == "center" {
+            out.push_str("#v(1fr)\n");
+        }
+
+        return out;
+    }
+
+    // Map pages: full-bleed image, optionally split across a two-page spread.
+    if page.page_role == "map" {
+        if let Some(map_markup) = build_map_page(&page.content, images) {
+            return map_markup;
+        }
+        // No image — fall through to blank page
+        return out;
+    }
+
     let content_typst = render_page_content(&page.content, images);
     let has_content = !content_typst.trim().is_empty();
 
@@ -1013,16 +1180,7 @@ fn build_front_matter_page(page: &FormatPage, images: &mut ImageMap, body_font: 
         return out;
     }
 
-    // Empty content — the page title is an internal label, not rendered.
-    // Only TOC gets auto-generated content (Typst outline).
-    match page.page_role.as_str() {
-        "toc" => {
-            out.push_str("#outline(title: \"Contents\", depth: 1)\n");
-        }
-        _ => {
-            // Blank page — user designs it in PageContentEditor.
-        }
-    }
+    // Empty free-form page = blank page.
 
     out
 }

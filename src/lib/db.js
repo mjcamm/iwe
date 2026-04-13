@@ -778,8 +778,8 @@ export async function listPageExclusions() {
   return invoke('list_page_exclusions');
 }
 
-export async function updateFormatPage(id, pageRole, title, content, position, includeIn, verticalAlign = 'top') {
-  return invoke('update_format_page', { id, pageRole, title, content, position, includeIn, verticalAlign });
+export async function updateFormatPage(id, pageRole, title, content, position, includeIn, verticalAlign = 'top', ebookMetadataTag = '') {
+  return invoke('update_format_page', { id, pageRole, title, content, position, includeIn, verticalAlign, ebookMetadataTag });
 }
 
 export async function deleteFormatPage(id) {

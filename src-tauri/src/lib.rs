@@ -1253,10 +1253,10 @@ fn add_format_page(state: tauri::State<'_, AppState>, page_role: String, title: 
 }
 
 #[tauri::command]
-fn update_format_page(state: tauri::State<'_, AppState>, id: i64, page_role: String, title: String, content: String, position: String, include_in: String, vertical_align: String) -> Result<(), String> {
+fn update_format_page(state: tauri::State<'_, AppState>, id: i64, page_role: String, title: String, content: String, position: String, include_in: String, vertical_align: String, ebook_metadata_tag: String) -> Result<(), String> {
     let guard = state.db.lock().map_err(|e| e.to_string())?;
     let conn = guard.as_ref().ok_or("No project open")?;
-    db::update_format_page(conn, id, &page_role, &title, &content, &position, &include_in, &vertical_align).map_err(|e| e.to_string())
+    db::update_format_page(conn, id, &page_role, &title, &content, &position, &include_in, &vertical_align, &ebook_metadata_tag).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

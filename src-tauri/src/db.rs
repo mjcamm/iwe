@@ -434,6 +434,28 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         )?;
     }
 
+    // Migration: add ebook_metadata_tag column to format_pages. Existing semantic roles
+    // (half-title, title, copyright, etc.) move into this column; page_role becomes the
+    // page *type* (free-form, toc) that determines which editor/renderer to use.
+    let has_ebook_tag: bool = conn
+        .prepare("SELECT ebook_metadata_tag FROM format_pages LIMIT 0")
+        .is_ok();
+    if !has_ebook_tag {
+        conn.execute_batch(
+            "ALTER TABLE format_pages ADD COLUMN ebook_metadata_tag TEXT NOT NULL DEFAULT '';"
+        )?;
+        // Copy old semantic roles into ebook_metadata_tag (skip 'custom' which has no semantic meaning)
+        conn.execute(
+            "UPDATE format_pages SET ebook_metadata_tag = page_role WHERE page_role != 'custom'",
+            [],
+        )?;
+        // All non-toc pages become 'free-form' (the generic rich-text page type)
+        conn.execute(
+            "UPDATE format_pages SET page_role = 'free-form' WHERE page_role != 'toc'",
+            [],
+        )?;
+    }
+
     // Migration: add per-category JSON columns to format_profiles for the Custom mode
     // sub-tab settings. These are TEXT columns containing arbitrary JSON, so adding
     // new fields inside a category requires no further migrations.
@@ -1854,6 +1876,7 @@ pub struct FormatPage {
     pub sort_order: i64,
     pub include_in: String,
     pub vertical_align: String,
+    pub ebook_metadata_tag: String,
     pub created_at: String,
 }
 
@@ -1900,12 +1923,13 @@ fn read_format_page(row: &rusqlite::Row) -> rusqlite::Result<FormatPage> {
         sort_order: row.get(5)?,
         include_in: row.get(6)?,
         vertical_align: row.get(7)?,
-        created_at: row.get(8)?,
+        ebook_metadata_tag: row.get(8)?,
+        created_at: row.get(9)?,
     })
 }
 
 const PROFILE_COLS: &str = "id, name, target_type, trim_width_in, trim_height_in, margin_top_in, margin_bottom_in, margin_outside_in, margin_inside_in, font_body, font_size_pt, line_spacing, sort_order, chapter_headings_json, paragraph_json, headings_json, breaks_json, print_layout_json, typography_json, header_footer_json, trim_json, created_at";
-const FORMAT_PAGE_COLS: &str = "id, page_role, title, content, position, sort_order, include_in, vertical_align, created_at";
+const FORMAT_PAGE_COLS: &str = "id, page_role, title, content, position, sort_order, include_in, vertical_align, ebook_metadata_tag, created_at";
 
 pub fn list_format_profiles(conn: &Connection) -> rusqlite::Result<Vec<FormatProfile>> {
     let mut stmt = conn.prepare(&format!("SELECT {} FROM format_profiles ORDER BY sort_order ASC", PROFILE_COLS))?;
@@ -2157,10 +2181,11 @@ pub fn update_format_page(
     position: &str,
     include_in: &str,
     vertical_align: &str,
+    ebook_metadata_tag: &str,
 ) -> rusqlite::Result<()> {
     conn.execute(
-        "UPDATE format_pages SET page_role=?1, title=?2, content=?3, position=?4, include_in=?5, vertical_align=?6 WHERE id=?7",
-        params![page_role, title, content, position, include_in, vertical_align, id],
+        "UPDATE format_pages SET page_role=?1, title=?2, content=?3, position=?4, include_in=?5, vertical_align=?6, ebook_metadata_tag=?7 WHERE id=?8",
+        params![page_role, title, content, position, include_in, vertical_align, ebook_metadata_tag, id],
     )?;
     Ok(())
 }
