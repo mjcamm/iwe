@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { updateProfileCategory } from '$lib/db.js';
   import FontPicker from '$lib/components/FontPicker.svelte';
+  import DecimalInput from '$lib/components/DecimalInput.svelte';
 
   let { profile, onchange } = $props();
   let isPrint = $derived(profile?.target_type !== 'ebook');
@@ -277,21 +278,15 @@
       {#if paragraphStyle === 'indented' || paragraphStyle === 'both'}
         <label class="field">
           <span class="field-label">Indent amount</span>
-          <div class="input-row">
-            <input type="number" step="0.1" min="0" max="5" class="field-num"
-              bind:value={indentEm} oninput={scheduleSave} />
-            <span class="unit">em</span>
-          </div>
+          <DecimalInput value={indentEm} onchange={(v) => { indentEm = v; scheduleSave(); }}
+            suffix="em" step={0.1} min={0} max={5} decimals={1} />
         </label>
       {/if}
       {#if paragraphStyle === 'spaced' || paragraphStyle === 'both'}
         <label class="field">
           <span class="field-label">Paragraph spacing</span>
-          <div class="input-row">
-            <input type="number" step="0.1" min="0" max="3" class="field-num"
-              bind:value={spacingEm} oninput={scheduleSave} />
-            <span class="unit">em</span>
-          </div>
+          <DecimalInput value={spacingEm} onchange={(v) => { spacingEm = v; scheduleSave(); }}
+            suffix="em" step={0.1} min={0} max={3} decimals={1} />
         </label>
       {/if}
     </div>

@@ -1,6 +1,7 @@
 <script>
   import { updateProfileCategory } from '$lib/db.js';
   import FontPicker from '$lib/components/FontPicker.svelte';
+  import DecimalInput from '$lib/components/DecimalInput.svelte';
 
   let { profile, onchange } = $props();
   let isPrint = $derived(profile?.target_type !== 'ebook');
@@ -352,21 +353,15 @@
       <label class="field">
         <span class="field-label">Chapter sink</span>
         <span class="field-hint">How far down the page before the heading starts</span>
-        <div class="input-row">
-          <input type="number" step="0.5" min="0" max="20" class="field-num"
-            bind:value={sinkEm} oninput={scheduleSave} />
-          <span class="unit">em</span>
-        </div>
+        <DecimalInput value={sinkEm} suffix="em" step={0.5} min={0} max={20} decimals={1}
+          onchange={(v) => { sinkEm = v; scheduleSave(); }} />
       </label>
       {/if}
       <label class="field">
         <span class="field-label">After heading</span>
         <span class="field-hint">Gap between the heading block and the first paragraph</span>
-        <div class="input-row">
-          <input type="number" step="0.5" min="0" max="10" class="field-num"
-            bind:value={spaceAfter} oninput={scheduleSave} />
-          <span class="unit">em</span>
-        </div>
+        <DecimalInput value={spaceAfter} suffix="em" step={0.5} min={0} max={10} decimals={1}
+          onchange={(v) => { spaceAfter = v; scheduleSave(); }} />
       </label>
     </div>
     {#if (numEnabled && titleEnabled) || (titleEnabled && subEnabled)}
@@ -375,22 +370,16 @@
           <label class="field">
             <span class="field-label">Number → Title</span>
             <span class="field-hint">Space between the chapter number and the title</span>
-            <div class="input-row">
-              <input type="number" step="0.25" min="0" max="5" class="field-num"
-                bind:value={spaceNumTitle} oninput={scheduleSave} />
-              <span class="unit">em</span>
-            </div>
+            <DecimalInput value={spaceNumTitle} suffix="em" step={0.25} min={0} max={5} decimals={2}
+              onchange={(v) => { spaceNumTitle = v; scheduleSave(); }} />
           </label>
         {/if}
         {#if titleEnabled && subEnabled}
           <label class="field">
             <span class="field-label">Title → Subtitle</span>
             <span class="field-hint">Space between the title and the subtitle</span>
-            <div class="input-row">
-              <input type="number" step="0.25" min="0" max="5" class="field-num"
-                bind:value={spaceTitleSub} oninput={scheduleSave} />
-              <span class="unit">em</span>
-            </div>
+            <DecimalInput value={spaceTitleSub} suffix="em" step={0.25} min={0} max={5} decimals={2}
+              onchange={(v) => { spaceTitleSub = v; scheduleSave(); }} />
           </label>
         {/if}
       </div>
@@ -424,11 +413,8 @@
     {#if ruleAbove || ruleBelow}
       <label class="field" style="margin-top: 0.4rem;">
         <span class="field-label">Thickness</span>
-        <div class="input-row">
-          <input type="number" step="0.25" min="0.25" max="3" class="field-num"
-            bind:value={ruleThickness} oninput={scheduleSave} />
-          <span class="unit">pt</span>
-        </div>
+        <DecimalInput value={ruleThickness} suffix="pt" step={0.25} min={0.25} max={3} decimals={2}
+          onchange={(v) => { ruleThickness = v; scheduleSave(); }} />
       </label>
     {/if}
   </div>

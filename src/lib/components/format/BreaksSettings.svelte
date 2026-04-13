@@ -1,5 +1,6 @@
 <script>
   import { updateProfileCategory } from '$lib/db.js';
+  import DecimalInput from '$lib/components/DecimalInput.svelte';
 
   let { profile, onchange } = $props();
   let isPrint = $derived(profile?.target_type !== 'ebook');
@@ -179,22 +180,16 @@
   <div class="setting-group">
     <div class="group-label">Spacing</div>
     <div class="spacing-grid">
-      <label class="spacing-field">
+      <div class="spacing-field">
         <span>Above</span>
-        <div class="input-wrap">
-          <input type="number" step="0.1" min="0"
-            bind:value={spaceAbove} oninput={scheduleSave} />
-          <span class="unit-suffix">em</span>
-        </div>
-      </label>
-      <label class="spacing-field">
+        <DecimalInput value={spaceAbove} onchange={(v) => { spaceAbove = v; scheduleSave(); }}
+          suffix="em" step={0.1} min={0} decimals={2} />
+      </div>
+      <div class="spacing-field">
         <span>Below</span>
-        <div class="input-wrap">
-          <input type="number" step="0.1" min="0"
-            bind:value={spaceBelow} oninput={scheduleSave} />
-          <span class="unit-suffix">em</span>
-        </div>
-      </label>
+        <DecimalInput value={spaceBelow} onchange={(v) => { spaceBelow = v; scheduleSave(); }}
+          suffix="em" step={0.1} min={0} decimals={2} />
+      </div>
     </div>
   </div>
 
@@ -370,33 +365,6 @@
     text-transform: uppercase;
     letter-spacing: 0.03em;
     font-weight: 600;
-  }
-  .input-wrap {
-    display: flex; align-items: center;
-    border: 1px solid var(--iwe-border); border-radius: var(--iwe-radius-sm);
-    background: var(--iwe-bg);
-    overflow: hidden;
-  }
-  .input-wrap:focus-within { border-color: var(--iwe-accent); }
-  .input-wrap input {
-    flex: 1; min-width: 0;
-    border: none; background: none;
-    padding: 0.4rem 0.5rem;
-    font-family: var(--iwe-font-ui); font-size: 0.85rem;
-    color: var(--iwe-text); outline: none;
-  }
-  .input-wrap input::-webkit-outer-spin-button,
-  .input-wrap input::-webkit-inner-spin-button {
-    -webkit-appearance: none; margin: 0;
-  }
-  .unit-suffix {
-    padding: 0 0.55rem;
-    font-family: var(--iwe-font-ui); font-size: 0.72rem;
-    color: var(--iwe-text-muted);
-    background: var(--iwe-bg-warm);
-    border-left: 1px solid var(--iwe-border);
-    height: 100%;
-    display: flex; align-items: center;
   }
 
   /* Toggle row */

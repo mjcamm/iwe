@@ -212,8 +212,8 @@
     display: flex; flex-direction: column; gap: 0.35rem;
   }
   .setting-label {
-    font-family: var(--iwe-font-ui); font-size: 0.78rem;
-    color: var(--iwe-text-muted); text-transform: uppercase;
+    font-family: var(--iwe-font-ui); font-size: 0.85rem;
+    color: var(--iwe-text); text-transform: uppercase;
     letter-spacing: 0.04em; font-weight: 600;
   }
   .setting-input {
@@ -225,8 +225,8 @@
   }
   .setting-input:focus { outline: none; border-color: var(--iwe-accent); }
   .setting-hint {
-    font-family: var(--iwe-font-ui); font-size: 0.72rem;
-    color: var(--iwe-text-muted);
+    font-family: var(--iwe-font-ui); font-size: 0.78rem;
+    color: var(--iwe-text-muted); line-height: 1.35;
   }
 
   .font-picker-wrap {
@@ -251,11 +251,11 @@
     box-shadow: 0 0 0 1px var(--iwe-accent);
   }
   .leader-label {
-    font-family: var(--iwe-font-ui); font-size: 0.82rem; font-weight: 600;
+    font-family: var(--iwe-font-ui); font-size: 0.88rem; font-weight: 600;
     color: var(--iwe-text);
   }
   .leader-preview {
-    font-family: 'Liberation Serif', 'Georgia', serif; font-size: 0.78rem;
+    font-family: 'Liberation Serif', 'Georgia', serif; font-size: 0.82rem;
     color: var(--iwe-text-muted);
     white-space: pre;
     letter-spacing: 0.02em;
@@ -268,7 +268,7 @@
     border: 1px solid var(--iwe-border); border-radius: var(--iwe-radius-sm);
     background: var(--iwe-bg); color: var(--iwe-text);
     padding: 0.35rem 0.7rem;
-    font-family: var(--iwe-font-ui); font-size: 0.8rem;
+    font-family: var(--iwe-font-ui); font-size: 0.85rem;
     cursor: pointer; transition: all 100ms;
   }
   .spacing-option:hover { border-color: var(--iwe-accent); }

@@ -3,6 +3,7 @@
   import { updateProfileCategory } from '$lib/db.js';
   import { getRecommendedMargins } from '$lib/marginDefaults.js';
   import { ensureUnitLoaded, getUnit, toDisplay, fromDisplay, unitLabel, unitStep, subscribe } from '$lib/unitPreference.js';
+  import DecimalInput from '$lib/components/DecimalInput.svelte';
 
   let { profile, onchange } = $props();
 
@@ -97,15 +98,9 @@
     scheduleSave();
   }
 
-  function handleBleedInput(e) {
-    const inches = fromDisplay(e.target.value);
-    if (inches == null) return;
-    bleedIn = inches;
-    scheduleSave();
-  }
 
-  function handleInput(field, e) {
-    const inches = fromDisplay(e.target.value);
+  function handleMarginChange(field, displayVal) {
+    const inches = fromDisplay(displayVal);
     if (inches == null) return;
     if (field === 'top')     topIn = inches;
     if (field === 'bottom')  bottomIn = inches;
@@ -149,42 +144,42 @@
         <div class="margin-grid">
           <label class="margin-field">
             <span>Top</span>
-            <div class="input-wrap">
-              <input type="number" {step} min="0"
-                value={toDisplay(topIn)}
-                oninput={(e) => handleInput('top', e)} />
-              <span class="unit-suffix">{uLabel}</span>
-            </div>
+            <DecimalInput
+              value={toDisplay(topIn)}
+              onchange={(v) => handleMarginChange('top', v)}
+              suffix={uLabel}
+              step={step}
+              min={0} />
           </label>
 
           <label class="margin-field">
             <span>Bottom</span>
-            <div class="input-wrap">
-              <input type="number" {step} min="0"
-                value={toDisplay(bottomIn)}
-                oninput={(e) => handleInput('bottom', e)} />
-              <span class="unit-suffix">{uLabel}</span>
-            </div>
+            <DecimalInput
+              value={toDisplay(bottomIn)}
+              onchange={(v) => handleMarginChange('bottom', v)}
+              suffix={uLabel}
+              step={step}
+              min={0} />
           </label>
 
           <label class="margin-field">
             <span>Outside</span>
-            <div class="input-wrap">
-              <input type="number" {step} min="0"
-                value={toDisplay(outsideIn)}
-                oninput={(e) => handleInput('outside', e)} />
-              <span class="unit-suffix">{uLabel}</span>
-            </div>
+            <DecimalInput
+              value={toDisplay(outsideIn)}
+              onchange={(v) => handleMarginChange('outside', v)}
+              suffix={uLabel}
+              step={step}
+              min={0} />
           </label>
 
           <label class="margin-field">
             <span>Inside <span class="hint">(gutter)</span></span>
-            <div class="input-wrap">
-              <input type="number" {step} min="0"
-                value={toDisplay(insideIn)}
-                oninput={(e) => handleInput('inside', e)} />
-              <span class="unit-suffix">{uLabel}</span>
-            </div>
+            <DecimalInput
+              value={toDisplay(insideIn)}
+              onchange={(v) => handleMarginChange('inside', v)}
+              suffix={uLabel}
+              step={step}
+              min={0} />
           </label>
         </div>
       {/key}
@@ -239,12 +234,13 @@
         <div class="bleed-amount">
           <label class="margin-field">
             <span>Bleed amount</span>
-            <div class="input-wrap">
-              <input type="number" step={step} min="0"
-                value={toDisplay(bleedIn)}
-                oninput={handleBleedInput} />
-              <span class="unit-suffix">{uLabel}</span>
-            </div>
+            <DecimalInput
+              value={toDisplay(bleedIn)}
+              onchange={(v) => { const inches = fromDisplay(v); if (inches != null) { bleedIn = inches; scheduleSave(); } }}
+              suffix={uLabel}
+              step={step}
+              min={0}
+              max={unit === 'mm' ? 13 : 0.5} />
           </label>
           <span class="bleed-hint">Standard: {unit === 'mm' ? '3mm' : '0.125"'} per side. Check your printer's requirements.</span>
         </div>
@@ -288,36 +284,6 @@
     font-weight: 400;
     opacity: 0.7;
     font-size: 0.68rem;
-  }
-  .input-wrap {
-    display: flex; align-items: center;
-    border: 1px solid var(--iwe-border); border-radius: var(--iwe-radius-sm);
-    background: var(--iwe-bg);
-    overflow: hidden;
-  }
-  .input-wrap:focus-within { border-color: var(--iwe-accent); }
-  .input-wrap input {
-    flex: 1; min-width: 0;
-    border: none; background: none;
-    padding: 0.4rem 0.5rem;
-    font-family: var(--iwe-font-ui); font-size: 0.85rem;
-    color: var(--iwe-text);
-    outline: none;
-  }
-  /* Hide the spinner arrows — users type or use drag; the arrows are clutter */
-  .input-wrap input::-webkit-outer-spin-button,
-  .input-wrap input::-webkit-inner-spin-button {
-    -webkit-appearance: none;
-    margin: 0;
-  }
-  .unit-suffix {
-    padding: 0 0.55rem;
-    font-family: var(--iwe-font-ui); font-size: 0.72rem;
-    color: var(--iwe-text-muted);
-    background: var(--iwe-bg-warm);
-    border-left: 1px solid var(--iwe-border);
-    height: 100%;
-    display: flex; align-items: center;
   }
 
   .reset-btn {

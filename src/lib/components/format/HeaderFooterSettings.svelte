@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { updateProfileCategory } from '$lib/db.js';
   import FontPicker from '$lib/components/FontPicker.svelte';
+  import DecimalInput from '$lib/components/DecimalInput.svelte';
   import { ensureUnitLoaded, getUnit, toDisplay, fromDisplay, unitLabel, unitStep, subscribe } from '$lib/unitPreference.js';
 
   let { profile, onchange } = $props();
@@ -425,19 +426,23 @@
       <label class="inset-field">
         <span>Left</span>
         <div class="inset-input-wrap">
-          <input type="number" {step} min="0"
+          <DecimalInput
             value={toDisplay(marginLeftIn)}
-            oninput={(e) => { const v = fromDisplay(e.target.value); if (v != null) { marginLeftIn = v; scheduleSave(); } }} />
-          <span class="inset-unit">{uLabel}</span>
+            onchange={(v) => { const r = fromDisplay(v); if (r != null) { marginLeftIn = r; scheduleSave(); } }}
+            suffix={uLabel}
+            {step}
+            min={0} />
         </div>
       </label>
       <label class="inset-field">
         <span>Right</span>
         <div class="inset-input-wrap">
-          <input type="number" {step} min="0"
+          <DecimalInput
             value={toDisplay(marginRightIn)}
-            oninput={(e) => { const v = fromDisplay(e.target.value); if (v != null) { marginRightIn = v; scheduleSave(); } }} />
-          <span class="inset-unit">{uLabel}</span>
+            onchange={(v) => { const r = fromDisplay(v); if (r != null) { marginRightIn = r; scheduleSave(); } }}
+            suffix={uLabel}
+            {step}
+            min={0} />
         </div>
       </label>
     </div>

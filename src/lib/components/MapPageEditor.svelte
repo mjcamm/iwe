@@ -1,6 +1,7 @@
 <script>
   import { onMount } from 'svelte';
   import { ensureUnitLoaded, toDisplay, fromDisplay, unitLabel, unitStep, subscribe } from '$lib/unitPreference.js';
+  import DecimalInput from '$lib/components/DecimalInput.svelte';
 
   let { page, profile, onsave, oncancel } = $props();
 
@@ -147,18 +148,19 @@
 
           {#if unitLoaded}
             <div class="gutter-overlap-group">
-              <label class="setting-label" for="gutter-overlap">Gutter overlap</label>
+              <label class="setting-label">Gutter overlap</label>
               {#key unit}
                 <div class="gutter-input-row">
-                  <div class="input-wrap">
-                    <input id="gutter-overlap" type="number" step={unitStep()} min="0"
-                      value={toDisplay(gutterOverlap)}
-                      oninput={(e) => { const v = fromDisplay(e.target.value); if (v != null) gutterOverlap = v; }} />
-                    <span class="unit-suffix">{unitLabel()}</span>
-                  </div>
+                  <DecimalInput
+                    value={toDisplay(gutterOverlap)}
+                    onchange={(v) => { const inches = fromDisplay(v); if (inches != null) gutterOverlap = inches; }}
+                    suffix={unitLabel()}
+                    step={unitStep()}
+                    min={0}
+                    max={unit === 'mm' ? 25 : 1} />
                 </div>
               {/key}
-              <span class="setting-hint">Each half extends past center by this amount to compensate for binding loss. Typical: {unit === 'mm' ? '6mm (paperback), 10mm (hardcover)' : '0.25" (paperback), 0.375" (hardcover)'}.</span>
+              <span class="setting-hint">The center of the image can be lost in the book's spine when bound. This duplicates a strip from the middle onto both pages so nothing is missing when the book is opened. Typical: {unit === 'mm' ? '6mm (paperback), 10mm (hardcover)' : '0.25" (paperback), 0.375" (hardcover)'}.</span>
             </div>
           {/if}
         {/if}
@@ -282,13 +284,13 @@
     display: flex; flex-direction: column; gap: 0.35rem;
   }
   .setting-label {
-    font-family: var(--iwe-font-ui); font-size: 0.78rem;
-    color: var(--iwe-text-muted); text-transform: uppercase;
+    font-family: var(--iwe-font-ui); font-size: 0.85rem;
+    color: var(--iwe-text); text-transform: uppercase;
     letter-spacing: 0.04em; font-weight: 600;
   }
   .setting-hint {
-    font-family: var(--iwe-font-ui); font-size: 0.72rem;
-    color: var(--iwe-text-muted);
+    font-family: var(--iwe-font-ui); font-size: 0.78rem;
+    color: var(--iwe-text-muted); line-height: 1.35;
   }
 
   /* Layout toggle */
@@ -398,10 +400,10 @@
     display: flex; flex-direction: column; gap: 1px;
   }
   .sizing-name {
-    font-size: 0.84rem; font-weight: 600;
+    font-size: 0.88rem; font-weight: 600;
   }
   .sizing-desc {
-    font-size: 0.72rem; color: var(--iwe-text-muted);
+    font-size: 0.78rem; color: var(--iwe-text-muted);
   }
 
   /* Resolution warnings */
@@ -412,39 +414,7 @@
   }
   .gutter-input-row {
     display: flex; align-items: center; gap: 0.5rem;
-  }
-  .input-wrap {
-    display: flex; align-items: center;
-    border: 1px solid var(--iwe-border); border-radius: var(--iwe-radius-sm);
-    background: var(--iwe-bg);
-    overflow: hidden;
-    width: 120px;
-  }
-  .input-wrap:focus-within { border-color: var(--iwe-accent); }
-  .input-wrap input {
-    flex: 1; min-width: 0;
-    border: none; background: none;
-    padding: 0.4rem 0.5rem;
-    font-family: var(--iwe-font-ui); font-size: 0.85rem;
-    color: var(--iwe-text);
-    outline: none;
-  }
-  .input-wrap input::-webkit-outer-spin-button,
-  .input-wrap input::-webkit-inner-spin-button {
-    -webkit-appearance: none; margin: 0;
-  }
-  .unit-suffix {
-    padding: 0 0.55rem;
-    font-family: var(--iwe-font-ui); font-size: 0.72rem;
-    color: var(--iwe-text-muted);
-    background: var(--iwe-bg-warm);
-    border-left: 1px solid var(--iwe-border);
-    height: 100%;
-    display: flex; align-items: center;
-  }
-  .gutter-mm {
-    font-family: var(--iwe-font-ui); font-size: 0.75rem;
-    color: var(--iwe-text-muted);
+    max-width: 140px;
   }
 
   .resolution-warning {

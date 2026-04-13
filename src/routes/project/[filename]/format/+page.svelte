@@ -960,9 +960,9 @@
 
     let html = css + '<div class="ebook-body">';
 
-    // Front matter pages
+    // Front matter pages — filtered by profile inclusion
     const frontPages = formatPages
-      .filter(p => p.position === 'front')
+      .filter(p => p.position === 'front' && isPageIncludedIn(p.id, activeProfileId))
       .sort((a, b) => a.sort_order - b.sort_order);
     for (const page of frontPages) {
       html += `<div id="ebook-fp-${page.id}" class="ebook-chapter-break"></div>`;
@@ -986,9 +986,9 @@
       html += chapterToHtml(ch);
     }
 
-    // Back matter pages
+    // Back matter pages — filtered by profile inclusion
     const backPages = formatPages
-      .filter(p => p.position === 'back')
+      .filter(p => p.position === 'back' && isPageIncludedIn(p.id, activeProfileId))
       .sort((a, b) => a.sort_order - b.sort_order);
     for (const page of backPages) {
       html += `<div id="ebook-fp-${page.id}" class="ebook-chapter-break"></div>`;
@@ -1815,7 +1815,7 @@
         return pageToHtml(p);
       };
       const frontPages = allPages
-        .filter(p => p.position === 'front')
+        .filter(p => p.position === 'front' && isPageIncludedIn(p.id, activeProfileId))
         .map(p => ({
           title: p.title,
           role: p.ebook_metadata_tag || p.page_role,
@@ -1823,7 +1823,7 @@
           position: p.position,
         }));
       const backPages = allPages
-        .filter(p => p.position === 'back')
+        .filter(p => p.position === 'back' && isPageIncludedIn(p.id, activeProfileId))
         .map(p => ({
           title: p.title,
           role: p.ebook_metadata_tag || p.page_role,

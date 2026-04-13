@@ -104,7 +104,7 @@
     },
   });
 
-  const FONT_SIZES = ['8pt', '9pt', '10pt', '11pt', '12pt', '14pt', '16pt', '18pt', '24pt', '32pt', '48pt'];
+  const FONT_SIZES = ['8pt', '9pt', '10pt', '11pt', '12pt', '14pt', '16pt', '18pt', '24pt', '32pt', '40pt', '48pt', '56pt', '64pt', '72pt', '80pt', '90pt', '100pt'];
 
   let element;
   let editor = $state(null);
@@ -152,7 +152,14 @@
         handlePaste(view, event) {
           const plain = event.clipboardData?.getData('text/plain');
           if (plain) {
-            editor.commands.insertContent(plain);
+            // Split on newlines and insert as separate paragraphs so line
+            // breaks are preserved. Single newlines become paragraph breaks;
+            // empty lines produce empty paragraphs (visual spacing).
+            const paragraphs = plain.split(/\r?\n/).map(line => ({
+              type: 'paragraph',
+              content: line ? [{ type: 'text', text: line }] : [],
+            }));
+            editor.commands.insertContent(paragraphs);
             return true;
           }
           return false;

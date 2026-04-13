@@ -914,6 +914,8 @@ fn apply_pm_marks(text: &str, marks: Option<&serde_json::Value>) -> String {
             "italic" | "em" => s = format!("#emph[{}]", s),
             "underline" => s = format!("#underline[{}]", s),
             "strike" | "s" => s = format!("#strike[{}]", s),
+            "superscript" => s = format!("#super[{}]", s),
+            "subscript" => s = format!("#sub[{}]", s),
             "textStyle" => {
                 let attrs = mark.get("attrs");
                 if let Some(size) = attrs

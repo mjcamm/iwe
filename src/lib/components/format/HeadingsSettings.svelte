@@ -1,6 +1,7 @@
 <script>
   import { updateProfileCategory } from '$lib/db.js';
   import FontPicker from '$lib/components/FontPicker.svelte';
+  import DecimalInput from '$lib/components/DecimalInput.svelte';
 
   let { profile, onchange } = $props();
   let isPrint = $derived(profile?.target_type !== 'ebook');
@@ -133,24 +134,18 @@
           </div>
 
           <div class="row-2col">
-            <label class="field">
+            <div class="field">
               <span class="field-label">Space above</span>
-              <div class="input-row">
-                <input type="number" step="0.25" min="0" max="5" class="field-num"
-                  value={get(`${lvl.key}_space_above_em`)}
-                  oninput={(e) => set(`${lvl.key}_space_above_em`, Number(e.target.value))} />
-                <span class="unit">em</span>
-              </div>
-            </label>
-            <label class="field">
+              <DecimalInput value={get(`${lvl.key}_space_above_em`)}
+                onchange={(v) => set(`${lvl.key}_space_above_em`, v)}
+                suffix="em" step={0.25} min={0} max={5} />
+            </div>
+            <div class="field">
               <span class="field-label">Space below</span>
-              <div class="input-row">
-                <input type="number" step="0.25" min="0" max="5" class="field-num"
-                  value={get(`${lvl.key}_space_below_em`)}
-                  oninput={(e) => set(`${lvl.key}_space_below_em`, Number(e.target.value))} />
-                <span class="unit">em</span>
-              </div>
-            </label>
+              <DecimalInput value={get(`${lvl.key}_space_below_em`)}
+                onchange={(v) => set(`${lvl.key}_space_below_em`, v)}
+                suffix="em" step={0.25} min={0} max={5} />
+            </div>
           </div>
 
           {#if isPrint}
