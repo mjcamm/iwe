@@ -44,6 +44,7 @@ quick-xml = "0.31"
 epub-builder = "0.8"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
 base64 = "0.22.1"
+sha2 = "0.10"
 
 [features]
 default = []

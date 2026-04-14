@@ -1,5 +1,5 @@
 <script>
-  import { updateProfileCategory } from '$lib/db.js';
+  import { updateProfileCategory, uploadImageFile, imageSrcFor } from '$lib/db.js';
   import DecimalInput from '$lib/components/DecimalInput.svelte';
 
   let { profile, onchange } = $props();
@@ -25,14 +25,14 @@
         space_above_em: parsed.space_above_em ?? 1.2,
         space_below_em: parsed.space_below_em ?? 1.2,
         keep_with_content: parsed.keep_with_content ?? true,
-        image_data: parsed.image_data ?? '',
+        image_id: parsed.image_id ?? null,
         image_width_pct: parsed.image_width_pct ?? 25,
       };
     } catch {
       return {
         style: 'dinkus', custom_text: '* * *',
         space_above_em: 1.2, space_below_em: 1.2,
-        keep_with_content: true, image_data: '', image_width_pct: 25,
+        keep_with_content: true, image_id: null, image_width_pct: 25,
       };
     }
   });
@@ -42,7 +42,7 @@
   let spaceAbove = $state(settings.space_above_em);
   let spaceBelow = $state(settings.space_below_em);
   let keepWithContent = $state(settings.keep_with_content);
-  let imageData = $state(settings.image_data);
+  let imageId = $state(settings.image_id);
   let imageWidthPct = $state(settings.image_width_pct);
 
   $effect(() => {
@@ -51,7 +51,7 @@
     spaceAbove = settings.space_above_em;
     spaceBelow = settings.space_below_em;
     keepWithContent = settings.keep_with_content;
-    imageData = settings.image_data;
+    imageId = settings.image_id;
     imageWidthPct = settings.image_width_pct;
   });
 
@@ -61,24 +61,24 @@
     fileInput?.click();
   }
 
-  function handleFileSelected(e) {
+  async function handleFileSelected(e) {
     const file = e.target.files?.[0];
+    e.target.value = '';
     if (!file) return;
     if (!/^image\/(png|svg\+xml|jpeg|jpg)$/i.test(file.type)) {
       alert('Please upload a PNG, JPEG or SVG image.');
       return;
     }
-    const reader = new FileReader();
-    reader.onload = () => {
-      imageData = reader.result;
+    try {
+      imageId = await uploadImageFile(file);
       scheduleSave();
-    };
-    reader.readAsDataURL(file);
-    e.target.value = '';
+    } catch (err) {
+      console.error('[BreaksSettings] upload failed:', err);
+    }
   }
 
   function clearImage() {
-    imageData = '';
+    imageId = null;
     scheduleSave();
   }
 
@@ -96,7 +96,7 @@
       space_above_em: spaceAbove,
       space_below_em: spaceBelow,
       keep_with_content: keepWithContent,
-      image_data: imageData,
+      image_id: imageId,
       image_width_pct: imageWidthPct,
     });
     await updateProfileCategory(profile.id, 'breaks_json', json);
@@ -150,9 +150,9 @@
     {#if style === 'image'}
       <div class="image-upload-row">
         <label class="field-label">Image</label>
-        {#if imageData}
+        {#if imageId}
           <div class="image-preview-wrap">
-            <img class="image-preview" src={imageData} alt="Scene break" />
+            <img class="image-preview" src={imageSrcFor(imageId)} alt="Scene break" />
             <div class="image-actions">
               <button class="image-action-btn" onclick={triggerUpload}>Replace</button>
               <button class="image-action-btn danger" onclick={clearImage}>Remove</button>

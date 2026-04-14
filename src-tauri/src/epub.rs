@@ -77,47 +77,18 @@ fn html_escape(s: &str) -> String {
 
 // ---- Inline image extraction ----
 //
-// PageContentEditor (custom pages) and any chapter content that uses
-// embedded images stores them as base64 `data:` URLs inline in the HTML.
-// For the EPUB export that's a problem: a 5MB image in a 5MB base64 string
-// sits inside the XHTML file, which means readers load the entire chunk
-// into memory on page-turn and hit lag or crashes on low-end devices.
-//
-// The fix is to hoist every `data:` image out of the HTML into its own
-// zip entry under `images/img-{hash}.{ext}` and replace the inline `src`
-// with a relative reference. Identical images across chapters dedupe
-// via hash-based filenames so we never ship the same bytes twice.
+// Chapter and page HTML coming from the frontend contains `<img>` tags
+// with `iwe-image://{id}` src attributes that point at rows in the
+// `image_blobs` table. For EPUB output we pull each referenced BLOB
+// into its own zip entry under `images/img-{id}.{ext}` and rewrite the
+// src to a relative path. Identical ids across chapters dedupe naturally
+// so we never ship the same bytes twice.
 
 /// One extracted image, ready to be added as an EPUB resource.
 struct ExtractedImage {
-    path: String,     // relative path inside OEBPS, e.g. "images/img-7f3a.png"
+    path: String,     // relative path inside OEBPS, e.g. "images/img-42.png"
     bytes: Vec<u8>,
     mime: String,
-}
-
-/// Decode a base64 string with the standard alphabet. Ignores whitespace.
-/// Returns None on invalid input (bad char, wrong length) so the caller
-/// can fall back to leaving the inline data URL in place.
-fn decode_base64(input: &str) -> Option<Vec<u8>> {
-    use base64::Engine;
-    // Strip whitespace and try standard base64 first, then URL-safe
-    let cleaned: String = input.chars().filter(|c| !c.is_whitespace()).collect();
-    base64::engine::general_purpose::STANDARD
-        .decode(&cleaned)
-        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(&cleaned))
-        .ok()
-}
-
-/// FNV-1a 64-bit hash. Used as a short fingerprint for image deduplication.
-/// Not cryptographic — collisions are theoretically possible but require
-/// adversarial input, which we don't have in an ebook export pipeline.
-fn fnv1a_64(bytes: &[u8]) -> u64 {
-    let mut h: u64 = 0xcbf29ce484222325;
-    for &b in bytes {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    h
 }
 
 /// Pick a filename extension for a given mime type. Falls back to "bin"
@@ -223,71 +194,62 @@ fn compress_image(bytes: &[u8], mime: &str, params: &CompressionParams) -> (Vec<
     }
 }
 
-/// Scan an HTML string for `<img src="data:MIME;base64,BASE64">` patterns,
-/// extract each unique image into the accumulator, and return a rewritten
-/// HTML string where the inline data URLs have been replaced with relative
-/// paths to the extracted files.
+/// Scan an HTML string for `<img src="iwe-image://{id}">` patterns (or their
+/// `http://iwe-image.localhost/{id}` canonicalized form), pull each unique
+/// BLOB out of the `image_blobs` table, add it to the accumulator, and return
+/// a rewritten HTML string where the URI has been replaced with the relative
+/// path to the extracted file inside the EPUB zip.
 ///
 /// `accumulator` is shared across all chapters/pages in the export so a
 /// single image used in multiple places only gets added to the zip once.
-/// The map key is the FNV-1a hash of the original data URL, which is fast
-/// and stable across identical inputs.
+/// The map key is the image_blobs id itself — IDs are already unique and
+/// stable, so no extra hashing is needed for dedup.
 ///
 /// If `compress_params` is Some, every extracted image is re-encoded at
 /// the given preset. The path extension reflects the POST-compression
-/// format (e.g. a PNG flattened to JPEG lands as `.jpg`), and the hash
-/// key is still computed from the original data URL so identical sources
-/// dedupe correctly regardless of compression.
+/// format (e.g. a PNG flattened to JPEG lands as `.jpg`).
 fn extract_inline_images(
     html: &str,
     accumulator: &mut HashMap<u64, ExtractedImage>,
     compress_params: Option<&CompressionParams>,
+    conn: &rusqlite::Connection,
 ) -> String {
-    // Regex matches: `src="data:{mime};base64,{b64}"`
-    // - src attribute is captured as group 1 (for replacement)
-    // - mime is group 2
-    // - base64 is group 3
-    // Only matches within <img ...> tags to avoid false positives in text.
-    // The pattern uses `[^"]` for the base64 body so it can't run past the
-    // closing quote. Non-base64 data URLs (e.g. `data:image/svg+xml,...`)
-    // are intentionally NOT matched — they stay inline.
+    // Match either `iwe-image://{id}` or `http://iwe-image.localhost/{id}`
+    // inside an <img src="..."> attribute. The id is the only capture group
+    // we need; src-attribute structure is captured for rewriting.
     let re = match Regex::new(
-        r#"(?i)(<img[^>]*?\ssrc=")data:([a-z0-9.+\-/]+);base64,([^"]+)(")"#,
+        r#"(?i)(<img[^>]*?\ssrc=")(?:iwe-image://|https?://iwe-image\.localhost/)(\d+)(")"#,
     ) {
         Ok(r) => r,
         Err(_) => return html.to_string(),
     };
 
     re.replace_all(html, |caps: &regex::Captures| -> String {
-        let prefix = &caps[1]; // `<img ... src="`
-        let mime = caps[2].to_string();
-        let b64 = &caps[3];
-        let suffix = &caps[4]; // `"`
+        let prefix = &caps[1];
+        let id_str = &caps[2];
+        let suffix = &caps[3];
 
-        // Hash mime + length + prefix of base64 for dedup. Hashing the full
-        // multi-MB base64 string is wasteful; a 4KB prefix + length is unique enough.
-        let prefix_len = b64.len().min(4096);
-        let hash_input = format!("{};{};{}", mime, b64.len(), &b64[..prefix_len]);
-        let hash = fnv1a_64(hash_input.as_bytes());
+        let id: i64 = match id_str.parse() {
+            Ok(n) => n,
+            Err(_) => return caps.get(0).unwrap().as_str().to_string(),
+        };
 
-        // Ensure the image is in the accumulator. Decode (and maybe compress)
-        // only once per unique hash; subsequent references reuse the same path.
-        let path = if let Some(existing) = accumulator.get(&hash) {
+        // Use the blob id as the dedup key so the same image referenced
+        // from multiple pages only gets decoded/compressed once.
+        let key = id as u64;
+        let path = if let Some(existing) = accumulator.get(&key) {
             existing.path.clone()
         } else {
-            match decode_base64(b64) {
-                Some(bytes) => {
-                    // Optional compression pass. The returned mime may differ
-                    // from the input (e.g. PNG without alpha → JPEG) so we
-                    // use the post-compression mime for the file extension.
+            match crate::images::get_image_blob(conn, id) {
+                Ok(Some((bytes, mime))) => {
                     let (final_bytes, final_mime) = match compress_params {
                         Some(params) => compress_image(&bytes, &mime, params),
-                        None => (bytes, mime.clone()),
+                        None => (bytes, mime),
                     };
                     let ext = ext_for_mime(&final_mime);
-                    let path = format!("images/img-{:016x}.{}", hash, ext);
+                    let path = format!("images/img-{}.{}", id, ext);
                     accumulator.insert(
-                        hash,
+                        key,
                         ExtractedImage {
                             path: path.clone(),
                             bytes: final_bytes,
@@ -296,11 +258,10 @@ fn extract_inline_images(
                     );
                     path
                 }
-                None => {
-                    // Invalid base64 — leave the original inline reference.
-                    // We rebuild the full match so the replace_all leaves it alone.
-                    return caps.get(0).unwrap().as_str().to_string();
-                }
+                // Unknown id or DB error — leave the src as-is so the failure
+                // is visible in the reader (broken image icon) rather than
+                // silently producing a zip with a missing resource.
+                _ => return caps.get(0).unwrap().as_str().to_string(),
             }
         };
 
@@ -376,11 +337,19 @@ pub fn export_epub(
     use std::time::Instant;
     let t_start = Instant::now();
 
-    let cover: Option<(Vec<u8>, String)> = {
-        let guard = state.db.lock().map_err(|e| e.to_string())?;
-        let conn = guard.as_ref().ok_or("No project open")?;
-        db::get_book_cover(conn).map_err(|e| e.to_string())?
-    };
+    // Hold the DB lock for the whole export. We need it for the cover
+    // lookup and then again for every image_blobs fetch inside
+    // extract_inline_images — grabbing it once avoids lock churn and keeps
+    // the code simpler.
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+
+    // Cover: read cover_image_id from project_settings, fetch the blob.
+    let cover: Option<(Vec<u8>, String)> = (|| -> Option<(Vec<u8>, String)> {
+        let id_str = db::get_project_setting(conn, "cover_image_id").ok().flatten()?;
+        let id: i64 = id_str.parse().ok()?;
+        crate::images::get_image_blob(conn, id).ok().flatten()
+    })();
     let t_cover_load = t_start.elapsed();
 
     let mut builder = EpubBuilder::new(ZipLibrary::new().map_err(|e| e.to_string())?)
@@ -435,21 +404,21 @@ pub fn export_epub(
     let front_rewritten: Vec<String> = request
         .front_pages
         .iter()
-        .map(|p| extract_inline_images(&p.html, &mut image_accumulator, compress_params.as_ref()))
+        .map(|p| extract_inline_images(&p.html, &mut image_accumulator, compress_params.as_ref(), conn))
         .collect();
     let t_front_images = t_start.elapsed();
 
     let chapter_rewritten: Vec<String> = request
         .chapters
         .iter()
-        .map(|c| extract_inline_images(&c.html, &mut image_accumulator, compress_params.as_ref()))
+        .map(|c| extract_inline_images(&c.html, &mut image_accumulator, compress_params.as_ref(), conn))
         .collect();
     let t_chapter_images = t_start.elapsed();
 
     let back_rewritten: Vec<String> = request
         .back_pages
         .iter()
-        .map(|p| extract_inline_images(&p.html, &mut image_accumulator, compress_params.as_ref()))
+        .map(|p| extract_inline_images(&p.html, &mut image_accumulator, compress_params.as_ref(), conn))
         .collect();
     let t_back_images = t_start.elapsed();
 

@@ -1,5 +1,5 @@
 <script>
-  import { updateProfileCategory } from '$lib/db.js';
+  import { updateProfileCategory, uploadImageFile, imageSrcFor } from '$lib/db.js';
   import FontPicker from '$lib/components/FontPicker.svelte';
   import DecimalInput from '$lib/components/DecimalInput.svelte';
 
@@ -80,7 +80,7 @@
       // Chapter image
       image_enabled: false,
       image_individual: true,
-      image_default: '',
+      image_default_id: null,
       image_position: 'below_heading',
       image_width_pct: 50,
       image_align: 'center',
@@ -132,7 +132,7 @@
 
   let imgEnabled = $state(false);
   let imgIndividual = $state(true);
-  let imgDefault = $state('');
+  let imgDefaultId = $state(null);
   let imgPosition = $state('below_heading');
   let imgWidthPct = $state(50);
   let imgAlign = $state('center');
@@ -171,7 +171,7 @@
     ruleThickness = settings.rule_thickness_pt;
     imgEnabled = settings.image_enabled;
     imgIndividual = settings.image_individual;
-    imgDefault = settings.image_default;
+    imgDefaultId = settings.image_default_id;
     imgPosition = settings.image_position;
     imgWidthPct = settings.image_width_pct;
     imgAlign = settings.image_align;
@@ -200,7 +200,7 @@
       start_on: startOn, rule_above: ruleAbove, rule_below: ruleBelow,
       rule_thickness_pt: ruleThickness,
       image_enabled: imgEnabled, image_individual: imgIndividual,
-      image_default: imgDefault, image_position: imgPosition,
+      image_default_id: imgDefaultId, image_position: imgPosition,
       image_width_pct: imgWidthPct, image_align: imgAlign,
       image_light_text: imgLightText,
       image_dedicated_page: imgDedicatedPage,
@@ -365,12 +365,12 @@
         {#if !imgIndividual}
           <div class="field">
             <span class="field-label">Image for all chapters</span>
-            {#if imgDefault}
+            {#if imgDefaultId}
               <div class="img-preview">
-                <img src={imgDefault} alt="Default" />
+                <img src={imageSrcFor(imgDefaultId)} alt="Default" />
                 <div class="img-actions">
                   <button class="img-btn" onclick={() => fileInputDefault?.click()}>Replace</button>
-                  <button class="img-btn danger" onclick={() => { imgDefault = ''; scheduleSave(); }}>Remove</button>
+                  <button class="img-btn danger" onclick={() => { imgDefaultId = null; scheduleSave(); }}>Remove</button>
                 </div>
               </div>
             {:else}
@@ -380,13 +380,16 @@
             {/if}
             <input type="file" accept="image/png,image/svg+xml,image/jpeg"
               bind:this={fileInputDefault}
-              onchange={(e) => {
+              onchange={async (e) => {
                 const f = e.target.files?.[0];
-                if (!f) return;
-                const r = new FileReader();
-                r.onload = () => { imgDefault = r.result; scheduleSave(); };
-                r.readAsDataURL(f);
                 e.target.value = '';
+                if (!f) return;
+                try {
+                  imgDefaultId = await uploadImageFile(f);
+                  scheduleSave();
+                } catch (err) {
+                  console.error('[ChapterHeadings] upload failed:', err);
+                }
               }}
               style="display:none" />
           </div>

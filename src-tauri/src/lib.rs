@@ -4,6 +4,7 @@ mod epub;
 mod epub_validate;
 mod famous_books;
 mod format;
+mod images;
 mod import;
 mod semantic;
 mod text_utils;
@@ -243,12 +244,27 @@ fn close_project(state: tauri::State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
-// ---- Book cover commands ----
+// ---- Image blob commands ----
+
+#[derive(serde::Serialize)]
+pub struct ImageBlobData {
+    pub data: Vec<u8>,
+    pub mime: String,
+}
 
 #[derive(serde::Serialize)]
 pub struct BookCoverData {
     pub data: Vec<u8>,
     pub mime_type: String,
+}
+
+const COVER_SETTING_KEY: &str = "cover_image_id";
+
+fn read_cover_blob(conn: &Connection) -> Option<BookCoverData> {
+    let id_str = db::get_project_setting(conn, COVER_SETTING_KEY).ok().flatten()?;
+    let id: i64 = id_str.parse().ok()?;
+    let (data, mime) = images::get_image_blob(conn, id).ok().flatten()?;
+    Some(BookCoverData { data, mime_type: mime })
 }
 
 /// Run the lightweight EPUB sanity checker on a byte buffer. Returns a
@@ -261,13 +277,57 @@ fn validate_epub_bytes(bytes: Vec<u8>) -> Vec<epub_validate::EpubIssue> {
 }
 
 #[tauri::command]
+fn upload_image(
+    state: tauri::State<'_, AppState>,
+    bytes: Vec<u8>,
+    mime: String,
+) -> Result<i64, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    images::upload_image(conn, &bytes, &mime).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_image_blob(
+    state: tauri::State<'_, AppState>,
+    id: i64,
+) -> Result<Option<ImageBlobData>, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    match images::get_image_blob(conn, id).map_err(|e| e.to_string())? {
+        Some((data, mime)) => Ok(Some(ImageBlobData { data, mime })),
+        None => Ok(None),
+    }
+}
+
+#[tauri::command]
+fn delete_image_blob(state: tauri::State<'_, AppState>, id: i64) -> Result<(), String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    images::delete_image_blob(conn, id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn list_orphan_images(state: tauri::State<'_, AppState>) -> Result<Vec<i64>, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    images::list_orphan_images(conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn cleanup_orphan_images(state: tauri::State<'_, AppState>) -> Result<usize, String> {
+    let guard = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No project open")?;
+    images::cleanup_orphan_images(conn).map_err(|e| e.to_string())
+}
+
+// ---- Book cover commands (thin wrappers over image_blobs + project_settings) ----
+
+#[tauri::command]
 fn get_book_cover(state: tauri::State<'_, AppState>) -> Result<Option<BookCoverData>, String> {
     let guard = state.db.lock().map_err(|e| e.to_string())?;
     let conn = guard.as_ref().ok_or("No project open")?;
-    match db::get_book_cover(conn).map_err(|e| e.to_string())? {
-        Some((data, mime_type)) => Ok(Some(BookCoverData { data, mime_type })),
-        None => Ok(None),
-    }
+    Ok(read_cover_blob(conn))
 }
 
 #[tauri::command]
@@ -275,17 +335,20 @@ fn set_book_cover(
     state: tauri::State<'_, AppState>,
     data: Vec<u8>,
     mime_type: String,
-) -> Result<(), String> {
+) -> Result<i64, String> {
     let guard = state.db.lock().map_err(|e| e.to_string())?;
     let conn = guard.as_ref().ok_or("No project open")?;
-    db::set_book_cover(conn, &data, &mime_type).map_err(|e| e.to_string())
+    let id = images::upload_image(conn, &data, &mime_type).map_err(|e| e.to_string())?;
+    db::set_project_setting(conn, COVER_SETTING_KEY, &id.to_string())
+        .map_err(|e| e.to_string())?;
+    Ok(id)
 }
 
 #[tauri::command]
 fn clear_book_cover(state: tauri::State<'_, AppState>) -> Result<(), String> {
     let guard = state.db.lock().map_err(|e| e.to_string())?;
     let conn = guard.as_ref().ok_or("No project open")?;
-    db::clear_book_cover(conn).map_err(|e| e.to_string())
+    db::delete_project_setting(conn, COVER_SETTING_KEY).map_err(|e| e.to_string())
 }
 
 /// Peek the cover of an arbitrary project file by path, without going through
@@ -293,8 +356,7 @@ fn clear_book_cover(state: tauri::State<'_, AppState>) -> Result<(), String> {
 /// thumbnails next to each project in the list.
 ///
 /// Uses a short-lived read-only connection so it doesn't fight with the main
-/// project connection for file locks. Tolerant of schemas that predate the
-/// book_cover table (returns None on the error instead of propagating).
+/// project connection for file locks. Returns None for pre-migration schemas.
 #[tauri::command]
 fn get_project_cover_by_path(filepath: String) -> Result<Option<BookCoverData>, String> {
     use rusqlite::OpenFlags;
@@ -305,12 +367,7 @@ fn get_project_cover_by_path(filepath: String) -> Result<Option<BookCoverData>, 
         Ok(c) => c,
         Err(_) => return Ok(None),
     };
-    match db::get_book_cover(&conn) {
-        Ok(Some((data, mime_type))) => Ok(Some(BookCoverData { data, mime_type })),
-        Ok(None) => Ok(None),
-        // Table doesn't exist yet on pre-migration projects — not an error.
-        Err(_) => Ok(None),
-    }
+    Ok(read_cover_blob(&conn))
 }
 
 // ---- Chapter commands ----
@@ -379,12 +436,11 @@ fn rename_chapter(state: tauri::State<'_, AppState>, id: i64, title: String) -> 
 #[tauri::command]
 fn update_chapter_metadata(
     state: tauri::State<'_, AppState>,
-    id: i64, title: String, subtitle: String, chapter_image: String,
-    ornament_above: String, ornament_mid: String, ornament_below: String,
+    id: i64, title: String, subtitle: String, chapter_image_id: Option<i64>,
 ) -> Result<(), String> {
     let guard = state.db.lock().map_err(|e| e.to_string())?;
     let conn = guard.as_ref().ok_or("No project open")?;
-    db::update_chapter_metadata(conn, id, &title, &subtitle, &chapter_image, &ornament_above, &ornament_mid, &ornament_below)
+    db::update_chapter_metadata(conn, id, &title, &subtitle, chapter_image_id)
         .map_err(|e| e.to_string())
 }
 
@@ -1401,6 +1457,63 @@ pub fn run() {
                 .body(b"Not found".to_vec())
                 .unwrap()
         })
+        .register_uri_scheme_protocol("iwe-image", |ctx, request| {
+            // Requests arrive as http://iwe-image.localhost/{id}. Serve the
+            // image_blobs row for {id} with its stored mime type. IDs never
+            // mutate (a new upload produces a new row), so we can tell the
+            // browser the response is immutable for 1 year.
+            let not_found = || {
+                tauri::http::Response::builder()
+                    .status(404)
+                    .header("Content-Type", "text/plain")
+                    .header("Access-Control-Allow-Origin", "*")
+                    .body(b"Not found".to_vec())
+                    .unwrap()
+            };
+
+            let path = request.uri().path();
+            let id_str = path.trim_start_matches('/');
+            let image_id: i64 = match id_str.parse() {
+                Ok(n) => n,
+                Err(_) => return not_found(),
+            };
+
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let app_state = ctx.app_handle().state::<AppState>();
+                let guard = app_state.db.lock().map_err(|_| "db mutex poisoned".to_string())?;
+                let conn = guard.as_ref().ok_or_else(|| "no project open".to_string())?;
+                images::get_image_blob(conn, image_id).map_err(|e| e.to_string())
+            }));
+
+            match result {
+                Ok(Ok(Some((bytes, mime)))) => tauri::http::Response::builder()
+                    .status(200)
+                    .header("Content-Type", mime)
+                    .header("Cache-Control", "public, max-age=31536000, immutable")
+                    .header("Access-Control-Allow-Origin", "*")
+                    .body(bytes)
+                    .unwrap(),
+                Ok(Ok(None)) => not_found(),
+                Ok(Err(e)) => {
+                    eprintln!("[iwe-image://] lookup error for id {}: {}", image_id, e);
+                    tauri::http::Response::builder()
+                        .status(500)
+                        .header("Content-Type", "text/plain")
+                        .header("Access-Control-Allow-Origin", "*")
+                        .body(e.into_bytes())
+                        .unwrap()
+                }
+                Err(_panic) => {
+                    eprintln!("[iwe-image://] PANIC for id {}", image_id);
+                    tauri::http::Response::builder()
+                        .status(500)
+                        .header("Content-Type", "text/plain")
+                        .header("Access-Control-Allow-Origin", "*")
+                        .body(b"Internal error: image lookup panicked".to_vec())
+                        .unwrap()
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             get_backup_interval,
             set_backup_interval,
@@ -1412,6 +1525,11 @@ pub fn run() {
             set_book_cover,
             clear_book_cover,
             get_project_cover_by_path,
+            upload_image,
+            get_image_blob,
+            delete_image_blob,
+            list_orphan_images,
+            cleanup_orphan_images,
             get_chapters,
             get_chapter,
             add_chapter,

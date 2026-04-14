@@ -20,6 +20,7 @@ Rust builds automatically via Tauri. The Cargo.toml is in `src-tauri/`.
 - **Scanner:** Aho-Corasick (Rust) for blazing-fast multi-pattern entity matching
 - **Semantic Search:** ONNX Runtime (`ort` crate) + `tokenizers`, running all-mpnet-base-v2 on-device (no cloud, no API keys)
 - **Publishing / Layout:** Typst (`typst` crate) for the Format editor's SVG preview, served via a custom `iwe://` URI scheme
+- **Image storage:** shared `image_blobs` SQLite table (BLOB + mime + SHA-256-dedup). Stored content references images as `iwe-image://{id}`, resolved in the webview via a custom `iwe-image://` URI scheme handler
 - **Quick PDF export (toolbar):** `genpdf` with embedded Liberation Serif fonts (separate code path from the Typst-based Format editor)
 - **DOCX export:** `docx` npm package
 - **Styling:** Bootstrap 5 + Bootstrap Icons + custom CSS theme (`src/lib/theme.css`)
@@ -269,6 +270,7 @@ src-tauri/
 │   ├── semantic.rs               # ONNX session + tokenizer, embedding index, semantic_search, indexing events
 │   ├── format.rs                 # Typst-based Format editor: FormatState, compile_preview, render_page_svg, list_system_fonts (feature-gated: cfg(feature = "format"))
 │   ├── epub.rs                   # Stateless EPUB export via epub-builder crate — consumed by Format editor's ebook profiles
+│   ├── images.rs                 # Shared image_blobs CRUD: upload_image (SHA-256 dedup), get_image_blob, delete, orphan listing
 │   ├── import.rs                 # DOCX + EPUB parse → flat blocks → 5-strategy chapter break detection
 │   ├── palettes.rs               # Word Palettes: separate SQLite DB in app data dir, 21 palette commands
 │   ├── famous_books.rs           # Comparative-works library: separate SQLite DB in app data dir
@@ -305,7 +307,7 @@ Three databases exist at runtime:
 ### Per-project `.iwe` schema (tables defined in `db.rs::init_schema`)
 
 **Writing core:**
-- **chapters** — id, title, content (BLOB — Yjs state), sort_order, created_at, updated_at, **deleted** (soft-delete flag — restore via `restore_chapter`)
+- **chapters** — id, title, content (BLOB — Yjs state), sort_order, subtitle, chapter_image_id (nullable FK-like into `image_blobs.id`), created_at, updated_at, **deleted** (soft-delete flag — restore via `restore_chapter`)
 - **entities** — id, name, entity_type CHECK('character'|'place'|'thing'), description, color, visible
 - **aliases** — entity_id, alias
 - **entity_fields** — key-value custom fields *(schema exists, no UI yet)*
@@ -334,12 +336,15 @@ Three databases exist at runtime:
 - **format_pages** — page_role ('free-form'|'toc'|future types), title, content (PM JSON for free-form, settings JSON for toc), position ('front'|'back'), sort_order, include_in, vertical_align, ebook_metadata_tag (semantic role for EPUB export, e.g. 'copyright', 'dedication'). Shared across all profiles; the Format editor uses `format_page_exclusions` to hide specific pages per profile.
 - **format_page_exclusions** — (page_id, profile_id) composite PK
 
+**Images:**
+- **image_blobs** — id PK, data BLOB, mime TEXT, width/height (INTEGER, nullable — not populated yet), byte_size INTEGER, hash TEXT UNIQUE (SHA-256 hex), created_at. Shared by every image surface: chapter-heading default, scene-break glyph, map page, PageContentEditor images, book cover. Referenced from JSON/columns by integer id. Cover reference lives in `project_settings.cover_image_id`. Upload dedupes on `hash`.
+
 **Stats / history / misc:**
 - **writing_activity** — per-save log (timestamp, chapter, chapter_words, manuscript_words, words_delta)
 - **daily_stats** — aggregated daily (date PK, words_added, words_deleted, net_words, active_minutes, chapters_touched)
 - **writing_settings** — singleton: daily_goal, session_gap_minutes, **backup_interval_minutes**, **last_backup_at**
 - **nav_history** — chapter_id, scroll_top, cursor_pos (bounded to ~100 entries; truncated forward on new navigation like a browser)
-- **project_settings** — generic key/value store (e.g. `comparative_book_id` for the Comparative Works benchmark)
+- **project_settings** — generic key/value store (e.g. `comparative_book_id` for the Comparative Works benchmark, `cover_image_id` for the book cover reference)
 
 Migrations are handled in `init_schema()` with `CREATE TABLE IF NOT EXISTS` for idempotent creation and `ALTER TABLE ... ADD COLUMN` checks for backward compatibility. There's also a one-off migration in `init_schema()` that drops the old `profile_id` column from `format_pages` and deduplicates rows — see `db.rs:360-400`. During active development, schema changes may require deleting the `.iwe` file and starting fresh.
 
@@ -400,6 +405,8 @@ Typst crates used (all pinned at `0.14`): `typst` (core, `World` trait, `PagedDo
 
 2. **The `iwe://` URI scheme** (lib.rs:1278-1312) is registered once before `invoke_handler`. It handles exactly one route: `/preview/page/{N}` (with optional `.svg` suffix stripped). The render call is wrapped in `std::panic::catch_unwind(AssertUnwindSafe(...))` because `typst_svg::svg()` can panic on certain content (font issues, edge-case glyphs) and this callback runs inside a webview2 COM handler (`extern "C"`) where unwinding panics abort the process. Panics return a 500 response instead. Frontend requests `http://iwe.localhost/preview/page/{i}.svg?v={generation}` (Tauri normalizes custom schemes to `http://{scheme}.localhost/...`). `render_page_svg` is a plain public function, **not** a Tauri command. When adding new `iwe://` asset routes in the future, extend the existing handler — Tauri only allows one `register_uri_scheme_protocol` call per scheme.
 
+   **The `iwe-image://` URI scheme** is a sibling scheme registered right after `iwe://` in the same builder. It handles one route: `/{id}` where `{id}` is an `image_blobs.id` integer. The handler grabs `AppState`, looks the row up via `images::get_image_blob(conn, id)`, and returns the BLOB with its stored `Content-Type` plus `Cache-Control: public, max-age=31536000, immutable` — IDs are immutable (new upload = new row) so the browser can cache indefinitely. Also wrapped in `catch_unwind` for webview safety. Frontend builds URLs via `imageSrcFor(id)` → `http://iwe-image.localhost/{id}`. Every image surface in the app (TipTap NodeView, Custom mode previews, EPUB preview via epub.js, ebook/Typst renderers) flows through this scheme, so authoring images just drops a standard `<img src>` and the browser handles retrieval.
+
 3. **Lazy page loading** (`format/+page.svelte:249-310`): the frontend renders `pageCount` page wrappers in a **2-column CSS grid spread layout** (verso/recto side-by-side, like an open book). Page 1 (recto) sits alone on the right via `grid-column: 2`; subsequent pages fill left-right pairs. Verso pages align toward the spine (right), recto pages toward the spine (left). Placeholders are sized via `width: {trim_width_in * 72}px; aspect-ratio: {w}/{h}` so the scroll height is correct before any SVG loads.
    - An `IntersectionObserver` with `root: previewContainer, rootMargin: '200px 0px 200px 0px', threshold: 0` tracks `visibleSet` (non-reactive Set).
    - On scroll, `scrolling = true` + 150ms debounce (`SCROLL_IDLE_MS`) to `commitVisible()`.
@@ -456,10 +463,10 @@ All 8 subpanels follow the identical pattern: `$props() = { profile, onchange }`
 
 | Subpanel | DB column | Debounce | Notable fields (enum values in parens) |
 |---|---|---|---|
-| `ChapterHeadings.svelte` | `chapter_headings_json` | 250ms | `number_format` (none/numeric/chapter_numeric/word/chapter_word/roman/chapter_roman), `{number,title,subtitle}_{enabled,font,size_pt,align,style,tracking_em}`, `sink_em`, `space_*_em`, `start_on` (any/recto/verso, print-only), `rule_{above,below}` + `rule_thickness_pt`, `image_enabled`, `image_individual`, `image_default` (base64), `image_position` (above_number/between_number_title/between_title_subtitle/below_heading/cover_heading/dedicated_page), `image_width_pct`, `image_align`, `image_light_text` (only when position=cover_heading) |
+| `ChapterHeadings.svelte` | `chapter_headings_json` | 250ms | `number_format` (none/numeric/chapter_numeric/word/chapter_word/roman/chapter_roman), `{number,title,subtitle}_{enabled,font,size_pt,align,style,tracking_em}`, `sink_em`, `space_*_em`, `start_on` (any/recto/verso, print-only), `rule_{above,below}` + `rule_thickness_pt`, `image_enabled`, `image_individual`, `image_default_id` (integer — references `image_blobs.id`), `image_position` (above_number/between_number_title/between_title_subtitle/below_heading/cover_heading/dedicated_page), `image_width_pct`, `image_align`, `image_light_text` (only when position=cover_heading) |
 | `ParagraphSettings.svelte` | `paragraph_json` | 250ms | `drop_cap_{enabled,lines,font,color,quote_mode,fill_pct}` (quote_mode: first_char/both_together/letter_only/disable_on_dialogue), `small_caps_{enabled,words}` (words: 3/5/8/-1), `apply_when` (chapter/breaks/both), `paragraph_style` (indented/spaced/both), `indent_em`, `spacing_em`, `prevent_widows`, `prevent_orphans`, `max_consecutive_hyphens` (2/3/4/99), `last_line_min_chars` (0/3/5/8), `hyphen_aggressiveness` (low/normal/high). **Gotcha:** uses `eval()` in its `set(field, value)` helper — don't copy that pattern. |
 | `HeadingsSettings.svelte` | `headings_json` | 250ms | Flat map of `{h2,h3,h4}_{enabled,font,size_pt,align,style,tracking_em,space_above_em,space_below_em,keep_with_next,rule_above,rule_below}` for H2/H3/H4 + global `no_indent_after`. State is a flat object keyed by prefixed strings, not a nested structure. |
-| `BreaksSettings.svelte` | `breaks_json` | 250ms | `style` (none/blank/dinkus/asterism/rule/custom/image), `custom_text`, `image_data` (base64), `image_width_pct`, `space_above_em`, `space_below_em`, `keep_with_content` |
+| `BreaksSettings.svelte` | `breaks_json` | 250ms | `style` (none/blank/dinkus/asterism/rule/custom/image), `custom_text`, `image_id` (integer — references `image_blobs.id`), `image_width_pct`, `space_above_em`, `space_below_em`, `keep_with_content` |
 | `PrintLayoutSettings.svelte` | `print_layout_json` | 300ms | `margin_{top,bottom,outside,inside}_in` (always inches internally, UI converts mm via `$lib/unitPreference.js`), `justify`, `hyphens`. "Reset to recommended" button calls `getRecommendedMargins(w, h)` from `$lib/marginDefaults.js` and persists immediately. **Hidden for ebook profiles.** |
 | `TypographySettings.svelte` | `typography_json` | 200ms | `font`, `size_pt` (9–18), `line_spacing` (1.15/1.25/1.4/1.5/1.75/2.0). **Fallback pattern**: when the JSON column is empty or unparseable, falls back to legacy scalar columns `font_body`, `font_size_pt`, `line_spacing` — preserving older profiles. |
 | `HeaderFooterSettings.svelte` | `header_footer_json` | 250ms | Most complex. `slots` map with 12 keys (`{verso,recto}_{header,footer}_{left,center,right}`), each `{content, custom, font, size_pt, style}`. Content enum: none/page_number/book_title/chapter_title/author_name/series_name/book_number/custom. Style: normal/italic/smallcaps/uppercase. Size: 7–12pt. Visual page diagram with clickable slot cells. Globals: `suppress_on_chapter_start`, `suppress_header_on_pages`, `suppress_footer_on_pages`, `header_separator`, `footer_separator`, `separator_thickness_pt`, `margin_{left,right}_in`, `extend_no_header`, `extend_no_footer`. **Hidden for ebook profiles.** |
@@ -469,9 +476,9 @@ All 8 subpanels follow the identical pattern: `$props() = { profile, onchange }`
 
 Full-screen modal (`fixed inset: 0, z-index: 2000`) opened via the edit-content button on free-form format pages. Uses TipTap with: `StarterKit.configure({ heading: false, history: true })` (headings disabled — font sizes used instead; history ON, unlike the main editor which uses Yjs undo), `TextStyle`, `FontSize` + `FontFamily` (from `@tiptap/extension-text-style`), a custom `ImageNode`, `TextAlign.configure({ types: ['paragraph'] })`, `Placeholder`. **Paste is plain-text only** (`editorProps.handlePaste` strips all formatting) — users bring raw text in and style it with the toolbar. This prevents CSS font-family stacks and inline styles from leaking into the Typst markup builder.
 
-**Custom image node** is `inline: false, group: 'block', draggable: true` with attributes `src, alt, width` (string like `"300px"`). Manual DOM NodeView: outer centering div + inline-block frame + `<img>` + bottom-right teal resize handle. Handle drag attaches `document` mousemove/mouseup listeners, `newWidth = max(40, startWidth + dx)`, on mouseup dispatches `tr.setNodeMarkup(pos, undefined, { ...attrs, width: finalWidth })` to persist.
+**Custom image node** is `inline: false, group: 'block', draggable: true` with attributes `imageId, alt, width` (width is a string like `"300px"`). Manual DOM NodeView: outer centering div + inline-block frame + `<img>` + bottom-right teal resize handle. `renderHTML` emits `<img src="http://iwe-image.localhost/{imageId}">`; `parseHTML` recovers the id from either `iwe-image://{id}` or the localhost http form for round-tripping. File upload calls `uploadImageFile(file)` → `uploadImage` Tauri command → returns the `image_blobs` id, which is inserted as the node's `imageId` attr. Handle drag attaches `document` mousemove/mouseup listeners, `newWidth = max(40, startWidth + dx)`, on mouseup dispatches `tr.setNodeMarkup(pos, undefined, { ...attrs, width: finalWidth })` to persist.
 
-**Content format:** stored as ProseMirror JSON stringified (`editor.getJSON() → JSON.stringify`). `parseInitialContent(raw)` handles: empty → blank doc / starts with `{` → JSON.parse / else → split by `\n\n` and wrap paragraphs. The page canvas is sized to exact profile inches at 72dpi (`width: {w}in; height: {h}in; padding: {margins}in`) with a red dashed "Page boundary" marker below — content can overflow visibly so the author sees it. `verticalAlign` state (`'top'` | `'center'` | `'bottom'`) is read from `page.vertical_align`, sent back via `onsave({ content, verticalAlign })`, applied via `data-valign` CSS. Explicit Save button + Ctrl+S; no auto-save. **Images are embedded as base64 data URIs** — large images grow the `.iwe` file directly.
+**Content format:** stored as ProseMirror JSON stringified (`editor.getJSON() → JSON.stringify`). `parseInitialContent(raw)` handles: empty → blank doc / starts with `{` → JSON.parse / else → split by `\n\n` and wrap paragraphs. The page canvas is sized to exact profile inches at 72dpi (`width: {w}in; height: {h}in; padding: {margins}in`) with a red dashed "Page boundary" marker below — content can overflow visibly so the author sees it. `verticalAlign` state (`'top'` | `'center'` | `'bottom'`) is read from `page.vertical_align`, sent back via `onsave({ content, verticalAlign })`, applied via `data-valign` CSS. Explicit Save button + Ctrl+S; no auto-save. Image bytes live in `image_blobs` — only the integer id is embedded in the ProseMirror JSON.
 
 #### `TocPageEditor.svelte` — TOC page settings editor
 
@@ -483,7 +490,7 @@ Ebook output previously showed "Ebook preview coming soon". That has been replac
 
 **Ebook preview** uses **epub.js** (`npm: epubjs`) for proper ereader-style paginated rendering. When `activeProfile?.target_type === 'ebook'`, `compileAndShow()` calls `renderEbookPreview()` which:
 
-1. Builds a real EPUB via `buildEpubForPreview()` — same pipeline as the export (`exportEpub` Rust command) but with images downscaled on the JS side for speed (`downscaleHtmlImages` → canvas resize to 600px max)
+1. Builds a real EPUB via `buildEpubForPreview()` — same pipeline as the export (`exportEpub` Rust command). No JS-side downscaling needed: HTML only carries `iwe-image://{id}` references, so IPC payloads are small and Rust fetches image bytes directly from `image_blobs`.
 2. Passes the EPUB bytes as an `ArrayBuffer` to `ePub(arrayBuffer)` (epub.js)
 3. Renders via `ebookBook.renderTo(element, { width, height, spread: 'none', flow: 'paginated', allowScriptedContent: true })`
 4. Generates global page locations via `ebookBook.locations.generate(1024)` for whole-book page numbering
@@ -492,7 +499,7 @@ Ebook output previously showed "Ebook preview coming soon". That has been replac
 
 Device dimensions come from `DEVICE_DIMS` keyed by `ebookDevice` (default `'kindle-paperwhite'`, 300×480px). The outer device frame adds 24px padding for a bezel look. Below the screen: prev/next buttons + page indicator (e.g. "42 / 165"). `pageCount` is 0 in ebook mode; the timing bar is hidden; the IntersectionObserver is torn down.
 
-**Performance note:** The preview EPUB build is slow (~15-20s) because images are embedded as base64 in HTML, sent over IPC as JSON, regex-scanned and decoded in Rust, then zipped. The `downscaleHtmlImages` helper mitigates this by shrinking large images to 600px on the JS side before sending. The proper fix is migrating to BLOB storage (see Work-in-progress section).
+**Performance note:** The preview EPUB build runs in ~1–2s even with multi-MB images. HTML carries only `iwe-image://{id}` references (tiny strings), so the IPC payload is text-only; the Rust side reads each referenced BLOB once via `image_blobs` and writes it straight into the zip.
 
 **EPUB export** — `src-tauri/src/epub.rs` is fully implemented and registered. Single command `export_epub(request: EpubExportRequest) -> Result<Vec<u8>, String>`, **stateless** (takes no `AppState` — all content comes from the frontend payload). Uses `epub-builder = "0.8"` with `ZipLibrary::new()` at EPUB 3.0. Request shape:
 
@@ -502,12 +509,11 @@ struct EpubExportRequest {
     chapters: Vec<EpubChapter>,       // { title, subtitle, html }
     front_pages: Vec<EpubPage>,       // { title, role (from ebook_metadata_tag), html, position }
     back_pages: Vec<EpubPage>,
-    cover_image: Option<String>,      // base64 data URL, decoded via hand-rolled base64 decoder
     css: String,                      // written as epub stylesheet.css
 }
 ```
 
-Flow: set metadata → decode cover image + `add_cover_image` → `stylesheet(css)` → iterate front pages (`build_page_html` + `wrap_xhtml`, TOC pages use `ReferenceType::Toc`, title pages `TitlePage`, else `Text`) → iterate chapters (`build_chapter_html`, wrapped in `<section epub:type="chapter">`) → iterate back pages → `builder.generate(&mut output)` → return bytes. `epub_type_for_role(role)` maps ebook metadata tags to EPUB semantic types (e.g. `acknowledgments → acknowledgments`, unknown → `bodymatter`). The frontend passes `ebook_metadata_tag || page_role` as the `role` field.
+Flow: set metadata → look up cover via `project_settings.cover_image_id` → `image_blobs` → `add_cover_image` → `stylesheet(css)` → iterate front pages (`build_page_html` + `wrap_xhtml`, TOC pages use `ReferenceType::Toc`, title pages `TitlePage`, else `Text`) → iterate chapters (`build_chapter_html`, wrapped in `<section epub:type="chapter">`) → iterate back pages → `builder.generate(&mut output)` → return bytes. `epub_type_for_role(role)` maps ebook metadata tags to EPUB semantic types (e.g. `acknowledgments → acknowledgments`, unknown → `bodymatter`). The frontend passes `ebook_metadata_tag || page_role` as the `role` field.
 
 **Known EPUB gaps:**
 - `EpubChapter.subtitle` is in the struct but no UI populates it.
@@ -516,7 +522,7 @@ Flow: set metadata → decode cover image + `add_cover_image` → `stylesheet(cs
 
 #### Typst markup generation — `build_typst_markup` (format.rs:1017-1599)
 
-Signature: `fn build_typst_markup(profile, front_pages, chapters, back_pages, book_title, author_name, series_name, series_number) -> (String, Vec<String>, ImageMap)`. Chapters param is `&[(i64 chapter_id, String title, String subtitle, String chapter_image_data, String text)]`.
+Signature: `fn build_typst_markup(profile, front_pages, chapters, back_pages, book_title, author_name, series_name, series_number, conn: &Connection) -> (String, Vec<String>, ImageMap)`. Chapters param is `&[(i64 chapter_id, String title, String subtitle, Option<i64> chapter_image_id, Vec<ChapterBlock> blocks)]`. The `&Connection` is threaded through `emit_scene_break`, `convert_pm_node`, `build_map_page`, and `build_front_matter_page` so each call site can resolve `iwe-image://{id}` URIs into BLOB bytes on demand.
 
 Generated Typst document structure:
 
@@ -529,7 +535,7 @@ Generated Typst document structure:
 7. **Chapter loop**: `#pagebreak()` or `#pagebreak(to: "odd")` → anchor `<iwe-ch-{chapter_id}>` → `#heading(level: 1, outlined: true)[title]` (invisible via show rule but indexed for TOC/outline) → sink `#v(Nem)` → optional rules + number + title + subtitle → chapter image at configured position → body in `#[` block with scoped `#set text` + `#set par` → paragraph loop: scene-break sentinels trigger `emit_scene_break()`, opener paragraphs get `emit_opener_paragraph()` (drop cap + small caps), subsequent paragraphs after breaks/chapter start get `#par(first-line-indent: 0em)[...]`.
 8. **Back matter**: same as front matter but after a `#pagebreak()`.
 
-**Image ingestion**: `ingest_image(src, images)` decodes data URLs, assigns virtual path `/iwe-img-{fnv1a_hash}.{ext}` (dedupes identical images by hash), stores bytes in `ImageMap`. `IweWorld.file()` serves these when Typst requests them.
+**Image ingestion**: `ingest_image(src, images, conn)` parses `iwe-image://{id}` URIs (also accepts the `http://iwe-image.localhost/{id}` form), fetches the matching row from `image_blobs`, assigns virtual path `/iwe-img-{fnv1a_hash}.{ext}` (dedupes by content hash so two refs to the same id only embed once in Typst's world), and stores bytes in `ImageMap`. `IweWorld.file()` serves these when Typst requests them. Non-URI `src` values (legacy data URLs, remote http:// images) are ignored — all image references post-migration flow through `image_blobs`.
 
 **Scene break detection**: `extract_chapter_blocks_from_bytes` detects `horizontalRule` elements in the Y.Doc and emits `ChapterBlock::SceneBreak` directly — no sentinel strings needed. The old `is_scene_break_sentinel()` function and `extract_text_for_format_from_bytes` are still in the code but unused (dead code from the pre-formatting pipeline).
 
@@ -584,7 +590,7 @@ Calls `FormatState::get_or_init_fonts()` (which lazy-inits via `typst_kit::fonts
 3. **Dual margin representation.** Margins live in both scalar columns AND `print_layout_json`. Typst prefers `print_layout_json` with fallback to scalars. `update_format_profile` updates only scalars; `PrintLayoutSettings` writes only JSON. On older profiles, both may be populated with different values — JSON wins.
 4. **No SQL CHECK constraints on `target_type`, `position`, `include_in`, `vertical_align`, `page_role`.** All enforcement is UI-side. Any string passes the DB layer.
 5. **`list_page_exclusions` returns the entire table.** Filtering by profile is client-side. There's also `list_excluded_page_ids_for_profile` used only internally by `compile_preview`.
-6. **Images stored inline as base64** in `format_pages.content` AND in `chapter_headings_json.image_default` AND in `breaks_json.image_data`. Large images grow the `.iwe` file significantly.
+6. **Images live in the shared `image_blobs` table.** Format settings JSON and ProseMirror JSON carry only integer ids: `chapter_headings_json.image_default_id`, `breaks_json.image_id`, map page `image_id`, chapter rows use `chapters.chapter_image_id`, PageContentEditor nodes carry `attrs.imageId`, and the book cover is referenced via `project_settings.cover_image_id`. Upload goes through `uploadImage(bytes, mime)` which hashes with SHA-256 and dedupes at the table level.
 7. **`compile_preview` holds the DB mutex through the entire compile** (4 phases, potentially several seconds). Blocks all other DB operations. Architectural issue if we ever want concurrent DB reads.
 8. **No compile debounce.** Rapid setting changes trigger overlapping compiles. The `rendering` flag shows a spinner but doesn't cancel or queue.
 9. **Chapter/page label introspector lookups can silently miss.** If a chapter anchor fails to resolve (e.g. empty chapter text), `section_pages` just won't have an entry — no error. Scroll-to-section will no-op.
@@ -609,8 +615,8 @@ The ebook preview (`buildEpubForPreview` → epub.js) and the EPUB export (`hand
 
 **Preview pipeline** (`buildEpubForPreview` → epub.js):
 1. Resolve settings, build raw CSS (same as export path)
-2. Convert chapters to XHTML via `chapterToHtml` + `htmlToXhtml`, downscale large images via `downscaleHtmlImages`
-3. Build front/back matter pages (filtered by profile exclusions), downscale images
+2. Convert chapters to XHTML via `chapterToHtml` + `htmlToXhtml`. HTML carries `iwe-image://{id}` URIs; no JS-side image work needed.
+3. Build front/back matter pages (filtered by profile exclusions) — same treatment
 4. Call `exportEpub` Rust command with the request — produces real EPUB bytes
 5. Feed `ArrayBuffer` to `ePub()` from epub.js, render with `rendition.display()`
 6. epub.js handles all pagination via CSS columns internally (the same approach used by Readium and other production ebook readers)
@@ -620,7 +626,7 @@ The ebook preview (`buildEpubForPreview` → epub.js) and the EPUB export (`hand
 2. For each chapter: `renderChapterHeadingHtml(ch, i) + chapterToHtml(ch)` → `substituteImageBreaks` → `htmlToXhtml` → chapter body
 3. For each front/back page: `pageToHtml(p)` → `substituteImageBreaks` → `htmlToXhtml` → page body
 4. Send to Rust `export_epub` with `{ chapters, front_pages, back_pages, css, title, author, language, description }`
-5. Rust `extract_inline_images` scans every chapter/page HTML for `<img src="data:...">`, decodes each unique image via FNV-1a-hashed filename, stores as separate `OEBPS/images/img-{hash}.{ext}` zip entries, rewrites the HTML `src` to relative paths. Image deduplication is automatic across all chapters/pages
+5. Rust `extract_inline_images` scans every chapter/page HTML for `<img src="iwe-image://{id}">` (or the `http://iwe-image.localhost/{id}` canonical form), reads each referenced BLOB from `image_blobs`, optionally re-encodes via `compress_image`, stores as separate `OEBPS/images/img-{id}.{ext}` zip entries, and rewrites the HTML `src` to relative paths. Dedup is automatic: the blob id is the zip-entry key, so the same image referenced from N chapters still ships once
 6. Rust `build_chapter_html` wraps each chapter body in `<section epub:type="chapter">` — does NOT auto-generate a `<h1>{title}</h1>` (the JS side already provided the styled heading via `renderChapterHeadingHtml`)
 7. Rust `wrap_xhtml` wraps body content in `<div class="ebook-body">` inside `<body>` so the exported XHTML matches the preview's class structure. Same CSS selectors work for both
 8. Rust `fix_opf_ids` post-processes the generated zip to strip the buggy `id="epub-creator-0"` from `<dc:language>` (epub-builder 0.8 emits it with a hardcoded wrong id in its OPF template)
@@ -628,8 +634,8 @@ The ebook preview (`buildEpubForPreview` → epub.js) and the EPUB export (`hand
 10. Save dialog → write file to disk
 
 **Rust-side epub.rs invariants**:
-- `EpubExportRequest` has NO `cover_image` field — Rust reads the cover BLOB directly from `book_cover` in the project DB
-- `build_chapter_html` takes a pre-rewritten body (with data URLs already extracted). The `chapter` parameter is kept for future use but currently only the index is used
+- `EpubExportRequest` has NO `cover_image` field — Rust reads `project_settings.cover_image_id` and fetches the BLOB from `image_blobs` itself. `export_epub` takes the DB mutex once at the top and holds it for the whole export so `extract_inline_images` can fetch per-id blobs without re-locking.
+- `build_chapter_html` takes a pre-rewritten body (with iwe-image URIs already converted to relative zip paths). The `chapter` parameter is kept for future use but currently only the index is used
 - `wrap_xhtml` takes a `css` parameter for historical reasons but doesn't use it — CSS is attached via the separate `stylesheet.css` file. The param is kept for API stability
 - Metadata call order is `title → lang → author` (not author → lang). Swapping this re-introduces the duplicate-id bug because epub-builder's `lang` inherits the previous creator's id if set after `author`
 - All inline images get extracted into `OEBPS/images/` BEFORE any `add_content` call, so they appear in the manifest ahead of the chapters that reference them
@@ -914,9 +920,9 @@ This list is authoritative. If you're an agent working on this codebase, do not 
 
 **Format editor — partially built but with known gaps (NOT fully "not built"):**
 - **Ebook preview uses epub.js** for real paginated rendering. The preview generates a full EPUB and feeds it to epub.js, which handles pagination identically to production ebook readers. What's still weak: `EpubChapter.subtitle` has no UI that populates it, `EpubPage.position` is carried but unused by the builder, and the CSS sent to Rust is generated ad-hoc from `typography_json` — there's no per-profile ebook stylesheet editor yet.
-- **Image storage is base64-in-HTML (slow).** All images (map pages, chapter images, custom page images) are stored as base64 data URLs embedded in HTML content strings. This causes the EPUB preview build to take ~15-20s because images must be regex-scanned from HTML, decoded from base64, and re-encoded into the zip. **The proper fix:** migrate to a `content_images` table with BLOB storage, reference images by ID in HTML (e.g. `<img src="iwe-image://123">`), and have Rust read BLOBs directly from the DB at export time — same pattern as the book cover. Expected speedup: 20s → under 2s. Affects: `format_pages.content` (PageContentEditor images), `chapter_headings_json.image_default`, `breaks_json.image_data`, map page `image_data`, and any chapter content with pasted images.
 - **`duplicate_format_profile` does not copy JSON category columns.** The INSERT SELECT at db.rs:2086-2089 copies only scalar fields. Duplicating a heavily customized profile silently resets all 8 Custom-mode categories to `'{}'`. Scoped to fix but not done.
 - **No compile debounce.** Rapid setting changes trigger overlapping Typst compiles. Harmless but wasteful.
+- **Orphan-image cleanup UI.** `list_orphan_images` / `cleanup_orphan_images` commands exist and work (scan every reference site — chapter columns, project_settings, format_profiles JSON, format_pages JSON — for blob ids; anything unreferenced is an orphan). No UI button wires them up yet.
 
 **Features from `spec.md` that are NOT in the code:**
 - Minimap (thin scrollbar preview with entity dots)

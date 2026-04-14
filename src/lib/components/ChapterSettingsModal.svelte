@@ -1,5 +1,5 @@
 <script>
-  import { updateChapterMetadata } from '$lib/db.js';
+  import { updateChapterMetadata, uploadImageFile, imageSrcFor } from '$lib/db.js';
 
   let { chapter, onsave, oncancel, ondelete } = $props();
 
@@ -7,14 +7,13 @@
 
   let title = $state(chapter.title || '');
   let subtitle = $state(chapter.subtitle || '');
-  let chapterImage = $state(chapter.chapter_image || '');
+  let chapterImageId = $state(chapter.chapter_image_id ?? null);
 
   let fileInputImage;
 
   async function handleSave() {
     await updateChapterMetadata(
-      chapter.id, title.trim(), subtitle.trim(), chapterImage,
-      '', '', '',
+      chapter.id, title.trim(), subtitle.trim(), chapterImageId,
     );
     onsave?.();
   }
@@ -27,16 +26,16 @@
     }
   }
 
-  function handleImageUpload(e, setter) {
+  async function handleImageUpload(e) {
     const file = e.target.files?.[0];
-    if (!file || !file.type.startsWith('image/')) return;
-    const reader = new FileReader();
-    reader.onload = () => setter(reader.result);
-    reader.readAsDataURL(file);
     e.target.value = '';
+    if (!file || !file.type.startsWith('image/')) return;
+    try {
+      chapterImageId = await uploadImageFile(file);
+    } catch (err) {
+      console.error('[ChapterSettingsModal] upload failed:', err);
+    }
   }
-
-  function clearImage(setter) { setter(''); }
 </script>
 
 <svelte:window onkeydown={handleKeydown} />
@@ -66,12 +65,12 @@
       <div class="field">
         <span class="field-label">Chapter Image</span>
         <span class="field-hint">A thematic image for this chapter (position and size are set in formatting settings)</span>
-        {#if chapterImage}
+        {#if chapterImageId}
           <div class="ornament-preview">
-            <img src={chapterImage} alt="Chapter image" style="max-height: 120px;" />
+            <img src={imageSrcFor(chapterImageId)} alt="Chapter image" style="max-height: 120px;" />
             <div class="ornament-actions">
               <button class="orn-btn" onclick={() => fileInputImage?.click()}>Replace</button>
-              <button class="orn-btn danger" onclick={() => clearImage(v => chapterImage = v)}>Remove</button>
+              <button class="orn-btn danger" onclick={() => chapterImageId = null}>Remove</button>
             </div>
           </div>
         {:else}
@@ -81,7 +80,7 @@
         {/if}
         <input type="file" accept="image/png,image/svg+xml,image/jpeg"
           bind:this={fileInputImage}
-          onchange={(e) => handleImageUpload(e, v => chapterImage = v)}
+          onchange={handleImageUpload}
           style="display:none" />
       </div>
 

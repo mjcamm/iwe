@@ -12,7 +12,7 @@
     compilePreview, exportFormatPdf, exportEpub, validateEpubBytes,
     getProjectSetting, setProjectSetting,
     updateProfileCategory,
-    getBookCover,
+    getBookCover, imageSrcFor, getImageBlob,
   } from '$lib/db.js';
   import { createChapterDoc, destroyDoc } from '$lib/ydoc.js';
   import { yDocToProsemirrorJSON } from 'y-prosemirror';
@@ -526,18 +526,17 @@
   }
 
   // Resolve the chapter image src for a given chapter + chapter-heading settings.
-  // Returns a data URL / src string, or null if no image should be shown.
+  // Returns an iwe-image:// URL (served by the custom Tauri scheme handler) or
+  // null if no image should be shown.
   //   - image_enabled gates everything
-  //   - image_individual=true: prefer ch.chapter_image, fall back to profile default
+  //   - image_individual=true: prefer ch.chapter_image_id, fall back to profile default
   //   - image_individual=false: always use profile default
   function resolveChapterImageSrc(chapter, h) {
     if (!h.image_enabled) return null;
-    if (h.image_individual) {
-      return (chapter.chapter_image && chapter.chapter_image.trim())
-        ? chapter.chapter_image
-        : (h.image_default || null);
-    }
-    return h.image_default || null;
+    const id = h.image_individual
+      ? (chapter.chapter_image_id ?? h.image_default_id ?? null)
+      : (h.image_default_id ?? null);
+    return imageSrcFor(id);
   }
 
   function buildChapterImageHtml(src, widthPct, align) {
@@ -676,7 +675,7 @@
     custom_text: '* * *',
     space_above_em: 1.2,
     space_below_em: 1.2,
-    image_data: '',
+    image_id: null,
     image_width_pct: 25,
   };
 
@@ -945,14 +944,14 @@
   // break style is 'image'. Shared by preview and export because pseudo-element
   // sizing on arbitrary image aspect ratios is too unreliable.
   function substituteImageBreaks(html, breaks) {
-    if (breaks.style !== 'image' || !breaks.image_data) return html;
+    if (breaks.style !== 'image' || !breaks.image_id) return html;
     const w = Math.max(1, Math.min(100, Number(breaks.image_width_pct) || 25));
     const mTop = breaks.space_above_em || 0;
     const mBot = breaks.space_below_em || 0;
-    const safeSrc = String(breaks.image_data).replace(/"/g, '&quot;');
+    const src = imageSrcFor(breaks.image_id);
     const wrapperStyle = `text-align:center;margin:${mTop}em 0 ${mBot}em 0;`;
     const imgStyle = `display:inline-block;width:${w}%;max-width:100%;height:auto;vertical-align:middle;`;
-    const replacement = `<div class="scene-break-img" style="${wrapperStyle}"><img src="${safeSrc}" alt="" style="${imgStyle}"/></div>`;
+    const replacement = `<div class="scene-break-img" style="${wrapperStyle}"><img src="${src}" alt="" style="${imgStyle}"/></div>`;
     return html.replace(/<hr\b[^>]*>/g, replacement);
   }
 
@@ -1087,47 +1086,6 @@
     }
   }
 
-  // Downscale a data URL image for preview — keeps aspect ratio, reduces to maxDim pixels
-  function downscaleDataUrl(dataUrl, maxDim = 600) {
-    return new Promise((resolve) => {
-      if (!dataUrl || !dataUrl.startsWith('data:image')) { resolve(dataUrl); return; }
-      const img = new Image();
-      img.onload = () => {
-        // Skip if already small enough
-        if (img.width <= maxDim && img.height <= maxDim) { resolve(dataUrl); return; }
-        const scale = Math.min(maxDim / img.width, maxDim / img.height);
-        const w = Math.round(img.width * scale);
-        const h = Math.round(img.height * scale);
-        const canvas = document.createElement('canvas');
-        canvas.width = w;
-        canvas.height = h;
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(img, 0, 0, w, h);
-        resolve(canvas.toDataURL('image/jpeg', 0.7));
-      };
-      img.onerror = () => resolve(dataUrl);
-      img.src = dataUrl;
-    });
-  }
-
-  // Downscale all data:image URLs in an HTML string for preview
-  async function downscaleHtmlImages(html) {
-    const dataUrlRegex = /src="(data:image\/[^"]+)"/g;
-    const matches = [...html.matchAll(dataUrlRegex)];
-    if (matches.length === 0) return html;
-    let result = html;
-    for (const match of matches) {
-      const original = match[1];
-      // Only downscale large ones (> 50KB base64 ≈ 37KB image)
-      if (original.length < 50000) continue;
-      const smaller = await downscaleDataUrl(original);
-      if (smaller !== original) {
-        result = result.replace(original, smaller);
-      }
-    }
-    return result;
-  }
-
   // Build EPUB bytes for preview — reuses the same export pipeline as handleExportEpub
   async function buildEpubForPreview() {
     try {
@@ -1144,7 +1102,7 @@
         const heading = renderChapterHeadingHtml(ch, i, settings.chHeadings);
         const body = chapterToHtml(ch);
         const combined = substituteImageBreaks(heading + body, settings.breaks);
-        const xhtml = await downscaleHtmlImages(htmlToXhtml(combined));
+        const xhtml = htmlToXhtml(combined);
         chapterHtmlSizes.push({ title: ch.title, bytes: xhtml.length });
         epubChapters.push({ title: ch.title, subtitle: ch.subtitle || '', html: xhtml });
       }
@@ -1161,7 +1119,7 @@
         frontPages.push({
           title: p.title,
           role: p.ebook_metadata_tag || p.page_role,
-          html: await downscaleHtmlImages(htmlToXhtml(substituteImageBreaks(`<div class="ebook-page">${epubPageContent(p)}</div>`, settings.breaks))),
+          html: htmlToXhtml(substituteImageBreaks(`<div class="ebook-page">${epubPageContent(p)}</div>`, settings.breaks)),
           position: p.position,
         });
       }
@@ -1170,7 +1128,7 @@
         backPages.push({
           title: p.title,
           role: p.ebook_metadata_tag || p.page_role,
-          html: await downscaleHtmlImages(htmlToXhtml(substituteImageBreaks(`<div class="ebook-page">${epubPageContent(p)}</div>`, settings.breaks))),
+          html: htmlToXhtml(substituteImageBreaks(`<div class="ebook-page">${epubPageContent(p)}</div>`, settings.breaks)),
           position: p.position,
         });
       }
@@ -1603,7 +1561,10 @@
     draggable: true,
     addAttributes() {
       return {
-        src: { default: null },
+        imageId: {
+          default: null,
+          renderHTML: attrs => attrs.imageId != null ? { src: imageSrcFor(attrs.imageId) } : {},
+        },
         alt: { default: null },
         width: {
           default: null,
@@ -1613,7 +1574,8 @@
     },
     parseHTML() { return [{ tag: 'img[src]' }]; },
     renderHTML({ HTMLAttributes }) {
-      return ['img', mergeAttributes(HTMLAttributes, {
+      const { imageId, ...rest } = HTMLAttributes;
+      return ['img', mergeAttributes(rest, {
         style: 'display: block; margin-left: auto; margin-right: auto;',
       })];
     },
@@ -1716,8 +1678,9 @@
   function generateMapHtml(page) {
     try {
       const parsed = JSON.parse(page.content);
-      if (!parsed.image_data) return '<p>No map image</p>';
-      return `<div class="ebook-map" style="text-align: center;"><img src="${parsed.image_data}" alt="Map" style="max-width: 100%; height: auto;" /></div>`;
+      if (!parsed.image_id) return '<p>No map image</p>';
+      const src = imageSrcFor(parsed.image_id);
+      return `<div class="ebook-map" style="text-align: center;"><img src="${src}" alt="Map" style="max-width: 100%; height: auto;" /></div>`;
     } catch { return '<p>No map image</p>'; }
   }
 
@@ -1763,55 +1726,40 @@
   // repeated markup) to 40% (dense text with little markup).
   const XHTML_COMPRESSION_RATIO = 0.3;
 
-  // Decode the byte length of a base64 string without actually decoding.
-  // Each 4 base64 chars encode 3 bytes; padding `=` at the end reduces
-  // the output by 1 or 2 bytes.
-  function base64DecodedLength(b64) {
-    if (!b64) return 0;
-    const len = b64.length;
-    if (len === 0) return 0;
-    let padding = 0;
-    if (b64[len - 1] === '=') padding++;
-    if (b64[len - 2] === '=') padding++;
-    return Math.floor(len * 3 / 4) - padding;
-  }
-
-  // Scan an HTML string for inline base64 data URL images. Collects unique
-  // images into the `seen` Map (key → { dataUrl, mime, bytes }) so the
-  // caller can later read their dimensions for compression estimation.
-  // Also returns the total base64 character length in THIS HTML — not
-  // deduped — so the text estimator can subtract it from html.length to
-  // reflect the actual markup that ships after image extraction.
-  function measureInlineImages(html, seen) {
-    if (!html) return { base64CharsInHtml: 0 };
-    const re = /<img\b[^>]*\ssrc="(data:([^;]+);base64,([^"]+))"/gi;
-    let base64CharsInHtml = 0;
+  // Scan an HTML string for iwe-image:// references (the canonical form is
+  // http://iwe-image.localhost/{id} for WebView2, but the storage form is
+  // iwe-image://{id}). Collects unique image ids into the `seen` Set so the
+  // caller can later fetch dimensions / bytes from the image_blobs table.
+  function collectImageIds(html, seen) {
+    if (!html) return;
+    const re = /<img\b[^>]*\ssrc="(?:iwe-image:\/\/|https?:\/\/iwe-image\.localhost\/)(\d+)"/gi;
     let match;
     while ((match = re.exec(html)) !== null) {
-      const dataUrl = match[1];
-      const mime = match[2];
-      const b64 = match[3];
-      // Every occurrence counted for the text subtraction — duplicates all
-      // contribute their full base64 to the source HTML length, and all of
-      // them get replaced with short paths during export.
-      base64CharsInHtml += b64.length;
-      // Dedupe via a short key so the image-bytes accumulator matches what
-      // the Rust side actually stores in the zip (each unique image once).
-      const key = mime + ';' + b64.substring(0, 64) + ':' + b64.length;
-      if (seen.has(key)) continue;
-      seen.set(key, { dataUrl, mime, bytes: base64DecodedLength(b64), width: 0, height: 0 });
+      const id = Number(match[1]);
+      if (!Number.isNaN(id)) seen.add(id);
     }
-    return { base64CharsInHtml };
   }
 
-  // Read the natural dimensions of a data URL by letting the browser decode
-  // just the image header. Fast (milliseconds) and non-blocking.
-  function loadImageDimensions(dataUrl) {
+  // Read the natural dimensions of an image_blobs row by handing its bytes to
+  // the browser via a blob URL. Fast (milliseconds) and non-blocking. Revokes
+  // the blob URL once decode succeeds to avoid keeping memory tied up.
+  function loadBlobDimensions(blob) {
+    if (!blob || !blob.data || blob.data.length === 0) return Promise.resolve(null);
     return new Promise((resolve) => {
+      const bytes = blob.data instanceof Uint8Array ? blob.data : new Uint8Array(blob.data);
+      const b = new Blob([bytes], { type: blob.mime || 'image/png' });
+      const url = URL.createObjectURL(b);
       const img = new Image();
-      img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight });
-      img.onerror = () => resolve(null);
-      img.src = dataUrl;
+      img.onload = () => {
+        const w = img.naturalWidth, h = img.naturalHeight;
+        URL.revokeObjectURL(url);
+        resolve({ width: w, height: h });
+      };
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        resolve(null);
+      };
+      img.src = url;
     });
   }
 
@@ -1874,77 +1822,66 @@
       return null;
     }
 
-    // Map<key, { dataUrl, mime, bytes, width, height }> of unique inline images
-    const seen = new Map();
+    // Collect unique image ids referenced by the export.
+    const seen = new Set();
     let markupBytes = 0;
 
-    // Chapter bodies — collect images + count markup
     for (const ch of chapters || []) {
       try {
         const html = chapterToHtml(ch);
-        const { base64CharsInHtml } = measureInlineImages(html, seen);
-        markupBytes += Math.max(0, html.length - base64CharsInHtml);
-      } catch {
-        // Swallow — already logged by chapterToHtml
-      }
+        collectImageIds(html, seen);
+        markupBytes += html.length;
+      } catch { /* swallow */ }
     }
 
-    // Format page bodies
     for (const p of formatPages || []) {
       try {
         const html = pageToHtml(p);
-        const { base64CharsInHtml } = measureInlineImages(html, seen);
-        markupBytes += Math.max(0, html.length - base64CharsInHtml);
-      } catch {
-        // Swallow
-      }
+        collectImageIds(html, seen);
+        markupBytes += html.length;
+      } catch { /* swallow */ }
     }
 
-    // Cover image (BLOB in project DB). Read bytes + dimensions.
+    // Fetch each unique blob's bytes + dimensions in parallel.
+    const images = await Promise.all(Array.from(seen).map(async (id) => {
+      try {
+        const blob = await getImageBlob(id);
+        if (!blob || !blob.data) return null;
+        const bytes = blob.data.length;
+        const dims = await loadBlobDimensions(blob);
+        return {
+          mime: blob.mime || 'image/png',
+          bytes,
+          width: dims?.width || 0,
+          height: dims?.height || 0,
+        };
+      } catch {
+        return null;
+      }
+    }));
+    const validImages = images.filter(Boolean);
+
+    // Cover image.
     let coverImage = null;
     try {
       const cover = await getBookCover();
       if (cover && cover.data && cover.data.length > 0) {
-        // Build a data URL from the bytes so loadImageDimensions can decode it.
-        // Uint8Array → base64 via a chunked approach to avoid stack overflow
-        // on large images.
-        const bytes = new Uint8Array(cover.data);
-        let binary = '';
-        const chunk = 0x8000;
-        for (let i = 0; i < bytes.length; i += chunk) {
-          binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
-        }
-        const dataUrl = `data:${cover.mime_type};base64,${btoa(binary)}`;
+        const dims = await loadBlobDimensions({ data: cover.data, mime: cover.mime_type });
         coverImage = {
-          dataUrl,
           mime: cover.mime_type,
           bytes: cover.data.length,
-          width: 0,
-          height: 0,
+          width: dims?.width || 0,
+          height: dims?.height || 0,
         };
       }
     } catch (e) {
       console.warn('[format] estimateExportSize: cover read failed', e);
     }
 
-    // Read dimensions for all unique inline images + the cover in parallel.
-    // `new Image()` decodes the header only — fast and non-blocking.
-    const allImages = Array.from(seen.values());
-    if (coverImage) allImages.push(coverImage);
-    await Promise.all(
-      allImages.map(async (img) => {
-        const dims = await loadImageDimensions(img.dataUrl);
-        if (dims) {
-          img.width = dims.width;
-          img.height = dims.height;
-        }
-      })
-    );
-
     // Tally raw bytes + estimated compressed bytes
     let rawImagesBytes = 0;
     let estImagesBytes = 0;
-    for (const img of seen.values()) {
+    for (const img of validImages) {
       rawImagesBytes += img.bytes;
       estImagesBytes += estimateImageBytes(img, level);
     }

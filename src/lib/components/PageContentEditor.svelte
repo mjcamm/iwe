@@ -6,14 +6,18 @@
   import { TextStyle, FontSize, FontFamily } from '@tiptap/extension-text-style';
   import Placeholder from '@tiptap/extension-placeholder';
   import FontPicker from '$lib/components/FontPicker.svelte';
+  import { uploadImageFile, imageSrcFor } from '$lib/db.js';
 
   let { page, profile, onsave, oncancel } = $props();
 
   // Vertical alignment state — sync from page prop on mount, send back on save.
   let verticalAlign = $state(page.vertical_align || 'top');
 
-  // Custom Image node with a drag-resize NodeView. The width attribute is persisted
-  // to JSON and flows through to the Typst renderer (which converts px → pt).
+  // Custom Image node with a drag-resize NodeView. Images live in the shared
+  // image_blobs SQLite table and are referenced by integer id. The stored
+  // attribute is `imageId` — the `<img src>` is computed via imageSrcFor()
+  // which hits the iwe-image:// custom URI scheme handler. Width is persisted
+  // and flows through to the Typst renderer.
   const ImageNode = Node.create({
     name: 'image',
     inline: false,
@@ -21,7 +25,17 @@
     draggable: true,
     addAttributes() {
       return {
-        src: { default: null },
+        imageId: {
+          default: null,
+          parseHTML: (el) => {
+            const src = el.getAttribute('src') || '';
+            const m = src.match(/^(?:iwe-image:\/\/|https?:\/\/iwe-image\.localhost\/)(\d+)/i);
+            return m ? Number(m[1]) : null;
+          },
+          renderHTML: (attrs) => {
+            return attrs.imageId != null ? { src: imageSrcFor(attrs.imageId) } : {};
+          },
+        },
         alt: { default: null },
         width: { default: null }, // string like "300px"
       };
@@ -30,20 +44,21 @@
       return [{ tag: 'img[src]' }];
     },
     renderHTML({ HTMLAttributes }) {
-      return ['img', mergeAttributes(HTMLAttributes)];
+      // Strip the internal imageId attribute from the rendered DOM — the
+      // parent renderHTML for attrs.imageId already injected a real `src`.
+      const { imageId, ...rest } = HTMLAttributes;
+      return ['img', mergeAttributes(rest)];
     },
     addNodeView() {
       return ({ node, editor: ed, getPos }) => {
-        // Outer = block, centers the inner shrink-to-image element
         const outer = document.createElement('div');
         outer.className = 'image-outer';
 
-        // Inner = inline-block sized to image, anchors the resize handle
         const inner = document.createElement('span');
         inner.className = 'image-frame';
 
         const img = document.createElement('img');
-        img.src = node.attrs.src;
+        img.src = imageSrcFor(node.attrs.imageId) || '';
         img.alt = node.attrs.alt || '';
         img.draggable = false;
         if (node.attrs.width) img.style.width = node.attrs.width;
@@ -89,8 +104,9 @@
           dom: outer,
           update: (updatedNode) => {
             if (updatedNode.type !== node.type) return false;
-            if (updatedNode.attrs.src !== img.src) {
-              img.src = updatedNode.attrs.src;
+            const newSrc = imageSrcFor(updatedNode.attrs.imageId) || '';
+            if (newSrc !== img.src) {
+              img.src = newSrc;
             }
             if (updatedNode.attrs.width !== img.style.width) {
               img.style.width = updatedNode.attrs.width || '';
@@ -177,20 +193,20 @@
     fileInput?.click();
   }
 
-  function handleFileSelected(e) {
+  async function handleFileSelected(e) {
     const file = e.target.files?.[0];
+    e.target.value = ''; // reset so the same file can be selected again
     if (!file || !editor) return;
     if (!file.type.startsWith('image/')) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      const dataUrl = reader.result;
+    try {
+      const imageId = await uploadImageFile(file);
       editor.chain().focus().insertContent({
         type: 'image',
-        attrs: { src: dataUrl, alt: file.name },
+        attrs: { imageId, alt: file.name },
       }).run();
-    };
-    reader.readAsDataURL(file);
-    e.target.value = ''; // reset so the same file can be selected again
+    } catch (err) {
+      console.error('[PageContentEditor] image upload failed:', err);
+    }
   }
 
   onDestroy(() => {

@@ -15,10 +15,7 @@ pub struct Chapter {
     pub sort_order: i64,
     pub deleted: bool,
     pub subtitle: String,
-    pub chapter_image: String,
-    pub ornament_above: String,
-    pub ornament_mid: String,
-    pub ornament_below: String,
+    pub chapter_image_id: Option<i64>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -235,17 +232,14 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         .is_ok();
     if !has_chapter_subtitle {
         conn.execute_batch("ALTER TABLE chapters ADD COLUMN subtitle TEXT NOT NULL DEFAULT '';")?;
-        conn.execute_batch("ALTER TABLE chapters ADD COLUMN ornament_above TEXT NOT NULL DEFAULT '';")?;
-        conn.execute_batch("ALTER TABLE chapters ADD COLUMN ornament_mid TEXT NOT NULL DEFAULT '';")?;
-        conn.execute_batch("ALTER TABLE chapters ADD COLUMN ornament_below TEXT NOT NULL DEFAULT '';")?;
     }
 
-    // Migration: add chapter_image column
-    let has_chapter_image: bool = conn
-        .prepare("SELECT chapter_image FROM chapters LIMIT 0")
+    // chapter_image_id: reference to image_blobs(id). NULL when no per-chapter image.
+    let has_chapter_image_id: bool = conn
+        .prepare("SELECT chapter_image_id FROM chapters LIMIT 0")
         .is_ok();
-    if !has_chapter_image {
-        conn.execute_batch("ALTER TABLE chapters ADD COLUMN chapter_image TEXT NOT NULL DEFAULT '';")?;
+    if !has_chapter_image_id {
+        conn.execute_batch("ALTER TABLE chapters ADD COLUMN chapter_image_id INTEGER;")?;
     }
 
     // Migration: add backup columns to writing_settings
@@ -481,52 +475,54 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         }
     }
 
-    // book_cover — singleton table holding the book's front cover as a BLOB.
-    // CHECK(id = 1) enforces one row per project so we don't need UPSERT logic.
-    // Stored as BLOB rather than base64 text to save ~33% space and avoid
-    // JSON-escaping problems — the cover is a standalone binary, not embedded
-    // in markup like chapter/break images are.
+    // image_blobs — shared image store. Every image in the project (chapter
+    // heading defaults, scene-break glyphs, map pages, content-editor images,
+    // book cover) references a row here by id. `hash` is SHA-256 hex and is
+    // used for upload-time dedup; UNIQUE makes it a safety net at the SQL
+    // level on top of the app-side lookup.
     conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS book_cover (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            image_data BLOB NOT NULL,
-            mime_type TEXT NOT NULL,
-            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        );",
+        "CREATE TABLE IF NOT EXISTS image_blobs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            data BLOB NOT NULL,
+            mime TEXT NOT NULL,
+            width INTEGER,
+            height INTEGER,
+            byte_size INTEGER NOT NULL,
+            hash TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_image_blobs_hash ON image_blobs(hash);",
     )?;
 
     Ok(())
 }
 
-// ---- Book cover ----
+// ---- Project settings helpers ----
 
-pub fn get_book_cover(conn: &Connection) -> rusqlite::Result<Option<(Vec<u8>, String)>> {
-    let mut stmt = conn.prepare("SELECT image_data, mime_type FROM book_cover WHERE id = 1")?;
-    let mut rows = stmt.query([])?;
-    if let Some(row) = rows.next()? {
-        let data: Vec<u8> = row.get(0)?;
-        let mime: String = row.get(1)?;
-        Ok(Some((data, mime)))
-    } else {
-        Ok(None)
-    }
+pub fn get_project_setting(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
+    conn.query_row(
+        "SELECT value FROM project_settings WHERE key = ?1",
+        params![key],
+        |row| row.get::<_, String>(0),
+    )
+    .map(Some)
+    .or_else(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => Ok(None),
+        other => Err(other),
+    })
 }
 
-pub fn set_book_cover(conn: &Connection, data: &[u8], mime: &str) -> rusqlite::Result<()> {
+pub fn set_project_setting(conn: &Connection, key: &str, value: &str) -> rusqlite::Result<()> {
     conn.execute(
-        "INSERT INTO book_cover (id, image_data, mime_type, updated_at)
-         VALUES (1, ?1, ?2, CURRENT_TIMESTAMP)
-         ON CONFLICT(id) DO UPDATE SET
-            image_data = excluded.image_data,
-            mime_type = excluded.mime_type,
-            updated_at = CURRENT_TIMESTAMP",
-        rusqlite::params![data, mime],
+        "INSERT INTO project_settings (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value],
     )?;
     Ok(())
 }
 
-pub fn clear_book_cover(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute("DELETE FROM book_cover WHERE id = 1", [])?;
+pub fn delete_project_setting(conn: &Connection, key: &str) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM project_settings WHERE key = ?1", params![key])?;
     Ok(())
 }
 
@@ -534,7 +530,7 @@ pub fn clear_book_cover(conn: &Connection) -> rusqlite::Result<()> {
 
 pub fn list_chapters(conn: &Connection) -> rusqlite::Result<Vec<Chapter>> {
     let mut stmt = conn.prepare(
-        "SELECT id, title, content, sort_order, COALESCE(deleted, 0), COALESCE(subtitle, ''), COALESCE(chapter_image, ''), COALESCE(ornament_above, ''), COALESCE(ornament_mid, ''), COALESCE(ornament_below, ''), created_at, updated_at FROM chapters WHERE COALESCE(deleted, 0) = 0 ORDER BY sort_order ASC"
+        "SELECT id, title, content, sort_order, COALESCE(deleted, 0), COALESCE(subtitle, ''), chapter_image_id, created_at, updated_at FROM chapters WHERE COALESCE(deleted, 0) = 0 ORDER BY sort_order ASC"
     )?;
     let rows = stmt.query_map([], |row| {
         Ok(Chapter {
@@ -544,12 +540,9 @@ pub fn list_chapters(conn: &Connection) -> rusqlite::Result<Vec<Chapter>> {
             sort_order: row.get(3)?,
             deleted: row.get::<_, i64>(4)? != 0,
             subtitle: row.get(5)?,
-            chapter_image: row.get(6)?,
-            ornament_above: row.get(7)?,
-            ornament_mid: row.get(8)?,
-            ornament_below: row.get(9)?,
-            created_at: row.get(10)?,
-            updated_at: row.get(11)?,
+            chapter_image_id: row.get(6)?,
+            created_at: row.get(7)?,
+            updated_at: row.get(8)?,
         })
     })?;
     rows.collect()
@@ -557,7 +550,7 @@ pub fn list_chapters(conn: &Connection) -> rusqlite::Result<Vec<Chapter>> {
 
 pub fn list_deleted_chapters(conn: &Connection) -> rusqlite::Result<Vec<Chapter>> {
     let mut stmt = conn.prepare(
-        "SELECT id, title, content, sort_order, COALESCE(deleted, 0), COALESCE(subtitle, ''), COALESCE(chapter_image, ''), COALESCE(ornament_above, ''), COALESCE(ornament_mid, ''), COALESCE(ornament_below, ''), created_at, updated_at FROM chapters WHERE COALESCE(deleted, 0) = 1 ORDER BY updated_at DESC"
+        "SELECT id, title, content, sort_order, COALESCE(deleted, 0), COALESCE(subtitle, ''), chapter_image_id, created_at, updated_at FROM chapters WHERE COALESCE(deleted, 0) = 1 ORDER BY updated_at DESC"
     )?;
     let rows = stmt.query_map([], |row| {
         Ok(Chapter {
@@ -567,12 +560,9 @@ pub fn list_deleted_chapters(conn: &Connection) -> rusqlite::Result<Vec<Chapter>
             sort_order: row.get(3)?,
             deleted: row.get::<_, i64>(4)? != 0,
             subtitle: row.get(5)?,
-            chapter_image: row.get(6)?,
-            ornament_above: row.get(7)?,
-            ornament_mid: row.get(8)?,
-            ornament_below: row.get(9)?,
-            created_at: row.get(10)?,
-            updated_at: row.get(11)?,
+            chapter_image_id: row.get(6)?,
+            created_at: row.get(7)?,
+            updated_at: row.get(8)?,
         })
     })?;
     rows.collect()
@@ -580,7 +570,7 @@ pub fn list_deleted_chapters(conn: &Connection) -> rusqlite::Result<Vec<Chapter>
 
 pub fn get_chapter(conn: &Connection, id: i64) -> rusqlite::Result<Option<Chapter>> {
     let mut stmt = conn.prepare(
-        "SELECT id, title, content, sort_order, COALESCE(deleted, 0), COALESCE(subtitle, ''), COALESCE(chapter_image, ''), COALESCE(ornament_above, ''), COALESCE(ornament_mid, ''), COALESCE(ornament_below, ''), created_at, updated_at FROM chapters WHERE id = ?1"
+        "SELECT id, title, content, sort_order, COALESCE(deleted, 0), COALESCE(subtitle, ''), chapter_image_id, created_at, updated_at FROM chapters WHERE id = ?1"
     )?;
     let mut rows = stmt.query_map(params![id], |row| {
         Ok(Chapter {
@@ -590,12 +580,9 @@ pub fn get_chapter(conn: &Connection, id: i64) -> rusqlite::Result<Option<Chapte
             sort_order: row.get(3)?,
             deleted: row.get::<_, i64>(4)? != 0,
             subtitle: row.get(5)?,
-            chapter_image: row.get(6)?,
-            ornament_above: row.get(7)?,
-            ornament_mid: row.get(8)?,
-            ornament_below: row.get(9)?,
-            created_at: row.get(10)?,
-            updated_at: row.get(11)?,
+            chapter_image_id: row.get(6)?,
+            created_at: row.get(7)?,
+            updated_at: row.get(8)?,
         })
     })?;
     match rows.next() {
@@ -641,14 +628,11 @@ pub fn update_chapter_metadata(
     id: i64,
     title: &str,
     subtitle: &str,
-    chapter_image: &str,
-    ornament_above: &str,
-    ornament_mid: &str,
-    ornament_below: &str,
+    chapter_image_id: Option<i64>,
 ) -> rusqlite::Result<()> {
     conn.execute(
-        "UPDATE chapters SET title = ?1, subtitle = ?2, chapter_image = ?3, ornament_above = ?4, ornament_mid = ?5, ornament_below = ?6, updated_at = CURRENT_TIMESTAMP WHERE id = ?7",
-        params![title, subtitle, chapter_image, ornament_above, ornament_mid, ornament_below, id],
+        "UPDATE chapters SET title = ?1, subtitle = ?2, chapter_image_id = ?3, updated_at = CURRENT_TIMESTAMP WHERE id = ?4",
+        params![title, subtitle, chapter_image_id, id],
     )?;
     Ok(())
 }

@@ -65,14 +65,60 @@ export async function listProjects() {
   }
 }
 
-// --- Book cover (BLOB storage, per-project) ---
+// --- Image blobs (shared BLOB storage, per-project) ---
+
+// Upload raw bytes as an image. Returns the image_blobs.id (deduped by SHA-256
+// hash, so re-uploading identical bytes returns the same id).
+export async function uploadImage(data, mime) {
+  const bytes = data instanceof Uint8Array ? Array.from(data) : data;
+  return invoke('upload_image', { bytes, mime });
+}
+
+// Returns { data: number[], mime: string } | null
+export async function getImageBlob(id) {
+  if (id == null) return null;
+  return invoke('get_image_blob', { id });
+}
+
+export async function deleteImageBlob(id) {
+  return invoke('delete_image_blob', { id });
+}
+
+export async function listOrphanImages() {
+  return invoke('list_orphan_images');
+}
+
+export async function cleanupOrphanImages() {
+  return invoke('cleanup_orphan_images');
+}
+
+// Build the `<img src>` URL that hits the iwe-image:// custom scheme handler.
+// Tauri v2 normalizes custom URI schemes to http://{scheme}.localhost/... for
+// WebView2 fetches, matching the existing iwe:// → http://iwe.localhost pattern.
+export function imageSrcFor(id) {
+  return id == null ? null : `http://iwe-image.localhost/${id}`;
+}
+
+// Read a file (File/Blob) and upload it to image_blobs. Returns the new id.
+export async function uploadImageFile(file) {
+  const buf = await file.arrayBuffer();
+  const bytes = new Uint8Array(buf);
+  return uploadImage(bytes, file.type || 'application/octet-stream');
+}
+
+// --- Book cover ---
+//
+// The cover is just another image_blobs row referenced by the
+// `cover_image_id` key in `project_settings`. These wrappers keep the old
+// API shape so callers don't care about the backing store.
 
 // Returns { data: number[], mime_type: string } | null
 export async function getBookCover() {
   return invoke('get_book_cover');
 }
 
-// data: Uint8Array or number[]; mimeType: string like "image/jpeg"
+// data: Uint8Array or number[]; mimeType: string like "image/jpeg".
+// Returns the new image_blobs id.
 export async function setBookCover(data, mimeType) {
   const bytes = data instanceof Uint8Array ? Array.from(data) : data;
   return invoke('set_book_cover', { data: bytes, mimeType });
@@ -84,7 +130,7 @@ export async function clearBookCover() {
 
 // Peek the cover of any .iwe file by path, without opening it as the current
 // project. Used by the home page to show cover thumbnails. Returns null if
-// the project has no cover or the schema predates the book_cover table.
+// the project has no cover.
 export async function getProjectCoverByPath(filepath) {
   return invoke('get_project_cover_by_path', { filepath });
 }
@@ -790,8 +836,8 @@ export async function reorderFormatPages(ids) {
   return invoke('reorder_format_pages', { ids });
 }
 
-export async function updateChapterMetadata(id, title, subtitle, chapterImage, ornamentAbove, ornamentMid, ornamentBelow) {
-  return invoke('update_chapter_metadata', { id, title, subtitle, chapterImage, ornamentAbove, ornamentMid, ornamentBelow });
+export async function updateChapterMetadata(id, title, subtitle, chapterImageId) {
+  return invoke('update_chapter_metadata', { id, title, subtitle, chapterImageId });
 }
 
 export async function compilePreview(profileId) {

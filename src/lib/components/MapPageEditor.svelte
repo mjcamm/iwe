@@ -1,6 +1,7 @@
 <script>
   import { onMount } from 'svelte';
   import { ensureUnitLoaded, toDisplay, fromDisplay, unitLabel, unitStep, subscribe } from '$lib/unitPreference.js';
+  import { uploadImageFile, imageSrcFor } from '$lib/db.js';
   import DecimalInput from '$lib/components/DecimalInput.svelte';
 
   let { page, profile, onsave, oncancel } = $props();
@@ -24,7 +25,7 @@
   let requiredHeight = $derived(Math.round((profile?.trim_height_in ?? 9) * PRINT_DPI));
 
   let resolutionWarning = $derived(() => {
-    if (!imageData || !imageNaturalWidth || !imageNaturalHeight) return null;
+    if (!imageId || !imageNaturalWidth || !imageNaturalHeight) return null;
     const wOk = imageNaturalWidth >= requiredWidth;
     const hOk = imageNaturalHeight >= requiredHeight;
     if (wOk && hOk) return null;
@@ -45,8 +46,10 @@
     img.src = src;
   }
 
-  // Measure whenever imageData changes
-  $effect(() => { measureImage(imageData); });
+  // Re-measure whenever the image id changes. The <img> element's actual
+  // src is served via the iwe-image:// scheme, so we fetch through the
+  // same URL here.
+  $effect(() => { measureImage(imageSrcFor(imageId)); });
 
   function parseSettings(raw) {
     if (raw && raw.trim().startsWith('{')) {
@@ -54,40 +57,42 @@
         const parsed = JSON.parse(raw);
         return {
           spread: parsed.spread ?? false,
-          image_data: parsed.image_data ?? '',
+          image_id: parsed.image_id ?? null,
           sizing: parsed.sizing ?? 'fit-width',
           gutter_overlap_in: parsed.gutter_overlap_in ?? 0.25,
         };
       } catch { /* fall through */ }
     }
-    return { spread: false, image_data: '', sizing: 'fit-width', gutter_overlap_in: 0.25 };
+    return { spread: false, image_id: null, sizing: 'fit-width', gutter_overlap_in: 0.25 };
   }
 
   const initial = parseSettings(page.content);
   let spread = $state(initial.spread);
-  let imageData = $state(initial.image_data);
+  let imageId = $state(initial.image_id);
   let sizing = $state(initial.sizing);
   let gutterOverlap = $state(initial.gutter_overlap_in);
 
   let fileInput;
 
-  function handleFileSelected(e) {
+  async function handleFileSelected(e) {
     const file = e.target.files?.[0];
-    if (!file || !file.type.startsWith('image/')) return;
-    const reader = new FileReader();
-    reader.onload = () => { imageData = reader.result; };
-    reader.readAsDataURL(file);
     e.target.value = '';
+    if (!file || !file.type.startsWith('image/')) return;
+    try {
+      imageId = await uploadImageFile(file);
+    } catch (err) {
+      console.error('[MapPageEditor] upload failed:', err);
+    }
   }
 
   function clearImage() {
-    imageData = '';
+    imageId = null;
   }
 
   function handleSave() {
     const content = JSON.stringify({
       spread,
-      image_data: imageData,
+      image_id: imageId,
       sizing,
       gutter_overlap_in: spread ? gutterOverlap : 0,
     });
@@ -169,9 +174,9 @@
       <!-- Image upload -->
       <div class="setting-group">
         <label class="setting-label">Image</label>
-        {#if imageData}
+        {#if imageId}
           <div class="image-preview-wrap">
-            <img class="image-preview" src={imageData} alt="Map preview"
+            <img class="image-preview" src={imageSrcFor(imageId)} alt="Map preview"
               class:spread-preview={spread} />
             <div class="image-actions">
               <button class="editor-btn" onclick={() => fileInput?.click()}>Replace</button>
@@ -192,7 +197,7 @@
             <span>{resolutionWarning()}</span>
           </div>
         {/if}
-        {#if imageData && imageNaturalWidth && !resolutionWarning()}
+        {#if imageId && imageNaturalWidth && !resolutionWarning()}
           <div class="resolution-ok">
             <i class="bi bi-check-circle"></i>
             <span>{imageNaturalWidth} x {imageNaturalHeight}px — good for print at this size</span>

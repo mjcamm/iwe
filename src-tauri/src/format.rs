@@ -7,6 +7,7 @@ mod real {
 use crate::db::{self, AppState, FormatPage, FormatProfile};
 use crate::ydoc;
 
+use rusqlite::Connection;
 use std::sync::Arc;
 use typst::diag::{FileError, FileResult};
 use typst::foundations::{Bytes, Datetime};
@@ -226,9 +227,10 @@ fn emit_scene_break(
     space_above_em: f64,
     space_below_em: f64,
     keep_with_content: bool,
-    image_data: &str,
+    image_src: &str,
     image_width_pct: f64,
     images: &mut ImageMap,
+    conn: &Connection,
 ) {
     // The content of the break depends on the style
     let inner: String = match style {
@@ -239,10 +241,10 @@ fn emit_scene_break(
         "rule" => "#line(length: 25%, stroke: 0.6pt)".to_string(),
         "custom" => escape_typst(custom_text),
         "image" => {
-            if image_data.is_empty() {
+            if image_src.is_empty() {
                 // No image uploaded yet — fall back to dinkus
                 "\\* \\* \\*".to_string()
-            } else if let Some((path, _ext)) = ingest_image(image_data, images) {
+            } else if let Some((path, _ext)) = ingest_image(image_src, images, conn) {
                 let w = image_width_pct.clamp(1.0, 100.0);
                 format!("#image(\"{}\", width: {}%)", path, w)
             } else {
@@ -828,7 +830,7 @@ type ImageMap = std::collections::HashMap<String, Vec<u8>>;
 /// Supports paragraphs, headings, text marks (bold/italic/underline/strike/font-size),
 /// text alignment, and embedded images.
 /// Image bytes are added to `images` and referenced from markup as virtual paths.
-fn pm_json_to_typst(json_str: &str, images: &mut ImageMap) -> Option<String> {
+fn pm_json_to_typst(json_str: &str, images: &mut ImageMap, conn: &Connection) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(json_str).ok()?;
     if !value.is_object() {
         return None;
@@ -836,13 +838,13 @@ fn pm_json_to_typst(json_str: &str, images: &mut ImageMap) -> Option<String> {
     let mut out = String::new();
     if let Some(content) = value.get("content").and_then(|c| c.as_array()) {
         for node in content {
-            convert_pm_node(node, &mut out, images);
+            convert_pm_node(node, &mut out, images, conn);
         }
     }
     Some(out)
 }
 
-fn convert_pm_node(node: &serde_json::Value, out: &mut String, images: &mut ImageMap) {
+fn convert_pm_node(node: &serde_json::Value, out: &mut String, images: &mut ImageMap, conn: &Connection) {
     let node_type = node.get("type").and_then(|t| t.as_str()).unwrap_or("");
     let children = node.get("content").and_then(|c| c.as_array());
 
@@ -893,17 +895,18 @@ fn convert_pm_node(node: &serde_json::Value, out: &mut String, images: &mut Imag
         }
         "image" => {
             let attrs = node.get("attrs");
-            let src = attrs.and_then(|a| a.get("src")).and_then(|s| s.as_str());
+            // Post-migration: image nodes carry an integer `imageId` attr.
+            let image_id = attrs.and_then(|a| a.get("imageId")).and_then(|v| v.as_i64());
             let width = attrs
                 .and_then(|a| a.get("width"))
                 .and_then(|w| w.as_str());
-            if let Some(src) = src {
-                if let Some((path, ext)) = ingest_image(src, images) {
+            if let Some(id) = image_id {
+                let uri = format!("iwe-image://{}", id);
+                if let Some((path, _ext)) = ingest_image(&uri, images, conn) {
                     let width_attr = match width {
                         Some(w) if !w.is_empty() => format!(", width: {}", normalize_width(w)),
                         _ => String::new(),
                     };
-                    let _ = ext; // currently unused; could be used for format hint
                     out.push_str(&format!(
                         "#align(center)[#image(\"{}\"{})]\n\n",
                         path, width_attr
@@ -915,50 +918,49 @@ fn convert_pm_node(node: &serde_json::Value, out: &mut String, images: &mut Imag
             // Unknown node — recurse into children
             if let Some(children) = children {
                 for child in children {
-                    convert_pm_node(child, out, images);
+                    convert_pm_node(child, out, images, conn);
                 }
             }
         }
     }
 }
 
-/// Decode a data URL or pass-through a virtual path. Returns (typst_path, extension).
-fn ingest_image(src: &str, images: &mut ImageMap) -> Option<(String, String)> {
-    if let Some(rest) = src.strip_prefix("data:") {
-        // data:image/png;base64,XXXXX
-        let (meta, data) = rest.split_once(',')?;
-        let mime = meta.split(';').next().unwrap_or("");
-        let ext = match mime {
-            "image/png" => "png",
-            "image/jpeg" | "image/jpg" => "jpg",
-            "image/gif" => "gif",
-            "image/webp" => "webp",
-            "image/svg+xml" => "svg",
-            _ => "png",
-        };
-        // Only handle base64 for now
-        if !meta.contains("base64") {
-            return None;
-        }
-        let bytes = base64_decode(data)?;
-        // Use a hash so identical images dedupe
-        let hash = simple_hash(&bytes);
-        let path = format!("/iwe-img-{:x}.{}", hash, ext);
-        images.entry(path.clone()).or_insert(bytes);
-        Some((path, ext.to_string()))
-    } else {
-        None
-    }
+/// Resolve an `iwe-image://{id}` URI (or its localhost http form) to a Typst
+/// virtual path, fetching the BLOB from `image_blobs` by id and registering
+/// the bytes in the shared `ImageMap`. Returns (typst_path, extension).
+///
+/// Non-URI sources (legacy data: URLs, remote http:// images, etc.) are
+/// ignored — all image references in this codebase go through the
+/// `image_blobs` table after the migration.
+fn ingest_image(src: &str, images: &mut ImageMap, conn: &Connection) -> Option<(String, String)> {
+    let id = parse_iwe_image_uri(src)?;
+    let (bytes, mime) = crate::images::get_image_blob(conn, id).ok().flatten()?;
+    let ext = ext_for_mime(&mime);
+    let hash = simple_hash(&bytes);
+    let path = format!("/iwe-img-{:x}.{}", hash, ext);
+    images.entry(path.clone()).or_insert(bytes);
+    Some((path, ext.to_string()))
 }
 
-/// Minimal base64 decoder. Avoids pulling in a dep for one use.
-fn base64_decode(input: &str) -> Option<Vec<u8>> {
-    use base64::Engine;
-    let cleaned: String = input.chars().filter(|c| !c.is_whitespace()).collect();
-    base64::engine::general_purpose::STANDARD
-        .decode(&cleaned)
-        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(&cleaned))
-        .ok()
+fn parse_iwe_image_uri(src: &str) -> Option<i64> {
+    let rest = src
+        .strip_prefix("iwe-image://")
+        .or_else(|| src.strip_prefix("http://iwe-image.localhost/"))
+        .or_else(|| src.strip_prefix("https://iwe-image.localhost/"))?;
+    // Allow an optional trailing slash or query string
+    let id_str = rest.split(|c: char| c == '/' || c == '?' || c == '#').next()?;
+    id_str.parse().ok()
+}
+
+fn ext_for_mime(mime: &str) -> &'static str {
+    match mime {
+        "image/png" => "png",
+        "image/jpeg" | "image/jpg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "image/svg+xml" => "svg",
+        _ => "png",
+    }
 }
 
 /// FNV-1a hash for image deduplication and stable virtual paths.
@@ -1064,13 +1066,13 @@ fn apply_pm_marks(text: &str, marks: Option<&serde_json::Value>) -> String {
 
 /// Render a page's content field — JSON if it parses, otherwise plain text.
 /// Any embedded images are added to the shared image map.
-fn render_page_content(content: &str, images: &mut ImageMap) -> String {
+fn render_page_content(content: &str, images: &mut ImageMap, conn: &Connection) -> String {
     if content.trim().is_empty() {
         return String::new();
     }
     // Try ProseMirror JSON first
     if content.trim_start().starts_with('{') {
-        if let Some(typst) = pm_json_to_typst(content, images) {
+        if let Some(typst) = pm_json_to_typst(content, images, conn) {
             return typst;
         }
     }
@@ -1227,21 +1229,18 @@ impl Default for TocSettings {
 /// For single pages, renders a full-bleed image with zero margins.
 /// For spreads, emits two full-bleed pages — left half then right half —
 /// using Typst clipping (no Rust-side image manipulation needed).
-fn build_map_page(content: &str, images: &mut ImageMap) -> Option<String> {
+fn build_map_page(content: &str, images: &mut ImageMap, conn: &Connection) -> Option<String> {
     let trimmed = content.trim();
     if trimmed.is_empty() || !trimmed.starts_with('{') {
         return None;
     }
     let val: serde_json::Value = serde_json::from_str(trimmed).ok()?;
-    let image_data = val.get("image_data").and_then(|v| v.as_str()).unwrap_or("");
-    if image_data.is_empty() {
-        return None;
-    }
+    let image_id = val.get("image_id").and_then(|v| v.as_i64())?;
     let spread = val.get("spread").and_then(|v| v.as_bool()).unwrap_or(false);
     let sizing = val.get("sizing").and_then(|v| v.as_str()).unwrap_or("fit-width");
     let gutter_overlap_in = val.get("gutter_overlap_in").and_then(|v| v.as_f64()).unwrap_or(0.0);
 
-    let (img_path, _ext) = ingest_image(image_data, images)?;
+    let (img_path, _ext) = ingest_image(&format!("iwe-image://{}", image_id), images, conn)?;
 
     let mut out = String::new();
 
@@ -1305,7 +1304,7 @@ fn build_map_page(content: &str, images: &mut ImageMap) -> Option<String> {
 /// Build a Typst markup string for a front/back matter page.
 /// If the page has rich content (PM JSON), render it directly.
 /// Otherwise apply role-based defaults using the title.
-fn build_front_matter_page(page: &FormatPage, images: &mut ImageMap, body_font: &str, body_size_pt: f64) -> String {
+fn build_front_matter_page(page: &FormatPage, images: &mut ImageMap, body_font: &str, body_size_pt: f64, conn: &Connection) -> String {
     let mut out = String::new();
 
     // TOC pages store settings JSON in content, not ProseMirror — handle separately.
@@ -1363,14 +1362,14 @@ fn build_front_matter_page(page: &FormatPage, images: &mut ImageMap, body_font: 
 
     // Map pages: full-bleed image, optionally split across a two-page spread.
     if page.page_role == "map" {
-        if let Some(map_markup) = build_map_page(&page.content, images) {
+        if let Some(map_markup) = build_map_page(&page.content, images, conn) {
             return map_markup;
         }
         // No image — fall through to blank page
         return out;
     }
 
-    let content_typst = render_page_content(&page.content, images);
+    let content_typst = render_page_content(&page.content, images, conn);
     let has_content = !content_typst.trim().is_empty();
 
     // If user has authored content, render it directly without role-based wrapping.
@@ -1412,12 +1411,13 @@ fn build_front_matter_page(page: &FormatPage, images: &mut ImageMap, body_font: 
 fn build_typst_markup(
     profile: &FormatProfile,
     front_pages: &[FormatPage],
-    chapters: &[(i64, String, String, String, Vec<crate::ydoc::ChapterBlock>)], // (chapter_id, title, subtitle, chapter_image, blocks)
+    chapters: &[(i64, String, String, Option<i64>, Vec<crate::ydoc::ChapterBlock>)], // (chapter_id, title, subtitle, chapter_image_id, blocks)
     back_pages: &[FormatPage],
     book_title: &str,
     author_name: &str,
     series_name: &str,
     series_number: &str,
+    conn: &Connection,
 ) -> (String, Vec<String>, ImageMap) {
     let mut doc = String::new();
     let mut section_ids: Vec<String> = Vec::new();
@@ -1502,11 +1502,11 @@ fn build_typst_markup(
         .get("keep_with_content")
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
-    let break_image_data = breaks
-        .get("image_data")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+    let break_image_src: String = breaks
+        .get("image_id")
+        .and_then(|v| v.as_i64())
+        .map(|id| format!("iwe-image://{}", id))
+        .unwrap_or_default();
     let break_image_width_pct = breaks
         .get("image_width_pct")
         .and_then(|v| v.as_f64())
@@ -1724,7 +1724,7 @@ fn build_typst_markup(
             let sid = format!("iwe-fp-{}", page.id);
             emit_anchor(&mut doc, &sid);
             section_ids.push(sid);
-            doc.push_str(&build_front_matter_page(page, &mut images, &body_font, body_size_pt));
+            doc.push_str(&build_front_matter_page(page, &mut images, &body_font, body_size_pt, conn));
             doc.push_str("#pagebreak()\n\n");
         }
     }
@@ -1770,13 +1770,13 @@ fn build_typst_markup(
     // Chapter image settings
     let img_enabled = ch_head.get("image_enabled").and_then(|v| v.as_bool()).unwrap_or(false);
     let img_individual = ch_head.get("image_individual").and_then(|v| v.as_bool()).unwrap_or(true);
-    let img_default = ch_head.get("image_default").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let img_default_id = ch_head.get("image_default_id").and_then(|v| v.as_i64());
     let img_position = ch_head.get("image_position").and_then(|v| v.as_str()).unwrap_or("below_heading").to_string();
     let img_width_pct = ch_head.get("image_width_pct").and_then(|v| v.as_f64()).unwrap_or(50.0);
     let img_align = ch_head.get("image_align").and_then(|v| v.as_str()).unwrap_or("center").to_string();
     let img_light_text = ch_head.get("image_light_text").and_then(|v| v.as_bool()).unwrap_or(false);
 
-    for (i, (chapter_id, title, subtitle, chapter_image, blocks)) in chapters.iter().enumerate() {
+    for (i, (chapter_id, title, subtitle, chapter_image_id, blocks)) in chapters.iter().enumerate() {
         // Page break / start behavior
         if i > 0 {
             let start_on = ch_head.get("start_on").and_then(|v| v.as_str()).unwrap_or("any");
@@ -1793,25 +1793,23 @@ fn build_typst_markup(
 
         let escaped_title = escape_typst(title);
 
-        // Resolve which image to use for this chapter
-        let ch_img_data = if img_enabled {
-            if img_individual && !chapter_image.is_empty() {
-                chapter_image.as_str()
-            } else if !img_individual && !img_default.is_empty() {
-                img_default.as_str()
-            } else {
-                ""
-            }
+        // Resolve which image id to use for this chapter — per-chapter override
+        // when enabled, else the profile default.
+        let ch_img_id: Option<i64> = if img_enabled {
+            if img_individual { *chapter_image_id } else { img_default_id }
         } else {
-            ""
+            None
         };
+        let ch_img_uri: String = ch_img_id
+            .map(|id| format!("iwe-image://{}", id))
+            .unwrap_or_default();
 
         // Helper: emit the chapter image at a given position
         let emit_img = |doc: &mut String, images: &mut ImageMap, pos: &str| -> bool {
-            if ch_img_data.is_empty() || img_position != pos {
+            if ch_img_uri.is_empty() || img_position != pos {
                 return false;
             }
-            if let Some((path, _ext)) = ingest_image(ch_img_data, images) {
+            if let Some((path, _ext)) = ingest_image(&ch_img_uri, images, conn) {
                 let w = img_width_pct.clamp(1.0, 100.0);
                 doc.push_str(&format!("#align({})[#image(\"{}\", width: {}%)]\n#v(0.5em)\n",
                     img_align, path, w));
@@ -1821,9 +1819,9 @@ fn build_typst_markup(
         };
 
         // Resolve cover image path early (needed before the heading block)
-        let cover_img_path: Option<String> = if !ch_img_data.is_empty() &&
+        let cover_img_path: Option<String> = if !ch_img_uri.is_empty() &&
             (img_position == "dedicated_page" || img_position == "cover_heading") {
-            ingest_image(ch_img_data, &mut images).map(|(path, _)| path)
+            ingest_image(&ch_img_uri, &mut images, conn).map(|(path, _)| path)
         } else {
             None
         };
@@ -1954,9 +1952,10 @@ fn build_typst_markup(
                         break_space_above_em,
                         break_space_below_em,
                         break_keep_with_content,
-                        &break_image_data,
+                        &break_image_src,
                         break_image_width_pct,
                         &mut images,
+                        conn,
                     );
                     next_no_indent = true;
                     if apply_after_breaks {
@@ -2011,7 +2010,7 @@ fn build_typst_markup(
             let sid = format!("iwe-fp-{}", page.id);
             emit_anchor(&mut doc, &sid);
             section_ids.push(sid);
-            doc.push_str(&build_front_matter_page(page, &mut images, &body_font, body_size_pt));
+            doc.push_str(&build_front_matter_page(page, &mut images, &body_font, body_size_pt, conn));
             doc.push_str("#pagebreak()\n\n");
         }
     }
@@ -2248,10 +2247,10 @@ pub fn compile_preview(
 
     // 2. Y.Doc extraction — structured blocks with inline formatting preserved
     let t = Instant::now();
-    let mut chapters: Vec<(i64, String, String, String, Vec<crate::ydoc::ChapterBlock>)> = Vec::new();
+    let mut chapters: Vec<(i64, String, String, Option<i64>, Vec<crate::ydoc::ChapterBlock>)> = Vec::new();
     for ch in &chapters_raw {
         let blocks = ydoc::extract_chapter_blocks_from_bytes(&ch.content);
-        chapters.push((ch.id, ch.title.clone(), ch.subtitle.clone(), ch.chapter_image.clone(), blocks));
+        chapters.push((ch.id, ch.title.clone(), ch.subtitle.clone(), ch.chapter_image_id, blocks));
     }
     let ydoc_extract_ms = t.elapsed().as_secs_f64() * 1000.0;
     let chapter_count = chapters.len();
@@ -2275,7 +2274,7 @@ pub fn compile_preview(
 
     // 3. Markup generation
     let t = Instant::now();
-    let (markup, section_ids, images) = build_typst_markup(&profile, &front, &chapters, &back, &book_title, &author_name, &series_name, &series_number);
+    let (markup, section_ids, images) = build_typst_markup(&profile, &front, &chapters, &back, &book_title, &author_name, &series_name, &series_number, conn);
     let markup_build_ms = t.elapsed().as_secs_f64() * 1000.0;
     let markup_len = markup.len();
 
