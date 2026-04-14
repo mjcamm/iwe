@@ -50,3 +50,10 @@ sha2 = "0.10"
 default = []
 semantic = ["dep:ort", "dep:tokenizers"]
 format = ["dep:typst", "dep:typst-pdf", "dep:typst-svg", "dep:typst-kit"]
+
+# Optimize all dependencies even in dev mode. Our own code stays at opt-level=0
+# (fast incremental builds), but pure-Rust deps like `image`, `typst`, `ort`,
+# and `yrs` were 10-50× slower than release without this. Image downscale
+# went from ~10s/image to ~200ms/image just by flipping this on.
+[profile.dev.package."*"]
+opt-level = 3

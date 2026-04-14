@@ -13,12 +13,14 @@
     deleteKanbanColumn, reorderKanbanColumns,
     getAllKanbanCards, addKanbanCard, updateKanbanCard,
     deleteKanbanCard, moveKanbanCard, reorderKanbanCards,
+    getSettings,
   } from '$lib/db.js';
   import KanbanCardModal from '$lib/components/KanbanCardModal.svelte';
 
   let board = $state('chapters'); // 'chapters' | 'entities' | 'freeform'
   let columns = $state([]);
   let loading = $state(true);
+  let truncateCards = $state(false);
   let modalCard = $state(null);
   let modalColumnId = $state(null);
   let modalIsNew = $state(false);
@@ -68,7 +70,13 @@
     grabbing = false;
   }
 
-  onMount(() => { loadBoard(); });
+  onMount(async () => {
+    try {
+      const s = await getSettings();
+      truncateCards = !!s.kanbanTruncateCards;
+    } catch {}
+    loadBoard();
+  });
 
   $effect(() => { const _b = board; loadBoard(); });
 
@@ -447,7 +455,7 @@
             onfinalize={e => handleCardFinalize(col.id, e)}>
             {#each col.items as item (item.id)}
               <div class="card" animate:flip={{ duration: flipDurationMs }} onclick={() => openCard(item, col.id)}>
-                <div class="card-text">{truncate(item.description || item.text) || '(empty)'}</div>
+                <div class="card-text" class:card-text-truncated={truncateCards}>{(truncateCards ? truncate(item.description || item.text) : (item.description || item.text)) || '(empty)'}</div>
               </div>
             {/each}
           </div>
@@ -683,8 +691,10 @@
   .card-text {
     font-family: 'Libre Baskerville', Georgia, serif; font-size: 0.88rem;
     color: #3d3a37; line-height: 1.5;
-    display: -webkit-box; -webkit-line-clamp: 4;
-    -webkit-box-orient: vertical; overflow: hidden;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  .card-text-truncated {
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
 
   .add-card-btn {

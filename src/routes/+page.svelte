@@ -18,6 +18,7 @@
   let spellLang = $state('en_US');
   let semanticIndexDelay = $state(30);
   let typewriterMode = $state(false);
+  let kanbanTruncateCards = $state(false);
   let backupInterval = $state(60);
   let formatUnit = $state('in');
   let uiScale = $state('1');
@@ -82,6 +83,9 @@
     if (settings.typewriterMode !== undefined) {
       typewriterMode = settings.typewriterMode;
     }
+    if (settings.kanbanTruncateCards !== undefined) {
+      kanbanTruncateCards = settings.kanbanTruncateCards;
+    }
     if (settings.backupInterval !== undefined) {
       backupInterval = settings.backupInterval;
       try { await setSpellLanguage(spellLang); } catch {}
@@ -130,6 +134,13 @@
     typewriterMode = e.target.checked;
     const settings = await getSettings();
     settings.typewriterMode = typewriterMode;
+    await saveSettings(settings);
+  }
+
+  async function handleKanbanTruncateToggle(e) {
+    kanbanTruncateCards = e.target.checked;
+    const settings = await getSettings();
+    settings.kanbanTruncateCards = kanbanTruncateCards;
     await saveSettings(settings);
   }
 
@@ -357,6 +368,15 @@
               <input class="settings-checkbox" type="checkbox" checked={typewriterMode} onchange={handleTypewriterToggle} />
             </div>
             <p class="settings-hint">Keeps the cursor vertically centered on screen as you type, like a typewriter. The page scrolls to keep your writing position in the middle of the editor.</p>
+          </div>
+
+          <div class="settings-section">
+            <h3 class="settings-heading">Kanban</h3>
+            <div class="settings-row">
+              <label class="settings-label">Show first line only on cards</label>
+              <input class="settings-checkbox" type="checkbox" checked={kanbanTruncateCards} onchange={handleKanbanTruncateToggle} />
+            </div>
+            <p class="settings-hint">When on, kanban cards show only the first line of their text, truncated to fit. When off (the default), the whole card contents are shown.</p>
           </div>
 
           <div class="settings-section">

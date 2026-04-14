@@ -4,6 +4,18 @@
   let editText = $state('');
   let textareaEl = $state(null);
   let confirmingDelete = $state(false);
+  let expandedPlanningId = $state(null);
+
+  function truncateFirstLine(text, max = 80) {
+    if (!text) return '';
+    const firstLine = text.split('\n')[0];
+    if (firstLine.length <= max) return firstLine;
+    return firstLine.slice(0, max).trim() + '...';
+  }
+
+  function togglePlanning(id) {
+    expandedPlanningId = expandedPlanningId === id ? null : id;
+  }
 
   // When activeNoteId changes, load that note's text and reset delete confirm
   $effect(() => {
@@ -128,12 +140,17 @@
           </div>
           <div class="notes-list">
             {#each planningNotes as pn (pn.id)}
-              <div class="planning-note-item">
+              {@const expanded = expandedPlanningId === pn.id}
+              <button class="planning-note-item" class:expanded onclick={() => togglePlanning(pn.id)}>
                 <div class="note-item-color" style="background: rgba(45, 106, 94, 0.5);"></div>
                 <div class="note-item-content">
-                  <span class="note-item-text">{pn.description ? (pn.description.length > 80 ? pn.description.slice(0, 80) + '...' : pn.description) : '(empty)'}</span>
+                  {#if expanded && pn.description}
+                    <span class="note-item-full">{pn.description}</span>
+                  {:else}
+                    <span class="note-item-text">{truncateFirstLine(pn.description) || '(empty)'}</span>
+                  {/if}
                 </div>
-              </div>
+              </button>
             {/each}
           </div>
         </div>
@@ -358,12 +375,32 @@
   }
   .planning-note-item {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     gap: 0.5rem;
+    width: 100%;
     padding: 0.45rem 0.5rem;
+    background: none;
+    border: none;
     border-radius: var(--iwe-radius-sm, 4px);
     font-family: var(--iwe-font-ui);
     color: var(--iwe-text-secondary);
+    cursor: pointer;
+    text-align: left;
+    transition: background 0.12s;
+  }
+  .planning-note-item:hover {
+    background: var(--iwe-bg-hover, #f5f3f0);
+  }
+  .planning-note-item.expanded {
+    background: var(--iwe-bg-hover, #f5f3f0);
+  }
+  .note-item-full {
+    font-family: var(--iwe-font-prose);
+    font-size: 0.95rem;
+    line-height: 1.5;
+    color: var(--iwe-text);
+    white-space: pre-wrap;
+    word-break: break-word;
   }
   .planning-note-desc {
     font-size: 0.72rem;

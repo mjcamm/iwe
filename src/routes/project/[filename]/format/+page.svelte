@@ -1053,9 +1053,18 @@
       const epubBytes = await buildEpubForPreview();
       if (!epubBytes) { ebookGenerating = false; return; }
 
-      const arrayBuffer = new Uint8Array(epubBytes).buffer;
+      const tA = performance.now();
+      // exportEpub now returns a Uint8Array backed by the IPC ArrayBuffer.
+      // For the typical case (offset=0, full buffer), hand the buffer
+      // straight to epub.js; otherwise slice out the right window.
+      const arrayBuffer = (epubBytes.byteOffset === 0 && epubBytes.byteLength === epubBytes.buffer.byteLength)
+        ? epubBytes.buffer
+        : epubBytes.buffer.slice(epubBytes.byteOffset, epubBytes.byteOffset + epubBytes.byteLength);
+      const tB = performance.now();
       ebookBook = ePub(arrayBuffer);
+      const tC = performance.now();
       await ebookBook.ready;
+      const tD = performance.now();
 
       ebookRendition = ebookBook.renderTo(ebookViewerEl, {
         width: deviceDims.w,
@@ -1064,10 +1073,7 @@
         flow: 'paginated',
         allowScriptedContent: true,
       });
-
-      // Generate global locations so page numbers work across the whole book
-      await ebookBook.locations.generate(1024);
-      ebookTotalPages = ebookBook.locations.length() || 1;
+      const tE = performance.now();
 
       ebookRendition.on('relocated', (location) => {
         if (!location?.start) return;
@@ -1077,7 +1083,39 @@
         }
       });
 
+      // Display first — this is what the user is waiting for.
       await ebookRendition.display();
+      const tF = performance.now();
+
+      // Then build the global location index in the background. Paginating
+      // the whole book takes ~1s+ for a normal manuscript and isn't needed
+      // until the user wants accurate page numbers. Until it resolves,
+      // ebookTotalPages stays at 1 and the indicator just shows the
+      // current page; once it lands, the readout updates.
+      ebookTotalPages = 1;
+      const bookRef = ebookBook;
+      bookRef.locations.generate(1024).then(() => {
+        // Guard against a newer render having replaced ebookBook while
+        // we were busy paginating.
+        if (ebookBook !== bookRef) return;
+        ebookTotalPages = bookRef.locations.length() || 1;
+        // Recompute current page now that locations exist.
+        const loc = ebookRendition?.currentLocation?.();
+        if (loc?.start?.cfi) {
+          const idx = bookRef.locations.locationFromCfi(loc.start.cfi);
+          if (idx >= 0) ebookCurrentPage = idx + 1;
+        }
+        console.log(`[ebook] locations ready: ${ebookTotalPages} locs (deferred)`);
+      }).catch((e) => console.warn('[ebook] locations.generate failed:', e));
+
+      console.log(
+        `[ebook] render timing: arraybuffer=${(tB-tA).toFixed(0)}ms ` +
+        `ePub()=${(tC-tB).toFixed(0)}ms ` +
+        `ready=${(tD-tC).toFixed(0)}ms ` +
+        `renderTo=${(tE-tD).toFixed(0)}ms ` +
+        `display=${(tF-tE).toFixed(0)}ms ` +
+        `(locations deferred) | post-export total=${(tF-tA).toFixed(0)}ms`
+      );
     } catch (e) {
       console.error('[format] ebook preview failed:', e);
     } finally {
@@ -1197,16 +1235,20 @@
 
     rendering = true;
     renderError = null;
+    const tIpcStart = performance.now();
     try {
       const result = await compilePreview(activeProfileId);
+      const tIpcEnd = performance.now();
       pageCount = result.page_count;
       lastTiming = result.timing;
       sectionPages = result.section_pages || {};
       compileGeneration++; // bust img cache
       loadedPages = new Set(); // reset — pages will be loaded lazily by observer
 
+      const wallMs = tIpcEnd - tIpcStart;
+      const ipcOverhead = wallMs - result.timing.total_ms;
       console.log(
-        `[format] Compile: ${result.timing.total_ms.toFixed(0)}ms | ` +
+        `[format] Compile: wall=${wallMs.toFixed(0)}ms (rust=${result.timing.total_ms.toFixed(0)}ms ipc=${ipcOverhead.toFixed(0)}ms) | ` +
         `db:${result.timing.db_load_ms.toFixed(0)} ydoc:${result.timing.ydoc_extract_ms.toFixed(0)} ` +
         `markup:${result.timing.markup_build_ms.toFixed(0)} compile:${result.timing.typst_compile_ms.toFixed(0)} | ` +
         `${result.page_count} pages, ${result.timing.chapter_count} chapters`
@@ -1606,12 +1648,39 @@
     TextAlign.configure({ types: ['paragraph'] }),
   ];
 
+  // Cache of per-chapter HTML keyed by (id, updated_at, byte length).
+  //
+  // SAFETY: every chapter content write goes through SQL that bumps
+  // `updated_at` (see UPDATE chapters statements in db.rs). The cached
+  // value depends purely on chapter.content — no settings, no time, no
+  // side state — so any change that could affect the HTML also changes
+  // the key. Title/subtitle/settings saves also bump updated_at, which
+  // over-invalidates harmlessly. Belt-and-suspenders: byte length is in
+  // the key too, so even a same-second save with different content can't
+  // collide. The format page reloads chapters via getChapters() on mount,
+  // picking up any external edits.
+  //
+  // Module-level via the function closure — survives across compiles
+  // within a session, dies on page unload (which is fine).
+  const _chapterHtmlCache = new Map();
+
+  function chapterHtmlKey(chapter) {
+    const len = chapter?.content?.length ?? 0;
+    return `${chapter.id}:${chapter.updated_at}:${len}`;
+  }
+
   function chapterToHtml(chapter) {
+    const key = chapterHtmlKey(chapter);
+    const cached = _chapterHtmlCache.get(chapter.id);
+    if (cached && cached.key === key) return cached.html;
+
     try {
       const { doc } = createChapterDoc(chapter.content);
       const json = yDocToProsemirrorJSON(doc, 'prosemirror');
       destroyDoc(doc);
-      return generateHTML(json, chapterHtmlExtensions);
+      const html = generateHTML(json, chapterHtmlExtensions);
+      _chapterHtmlCache.set(chapter.id, { key, html });
+      return html;
     } catch (e) {
       console.error('[format] chapterToHtml failed for chapter', chapter?.id, chapter?.title, e);
       return '<p></p>';
@@ -2042,10 +2111,9 @@
     exporting = true;
     exportError = null;
     try {
-      // Ensure we have a fresh compile
-      if (!pageCount) await compileAndShow();
-
-      const pdfBytes = await exportFormatPdf();
+      // exportFormatPdf does its own full-quality recompile internally,
+      // so no compileAndShow() needed first.
+      const pdfBytes = await exportFormatPdf(activeProfileId);
       const arr = pdfBytes instanceof Uint8Array ? pdfBytes : new Uint8Array(pdfBytes);
 
       // Save dialog

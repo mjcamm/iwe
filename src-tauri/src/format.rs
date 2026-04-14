@@ -231,6 +231,7 @@ fn emit_scene_break(
     image_width_pct: f64,
     images: &mut ImageMap,
     conn: &Connection,
+    preview_quality: bool,
 ) {
     // The content of the break depends on the style
     let inner: String = match style {
@@ -244,7 +245,7 @@ fn emit_scene_break(
             if image_src.is_empty() {
                 // No image uploaded yet — fall back to dinkus
                 "\\* \\* \\*".to_string()
-            } else if let Some((path, _ext)) = ingest_image(image_src, images, conn) {
+            } else if let Some((path, _ext)) = ingest_image(image_src, images, conn, preview_quality) {
                 let w = image_width_pct.clamp(1.0, 100.0);
                 format!("#image(\"{}\", width: {}%)", path, w)
             } else {
@@ -830,7 +831,12 @@ type ImageMap = std::collections::HashMap<String, Vec<u8>>;
 /// Supports paragraphs, headings, text marks (bold/italic/underline/strike/font-size),
 /// text alignment, and embedded images.
 /// Image bytes are added to `images` and referenced from markup as virtual paths.
-fn pm_json_to_typst(json_str: &str, images: &mut ImageMap, conn: &Connection) -> Option<String> {
+fn pm_json_to_typst(
+    json_str: &str,
+    images: &mut ImageMap,
+    conn: &Connection,
+    preview_quality: bool,
+) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(json_str).ok()?;
     if !value.is_object() {
         return None;
@@ -838,13 +844,19 @@ fn pm_json_to_typst(json_str: &str, images: &mut ImageMap, conn: &Connection) ->
     let mut out = String::new();
     if let Some(content) = value.get("content").and_then(|c| c.as_array()) {
         for node in content {
-            convert_pm_node(node, &mut out, images, conn);
+            convert_pm_node(node, &mut out, images, conn, preview_quality);
         }
     }
     Some(out)
 }
 
-fn convert_pm_node(node: &serde_json::Value, out: &mut String, images: &mut ImageMap, conn: &Connection) {
+fn convert_pm_node(
+    node: &serde_json::Value,
+    out: &mut String,
+    images: &mut ImageMap,
+    conn: &Connection,
+    preview_quality: bool,
+) {
     let node_type = node.get("type").and_then(|t| t.as_str()).unwrap_or("");
     let children = node.get("content").and_then(|c| c.as_array());
 
@@ -902,7 +914,7 @@ fn convert_pm_node(node: &serde_json::Value, out: &mut String, images: &mut Imag
                 .and_then(|w| w.as_str());
             if let Some(id) = image_id {
                 let uri = format!("iwe-image://{}", id);
-                if let Some((path, _ext)) = ingest_image(&uri, images, conn) {
+                if let Some((path, _ext)) = ingest_image(&uri, images, conn, preview_quality) {
                     let width_attr = match width {
                         Some(w) if !w.is_empty() => format!(", width: {}", normalize_width(w)),
                         _ => String::new(),
@@ -918,7 +930,7 @@ fn convert_pm_node(node: &serde_json::Value, out: &mut String, images: &mut Imag
             // Unknown node — recurse into children
             if let Some(children) = children {
                 for child in children {
-                    convert_pm_node(child, out, images, conn);
+                    convert_pm_node(child, out, images, conn, preview_quality);
                 }
             }
         }
@@ -932,9 +944,23 @@ fn convert_pm_node(node: &serde_json::Value, out: &mut String, images: &mut Imag
 /// Non-URI sources (legacy data: URLs, remote http:// images, etc.) are
 /// ignored — all image references in this codebase go through the
 /// `image_blobs` table after the migration.
-fn ingest_image(src: &str, images: &mut ImageMap, conn: &Connection) -> Option<(String, String)> {
+fn ingest_image(
+    src: &str,
+    images: &mut ImageMap,
+    conn: &Connection,
+    preview_quality: bool,
+) -> Option<(String, String)> {
     let id = parse_iwe_image_uri(src)?;
-    let (bytes, mime) = crate::images::get_image_blob(conn, id).ok().flatten()?;
+
+    // Preview mode reads the pre-generated downscaled blob (created at
+    // upload time in `images::upload_image`), falling back to the original
+    // when no preview was stored. Full-quality mode always uses the original.
+    let (bytes, mime) = if preview_quality {
+        crate::images::get_image_preview_or_original(conn, id).ok().flatten()?
+    } else {
+        crate::images::get_image_blob(conn, id).ok().flatten()?
+    };
+
     let ext = ext_for_mime(&mime);
     let hash = simple_hash(&bytes);
     let path = format!("/iwe-img-{:x}.{}", hash, ext);
@@ -1066,13 +1092,18 @@ fn apply_pm_marks(text: &str, marks: Option<&serde_json::Value>) -> String {
 
 /// Render a page's content field — JSON if it parses, otherwise plain text.
 /// Any embedded images are added to the shared image map.
-fn render_page_content(content: &str, images: &mut ImageMap, conn: &Connection) -> String {
+fn render_page_content(
+    content: &str,
+    images: &mut ImageMap,
+    conn: &Connection,
+    preview_quality: bool,
+) -> String {
     if content.trim().is_empty() {
         return String::new();
     }
     // Try ProseMirror JSON first
     if content.trim_start().starts_with('{') {
-        if let Some(typst) = pm_json_to_typst(content, images, conn) {
+        if let Some(typst) = pm_json_to_typst(content, images, conn, preview_quality) {
             return typst;
         }
     }
@@ -1229,7 +1260,12 @@ impl Default for TocSettings {
 /// For single pages, renders a full-bleed image with zero margins.
 /// For spreads, emits two full-bleed pages — left half then right half —
 /// using Typst clipping (no Rust-side image manipulation needed).
-fn build_map_page(content: &str, images: &mut ImageMap, conn: &Connection) -> Option<String> {
+fn build_map_page(
+    content: &str,
+    images: &mut ImageMap,
+    conn: &Connection,
+    preview_quality: bool,
+) -> Option<String> {
     let trimmed = content.trim();
     if trimmed.is_empty() || !trimmed.starts_with('{') {
         return None;
@@ -1240,7 +1276,7 @@ fn build_map_page(content: &str, images: &mut ImageMap, conn: &Connection) -> Op
     let sizing = val.get("sizing").and_then(|v| v.as_str()).unwrap_or("fit-width");
     let gutter_overlap_in = val.get("gutter_overlap_in").and_then(|v| v.as_f64()).unwrap_or(0.0);
 
-    let (img_path, _ext) = ingest_image(&format!("iwe-image://{}", image_id), images, conn)?;
+    let (img_path, _ext) = ingest_image(&format!("iwe-image://{}", image_id), images, conn, preview_quality)?;
 
     let mut out = String::new();
 
@@ -1304,7 +1340,14 @@ fn build_map_page(content: &str, images: &mut ImageMap, conn: &Connection) -> Op
 /// Build a Typst markup string for a front/back matter page.
 /// If the page has rich content (PM JSON), render it directly.
 /// Otherwise apply role-based defaults using the title.
-fn build_front_matter_page(page: &FormatPage, images: &mut ImageMap, body_font: &str, body_size_pt: f64, conn: &Connection) -> String {
+fn build_front_matter_page(
+    page: &FormatPage,
+    images: &mut ImageMap,
+    body_font: &str,
+    body_size_pt: f64,
+    conn: &Connection,
+    preview_quality: bool,
+) -> String {
     let mut out = String::new();
 
     // TOC pages store settings JSON in content, not ProseMirror — handle separately.
@@ -1362,14 +1405,14 @@ fn build_front_matter_page(page: &FormatPage, images: &mut ImageMap, body_font: 
 
     // Map pages: full-bleed image, optionally split across a two-page spread.
     if page.page_role == "map" {
-        if let Some(map_markup) = build_map_page(&page.content, images, conn) {
+        if let Some(map_markup) = build_map_page(&page.content, images, conn, preview_quality) {
             return map_markup;
         }
         // No image — fall through to blank page
         return out;
     }
 
-    let content_typst = render_page_content(&page.content, images, conn);
+    let content_typst = render_page_content(&page.content, images, conn, preview_quality);
     let has_content = !content_typst.trim().is_empty();
 
     // If user has authored content, render it directly without role-based wrapping.
@@ -1418,6 +1461,7 @@ fn build_typst_markup(
     series_name: &str,
     series_number: &str,
     conn: &Connection,
+    preview_quality: bool,
 ) -> (String, Vec<String>, ImageMap) {
     let mut doc = String::new();
     let mut section_ids: Vec<String> = Vec::new();
@@ -1724,7 +1768,7 @@ fn build_typst_markup(
             let sid = format!("iwe-fp-{}", page.id);
             emit_anchor(&mut doc, &sid);
             section_ids.push(sid);
-            doc.push_str(&build_front_matter_page(page, &mut images, &body_font, body_size_pt, conn));
+            doc.push_str(&build_front_matter_page(page, &mut images, &body_font, body_size_pt, conn, preview_quality));
             doc.push_str("#pagebreak()\n\n");
         }
     }
@@ -1809,7 +1853,7 @@ fn build_typst_markup(
             if ch_img_uri.is_empty() || img_position != pos {
                 return false;
             }
-            if let Some((path, _ext)) = ingest_image(&ch_img_uri, images, conn) {
+            if let Some((path, _ext)) = ingest_image(&ch_img_uri, images, conn, preview_quality) {
                 let w = img_width_pct.clamp(1.0, 100.0);
                 doc.push_str(&format!("#align({})[#image(\"{}\", width: {}%)]\n#v(0.5em)\n",
                     img_align, path, w));
@@ -1821,7 +1865,7 @@ fn build_typst_markup(
         // Resolve cover image path early (needed before the heading block)
         let cover_img_path: Option<String> = if !ch_img_uri.is_empty() &&
             (img_position == "dedicated_page" || img_position == "cover_heading") {
-            ingest_image(&ch_img_uri, &mut images, conn).map(|(path, _)| path)
+            ingest_image(&ch_img_uri, &mut images, conn, preview_quality).map(|(path, _)| path)
         } else {
             None
         };
@@ -1956,6 +2000,7 @@ fn build_typst_markup(
                         break_image_width_pct,
                         &mut images,
                         conn,
+                        preview_quality,
                     );
                     next_no_indent = true;
                     if apply_after_breaks {
@@ -2010,7 +2055,7 @@ fn build_typst_markup(
             let sid = format!("iwe-fp-{}", page.id);
             emit_anchor(&mut doc, &sid);
             section_ids.push(sid);
-            doc.push_str(&build_front_matter_page(page, &mut images, &body_font, body_size_pt, conn));
+            doc.push_str(&build_front_matter_page(page, &mut images, &body_font, body_size_pt, conn, preview_quality));
             doc.push_str("#pagebreak()\n\n");
         }
     }
@@ -2090,13 +2135,31 @@ use std::time::Instant;
 use serde::Serialize;
 
 fn compile_document(markup: &str, images: ImageMap, cache: &FontCache, packages: Arc<PackageStorage>) -> Result<PagedDocument, String> {
+    let t_dump = Instant::now();
     // Always dump markup for debugging — helps diagnose rendering issues
     // even when compilation succeeds.
     let dump_path = std::env::temp_dir().join("iwe_typst_debug.typ");
     let _ = std::fs::write(&dump_path, markup);
+    let dump_ms = t_dump.elapsed().as_secs_f64() * 1000.0;
 
+    let image_count = images.len();
+    let image_bytes: usize = images.values().map(|v| v.len()).sum();
+
+    let t_world = Instant::now();
     let world = IweWorld::new(markup.to_string(), images, cache, packages);
+    let world_ms = t_world.elapsed().as_secs_f64() * 1000.0;
+
+    let t_compile = Instant::now();
     let warned = typst::compile::<PagedDocument>(&world);
+    let compile_ms = t_compile.elapsed().as_secs_f64() * 1000.0;
+
+    log::info!(
+        "[format] compile_document: dump={:.0}ms world={:.0}ms typst::compile={:.0}ms | {} images ({:.1}MB) markup={}KB",
+        dump_ms, world_ms, compile_ms,
+        image_count, image_bytes as f64 / 1024.0 / 1024.0,
+        markup.len() / 1024,
+    );
+
     match warned.output {
         Ok(doc) => Ok(doc),
         Err(diagnostics) => {
@@ -2199,12 +2262,13 @@ pub struct CompileResult {
 
 // ---- Tauri commands ----
 
-/// Compile the document and cache it. Returns page count + timing. No SVGs yet.
-#[tauri::command]
-pub fn compile_preview(
-    state: tauri::State<'_, AppState>,
-    format_state: tauri::State<'_, FormatState>,
+/// Internal compile entrypoint. Both `compile_preview` (preview_quality=true)
+/// and `export_format_pdf` (preview_quality=false) call this.
+fn compile_internal(
+    state: &AppState,
+    format_state: &FormatState,
     profile_id: i64,
+    preview_quality: bool,
 ) -> Result<CompileResult, String> {
     let total_start = Instant::now();
 
@@ -2274,7 +2338,7 @@ pub fn compile_preview(
 
     // 3. Markup generation
     let t = Instant::now();
-    let (markup, section_ids, images) = build_typst_markup(&profile, &front, &chapters, &back, &book_title, &author_name, &series_name, &series_number, conn);
+    let (markup, section_ids, images) = build_typst_markup(&profile, &front, &chapters, &back, &book_title, &author_name, &series_name, &series_number, conn, preview_quality);
     let markup_build_ms = t.elapsed().as_secs_f64() * 1000.0;
     let markup_len = markup.len();
 
@@ -2287,19 +2351,27 @@ pub fn compile_preview(
     let page_count = document.pages.len();
 
     // 5. Resolve section labels to page numbers
+    let t = Instant::now();
     let section_pages = resolve_section_pages(&document, &section_ids);
+    let section_resolve_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+    // 6. Cache the compiled document
+    let t = Instant::now();
+    {
+        let mut doc_guard = format_state.document.lock().map_err(|e| e.to_string())?;
+        *doc_guard = Some(document);
+    }
+    let cache_store_ms = t.elapsed().as_secs_f64() * 1000.0;
 
     let total_ms = total_start.elapsed().as_secs_f64() * 1000.0;
 
     log::info!(
-        "[format] compile: {}ms total | db:{}ms ydoc:{}ms markup:{}ms compile:{}ms | {} pages, {} chapters, {} sections resolved, {}KB markup",
+        "[format] compile ({}): {}ms total | db:{}ms ydoc:{}ms markup:{}ms compile:{}ms section_resolve:{}ms cache_store:{}ms | {} pages, {} chapters, {} sections resolved, {}KB markup",
+        if preview_quality { "preview" } else { "full" },
         total_ms as u32, db_load_ms as u32, ydoc_extract_ms as u32, markup_build_ms as u32,
-        typst_compile_ms as u32, page_count, chapter_count, section_pages.len(), markup_len / 1024,
+        typst_compile_ms as u32, section_resolve_ms as u32, cache_store_ms as u32,
+        page_count, chapter_count, section_pages.len(), markup_len / 1024,
     );
-
-    // Cache the compiled document
-    let mut doc_guard = format_state.document.lock().map_err(|e| e.to_string())?;
-    *doc_guard = Some(document);
 
     Ok(CompileResult {
         page_count,
@@ -2315,6 +2387,20 @@ pub fn compile_preview(
         },
         section_pages,
     })
+}
+
+/// Compile the document and cache it. Returns page count + timing. No SVGs yet.
+///
+/// Runs in preview quality: source images are downscaled (and cached) so the
+/// Typst layout pass and per-page SVG output stay snappy. The PDF export
+/// command (`export_format_pdf`) reruns this as a full-quality compile.
+#[tauri::command]
+pub fn compile_preview(
+    state: tauri::State<'_, AppState>,
+    format_state: tauri::State<'_, FormatState>,
+    profile_id: i64,
+) -> Result<CompileResult, String> {
+    compile_internal(state.inner(), format_state.inner(), profile_id, true)
 }
 
 /// Walk the introspector and resolve each section label to a 0-based page index.
@@ -2357,20 +2443,43 @@ pub fn list_system_fonts(
 
 /// Export a single page to SVG from the cached document (called by URI protocol handler).
 pub fn render_page_svg(format_state: &FormatState, page_index: usize) -> Result<String, String> {
+    let t_lock = Instant::now();
     let doc_guard = format_state.document.lock().map_err(|e| e.to_string())?;
     let document = doc_guard.as_ref().ok_or("No compiled document")?;
     let page = document.pages.get(page_index).ok_or("Page index out of range")?;
-    Ok(typst_svg::svg(page))
+    let lock_ms = t_lock.elapsed().as_secs_f64() * 1000.0;
+
+    let t_svg = Instant::now();
+    let svg = typst_svg::svg(page);
+    let svg_ms = t_svg.elapsed().as_secs_f64() * 1000.0;
+
+    log::info!(
+        "[format] render_page_svg p{}: lock={:.0}ms svg={:.0}ms ({:.0}KB)",
+        page_index, lock_ms, svg_ms, svg.len() as f64 / 1024.0,
+    );
+
+    Ok(svg)
 }
 
-/// Export the cached compiled document as a PDF.
-/// Returns the PDF bytes. The frontend handles the save dialog.
+/// Export the compiled document as a PDF.
+///
+/// Recompiles at full image quality before exporting — the cached
+/// `PagedDocument` is built at preview quality (downscaled images), which
+/// is fine for on-screen scrolling but not for a PDF the user wants to
+/// print. The full-quality recompile takes a few seconds but only happens
+/// when the user clicks Export.
 #[tauri::command]
 pub fn export_format_pdf(
+    state: tauri::State<'_, AppState>,
     format_state: tauri::State<'_, FormatState>,
+    profile_id: i64,
 ) -> Result<Vec<u8>, String> {
+    // Recompile at full quality. This replaces the cached document; the
+    // next preview compile will rebuild it at preview quality.
+    compile_internal(state.inner(), format_state.inner(), profile_id, false)?;
+
     let doc_guard = format_state.document.lock().map_err(|e| e.to_string())?;
-    let document = doc_guard.as_ref().ok_or("No compiled document. Preview must be loaded first.")?;
+    let document = doc_guard.as_ref().ok_or("No compiled document.")?;
 
     let options = typst_pdf::PdfOptions {
         ident: typst::foundations::Smart::Auto,
@@ -2441,7 +2550,7 @@ mod real {
     }
 
     #[tauri::command]
-    pub fn export_format_pdf() -> Result<Vec<u8>, String> {
+    pub fn export_format_pdf(_profile_id: i64) -> Result<Vec<u8>, String> {
         Err("Format features not enabled (build with --features format)".into())
     }
 }

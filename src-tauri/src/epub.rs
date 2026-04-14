@@ -333,7 +333,7 @@ fn build_page_html(page: &EpubPage, body: &str) -> String {
 pub fn export_epub(
     state: tauri::State<'_, AppState>,
     request: EpubExportRequest,
-) -> Result<Vec<u8>, String> {
+) -> Result<tauri::ipc::Response, String> {
     use std::time::Instant;
     let t_start = Instant::now();
 
@@ -387,15 +387,23 @@ pub fn export_epub(
 
     // Cover image (from the book_cover BLOB in the current project DB).
     // Cover is also run through compression when a preset is selected.
+    //
+    // We pass empty bytes to epub-builder so it registers the manifest entry
+    // without burning CPU on DEFLATE for an already-compressed image. The
+    // real bytes are written into the zip with `Stored` compression in
+    // `fix_opf_ids`. See `add_resource` loop below for the same trick.
+    let mut stored_replacements: HashMap<String, (Vec<u8>, String)> = HashMap::new();
     if let Some((ref bytes, ref mime)) = cover {
         let (cover_bytes, cover_mime) = match compress_params.as_ref() {
             Some(params) => compress_image(bytes, mime, params),
             None => (bytes.clone(), mime.clone()),
         };
         let ext = ext_for_mime(&cover_mime);
+        let cover_path = format!("cover.{}", ext);
         builder
-            .add_cover_image(format!("cover.{}", ext), &cover_bytes[..], cover_mime.as_str())
+            .add_cover_image(cover_path.clone(), &[][..], cover_mime.as_str())
             .map_err(|e| e.to_string())?;
+        stored_replacements.insert(format!("OEBPS/{}", cover_path), (cover_bytes, cover_mime));
     }
 
     let t_setup = t_start.elapsed();
@@ -425,10 +433,18 @@ pub fn export_epub(
     let total_image_bytes: usize = image_accumulator.values().map(|img| img.bytes.len()).sum();
     let image_count = image_accumulator.len();
 
+    // Pass empty bytes to register the manifest entry without DEFLATEing
+    // the image data. The real bytes are written `Stored` (no compression)
+    // inside `fix_opf_ids` — DEFLATE on already-compressed JPEG/PNG/WebP
+    // produces ~0% size reduction at huge CPU cost (~700ms per 4MB JPEG).
     for img in image_accumulator.values() {
         builder
-            .add_resource(img.path.as_str(), img.bytes.as_slice(), img.mime.as_str())
+            .add_resource(img.path.as_str(), &[][..], img.mime.as_str())
             .map_err(|e| e.to_string())?;
+        stored_replacements.insert(
+            format!("OEBPS/{}", img.path),
+            (img.bytes.clone(), img.mime.clone()),
+        );
     }
     let t_add_resources = t_start.elapsed();
 
@@ -490,7 +506,7 @@ pub fn export_epub(
     builder.generate(&mut output).map_err(|e| e.to_string())?;
     let t_generate = t_start.elapsed();
 
-    let result = fix_opf_ids(output);
+    let result = fix_opf_ids(output, &stored_replacements)?;
     let t_total = t_start.elapsed();
 
     log::info!(
@@ -509,19 +525,42 @@ pub fn export_epub(
         total_image_bytes as f64 / 1024.0 / 1024.0,
     );
 
-    result
+    // Return as a binary IPC Response. Without this, Tauri serializes
+    // Vec<u8> as a JSON number array (~5x bloat) and the frontend pays
+    // multi-second parse cost for a 30MB+ EPUB.
+    Ok(tauri::ipc::Response::new(result))
 }
 
 /// Unzip the generated EPUB in memory, patch `OEBPS/content.opf` to remove
 /// the buggy `id="epub-creator-0"` attribute from `<dc:language>`, and rezip.
 ///
+/// Performance: every non-OPF entry is copied via `raw_copy_file`, which
+/// writes the already-compressed bytes directly without decompressing or
+/// recompressing. Without this, 31MB of DEFLATE-compressed image bytes
+/// would round-trip through inflate+deflate just to patch one string in
+/// the OPF — that was the dominant cost (~13s on a 7-chapter test).
+///
 /// Preserves:
 ///   - file order (mimetype MUST stay first per EPUB spec)
 ///   - per-entry compression method (mimetype MUST remain STORED/uncompressed)
 ///   - all other file contents byte-for-byte
-fn fix_opf_ids(epub_bytes: Vec<u8>) -> Result<Vec<u8>, String> {
+fn fix_opf_ids(
+    epub_bytes: Vec<u8>,
+    stored_replacements: &HashMap<String, (Vec<u8>, String)>,
+) -> Result<Vec<u8>, String> {
+    use std::time::Instant;
+    let t_start = Instant::now();
+
     let reader = Cursor::new(&epub_bytes);
     let mut archive = zip::ZipArchive::new(reader).map_err(|e| format!("zip read: {}", e))?;
+    let t_open = t_start.elapsed();
+
+    let mut raw_copy_ms: f64 = 0.0;
+    let mut opf_ms: f64 = 0.0;
+    let mut stored_ms: f64 = 0.0;
+    let mut raw_copy_count: usize = 0;
+    let mut stored_count: usize = 0;
+    let mut stored_bytes: usize = 0;
 
     let mut out: Vec<u8> = Vec::with_capacity(epub_bytes.len());
     {
@@ -529,38 +568,76 @@ fn fix_opf_ids(epub_bytes: Vec<u8>) -> Result<Vec<u8>, String> {
         let mut writer = zip::ZipWriter::new(writer_cursor);
 
         for i in 0..archive.len() {
-            let mut file = archive
+            let file = archive
                 .by_index(i)
                 .map_err(|e| format!("zip entry {}: {}", i, e))?;
             let name = file.name().to_string();
-            let compression = file.compression();
-            let options = zip::write::FileOptions::default().compression_method(compression);
 
-            let mut contents = Vec::new();
-            file.read_to_end(&mut contents)
-                .map_err(|e| format!("zip read entry {}: {}", name, e))?;
-
-            // Patch the OPF. Use a plain string replace — the bug is a
-            // literal hardcoded attribute in epub-builder's template, not
-            // a dynamic value we need to regex for.
-            if name == "OEBPS/content.opf" {
+            if let Some((bytes, _mime)) = stored_replacements.get(&name) {
+                // Image / cover entry — epub-builder wrote a 0-byte placeholder
+                // here. Replace with the real bytes using STORED (no DEFLATE);
+                // already-compressed image formats see ~0% gain from DEFLATE
+                // and waste hundreds of ms per MB.
+                let t_stored = Instant::now();
+                let options = zip::write::FileOptions::default()
+                    .compression_method(zip::CompressionMethod::Stored);
+                writer
+                    .start_file(&name, options)
+                    .map_err(|e| format!("zip write start {}: {}", name, e))?;
+                writer
+                    .write_all(bytes)
+                    .map_err(|e| format!("zip write data {}: {}", name, e))?;
+                stored_ms += t_stored.elapsed().as_secs_f64() * 1000.0;
+                stored_count += 1;
+                stored_bytes += bytes.len();
+            } else if name == "OEBPS/content.opf" {
+                // Decompress, patch, recompress. Tiny file (~kB), cost is negligible.
+                let t_opf = Instant::now();
+                let compression = file.compression();
+                let options = zip::write::FileOptions::default().compression_method(compression);
+                let mut contents = Vec::new();
+                let mut file = file;
+                file.read_to_end(&mut contents)
+                    .map_err(|e| format!("zip read entry {}: {}", name, e))?;
                 let text = String::from_utf8_lossy(&contents).into_owned();
                 let patched = text.replace(
                     r#"<dc:language id="epub-creator-0">"#,
                     "<dc:language>",
                 );
-                contents = patched.into_bytes();
+                let contents = patched.into_bytes();
+                writer
+                    .start_file(&name, options)
+                    .map_err(|e| format!("zip write start {}: {}", name, e))?;
+                writer
+                    .write_all(&contents)
+                    .map_err(|e| format!("zip write data {}: {}", name, e))?;
+                opf_ms += t_opf.elapsed().as_secs_f64() * 1000.0;
+            } else {
+                // Copy the raw compressed bytes byte-for-byte. No inflate/deflate.
+                let t_raw = Instant::now();
+                writer
+                    .raw_copy_file(file)
+                    .map_err(|e| format!("zip raw copy {}: {}", name, e))?;
+                raw_copy_ms += t_raw.elapsed().as_secs_f64() * 1000.0;
+                raw_copy_count += 1;
             }
-
-            writer
-                .start_file(&name, options)
-                .map_err(|e| format!("zip write start {}: {}", name, e))?;
-            writer
-                .write_all(&contents)
-                .map_err(|e| format!("zip write data {}: {}", name, e))?;
         }
 
+        let t_finish = Instant::now();
         writer.finish().map_err(|e| format!("zip finish: {}", e))?;
+        let finish_ms = t_finish.elapsed().as_secs_f64() * 1000.0;
+
+        log::info!(
+            "[epub] fix_opf breakdown: open={:.0}ms raw_copy={:.0}ms ({} entries) stored={:.0}ms ({} entries, {:.1}MB) opf_patch={:.0}ms finish={:.0}ms",
+            t_open.as_secs_f64() * 1000.0,
+            raw_copy_ms,
+            raw_copy_count,
+            stored_ms,
+            stored_count,
+            stored_bytes as f64 / 1024.0 / 1024.0,
+            opf_ms,
+            finish_ms,
+        );
     }
 
     Ok(out)

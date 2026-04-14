@@ -844,8 +844,8 @@ export async function compilePreview(profileId) {
   return invoke('compile_preview', { profileId });
 }
 
-export async function exportFormatPdf() {
-  return invoke('export_format_pdf');
+export async function exportFormatPdf(profileId) {
+  return invoke('export_format_pdf', { profileId });
 }
 
 // Run the Rust-side EPUB sanity checker on a byte buffer.
@@ -857,7 +857,10 @@ export async function validateEpubBytes(bytes) {
 }
 
 export async function exportEpub(request) {
-  return invoke('export_epub', { request });
+  // Returns an ArrayBuffer — the Rust command uses tauri::ipc::Response
+  // to send raw binary instead of a JSON-encoded number array.
+  const buf = await invoke('export_epub', { request });
+  return new Uint8Array(buf);
 }
 
 export async function listSystemFonts() {

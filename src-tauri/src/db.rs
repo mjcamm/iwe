@@ -489,10 +489,23 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             height INTEGER,
             byte_size INTEGER NOT NULL,
             hash TEXT NOT NULL UNIQUE,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            preview_data BLOB,
+            preview_mime TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_image_blobs_hash ON image_blobs(hash);",
     )?;
+
+    // Migration for older databases: add preview columns if missing.
+    let has_preview: bool = conn
+        .prepare("SELECT preview_data FROM image_blobs LIMIT 0")
+        .is_ok();
+    if !has_preview {
+        conn.execute_batch(
+            "ALTER TABLE image_blobs ADD COLUMN preview_data BLOB;
+             ALTER TABLE image_blobs ADD COLUMN preview_mime TEXT;",
+        )?;
+    }
 
     Ok(())
 }
